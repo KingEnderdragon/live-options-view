@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import requests
@@ -36,25 +36,53 @@ class TickersSnapshot:
     snapshot_time: str
     feed_stale: bool
     prices: dict[str, float | None]
+    # Per-ticker carried-forward flag and originating source, e.g.
+    # collector.py republishing a last-known value with
+    # `stale=True, source="last-known"` when DXLink has no fresh reading, or
+    # switching a ticker between providers (e.g. "$TNX.X" on the DXLink path
+    # vs "^TNX" on a yfinance fallback -- which report the 10Y yield on
+    # *different scales*, value x10 vs the rate directly). A ticker absent
+    # from these dicts (or mapping to False/None) reports no flag either way.
+    # Defaulted (not just optional) so existing direct constructions of this
+    # dataclass -- e.g. in tests -- don't need updating just to compile.
+    stale: dict[str, bool] = field(default_factory=dict)
+    source: dict[str, str | None] = field(default_factory=dict)
 
     @classmethod
     def from_payload(cls, url: str, payload: dict[str, Any]) -> "TickersSnapshot":
         raw_prices = payload.get("prices") or {}
         prices: dict[str, float | None] = {}
+        stale: dict[str, bool] = {}
+        source: dict[str, str | None] = {}
         for ticker, entry in raw_prices.items():
-            price = entry.get("price") if isinstance(entry, dict) else None
+            is_dict = isinstance(entry, dict)
+            price = entry.get("price") if is_dict else None
             prices[ticker] = price
+            stale[ticker] = bool(entry.get("stale", False)) if is_dict else False
+            source[ticker] = entry.get("source") if is_dict else None
         return cls(
             url=url,
             timestamp=payload.get("timestamp", ""),
             snapshot_time=payload.get("snapshot_time", ""),
             feed_stale=bool(payload.get("feed_stale", False)),
             prices=prices,
+            stale=stale,
+            source=source,
         )
 
     def price(self, ticker: str) -> float | None:
         """The ticker's price, or `None` if it's absent or explicitly null."""
         return self.prices.get(ticker)
+
+    def is_stale(self, ticker: str) -> bool:
+        """True if `ticker`'s price is a carried-forward last-known value
+        rather than a fresh observation this cycle."""
+        return self.stale.get(ticker, False)
+
+    def source_of(self, ticker: str) -> str | None:
+        """Which provider `ticker`'s current price came from this cycle, or
+        `None` if unknown/absent."""
+        return self.source.get(ticker)
 
 
 class TickersReader:
