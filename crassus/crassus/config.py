@@ -24,6 +24,16 @@ SNAPSHOT_URL = os.environ.get(
     "https://pub-4d5c916b8cb74ffb8c0abd7dfadb02cf.r2.dev/intraday/latest.json",
 )
 
+# Free, public, unauthenticated multi-ticker board (10Y yield, USO crude
+# proxy, VIX, SMH, ...) republished into the same R2 bucket as the option
+# chain snapshot above, on the same ~60s cadence. Used by
+# strategies/macro_cross_market.py (crassus/tickers.py) for cross-market
+# macro signals; no separate credentials or data source needed.
+TICKERS_URL = os.environ.get(
+    "CRASSUS_TICKERS_URL",
+    "https://pub-4d5c916b8cb74ffb8c0abd7dfadb02cf.r2.dev/intraday/prices.json",
+)
+
 # Operator key that marks an account as a bot on the Worker. Registering with
 # this in an X-Bot-Registration-Key header puts the account in the `bot:` index
 # behind the public /api/bots roster (the site's Automated tab); registering
