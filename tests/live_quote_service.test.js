@@ -1,6 +1,7 @@
 const assert = require('node:assert/strict');
 const {
   LiveQuoteService, LiveQuotePoller, TickerStateStore, tickerSessionState, parseRetryAfter,
+  SHARE_QUOTE_MAX_AGE_MS, freshShareQuote,
 } = require('../docs/shared.js');
 
 const service = new LiveQuoteService();
@@ -77,6 +78,25 @@ tickers.publish([
 assert.equal(tickers.get('QQQ').price, 500, 'undated YFinance must not replace fresh DXLink');
 assert.equal(tickers.get('QQQ').source, 'dxlink', 'fresh live source retains priority');
 
+const shareNow = Date.parse('2026-07-30T14:30:10Z');
+const shareTickers = new TickerStateStore(
+  { AAPL: 'equity' },
+  { nowFn: () => shareNow, staleAfterMs: SHARE_QUOTE_MAX_AGE_MS },
+);
+shareTickers.publish([{
+  symbol: 'AAPL', price: 100, bid: 110, ask: 111, source: 'dxlink',
+  quote_ts: '2026-07-30T14:30:05Z',
+  bid_ts: '2026-07-30T14:30:04Z', ask_ts: '2026-07-30T14:30:05Z',
+}]);
+const freshShare = freshShareQuote(shareTickers.get('AAPL'), shareNow);
+assert.equal(freshShare.mid, 110.5, 'share marks use the fresh two-sided midpoint, not an older last trade');
+assert.equal(shareTickers.get('AAPL').bid_ts, '2026-07-30T14:30:04Z', 'ticker state preserves bid timestamps');
+assert.equal(shareTickers.get('AAPL').ask_ts, '2026-07-30T14:30:05Z', 'ticker state preserves ask timestamps');
+assert.equal(freshShareQuote({ ...shareTickers.get('AAPL'), ask_ts: null }, shareNow), null,
+  'a two-sided share quote requires the ask timestamp');
+assert.equal(freshShareQuote({ ...shareTickers.get('AAPL'), bid_ts: '2026-07-30T14:29:00Z' }, shareNow), null,
+  'a stale side disables the whole share quote');
+
 (async () => {
   const live = new LiveQuoteService();
   live.setVisibleContracts(['QQQ260717C00600000']);
@@ -119,6 +139,31 @@ assert.equal(tickers.get('QQQ').source, 'dxlink', 'fresh live source retains pri
   const hiddenPoller = new LiveQuotePoller(new LiveQuoteService(), { isHidden: () => true });
   assert.equal(hiddenPoller._normalInterval(), 60_000);
   hiddenPoller.dispose();
+
+  // ── botPositions is an independent interest slot ────────────────────────────
+  // The Automated tab and the viewer's own book share one quote transport, so
+  // registering bot contracts must not evict the user's positions (or vice
+  // versa) -- that would blank out marks on whichever tab rendered second.
+  {
+    const svc = new LiveQuoteService();
+    svc.setOpenPositions(['MINE']);
+    svc.setBotPositions(['BOT_A', 'BOT_B']);
+    svc.publish([
+      { symbol: 'MINE',  bid: 1, ask: 1.2, strike: 500, type: 'call', exp: '2026-07-16' },
+      { symbol: 'BOT_A', bid: 2, ask: 2.4, strike: 501, type: 'put',  exp: '2026-07-16' },
+      { symbol: 'OTHER', bid: 9, ask: 9.9, strike: 502, type: 'call', exp: '2026-07-16' },
+    ], { source: 'test' });
+
+    assert.equal(svc.get('MINE').mid, 1.1, 'user positions survive bot registration');
+    assert.equal(svc.get('BOT_A').mid, 2.2, 'bot positions are quoted');
+    assert.equal(svc.get('OTHER'), null, 'unregistered symbols are still ignored');
+    assert.deepEqual(svc.interestSymbols(), ['BOT_A', 'BOT_B', 'MINE']);
+
+    // Leaving the Automated tab drops bot-only quotes but keeps the user's.
+    svc.setBotPositions([]);
+    assert.equal(svc.get('BOT_A'), null, 'clearing bot interest prunes bot-only quotes');
+    assert.equal(svc.get('MINE').mid, 1.1, 'clearing bot interest leaves the user book intact');
+  }
 
   console.log('PASS live quote service polling, interests, health, and deduplication');
 })().catch(error => {
