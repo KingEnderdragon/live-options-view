@@ -8,8 +8,9 @@ contract explicitly defers rolling out every strategy before one complete
 loop is demonstrably alive.
 """
 
+from . import put_call_ratio  # noqa: F401
 from . import reddit_sentiment  # noqa: F401
 from . import smoke  # noqa: F401
 from . import trump_whisperer  # noqa: F401
 
-__all__ = ["smoke", "reddit_sentiment", "trump_whisperer"]
+__all__ = ["smoke", "reddit_sentiment", "trump_whisperer", "put_call_ratio"]
