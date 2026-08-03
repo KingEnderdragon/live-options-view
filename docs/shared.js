@@ -10,11 +10,24 @@
 // positions. Durable snapshots are one producer today; a faster poller or
 // stream can publish through the same interface later without coupling display
 // consumers to R2.
+const TRADEABLE_SHARE_SYMBOLS = new Set([
+  'QQQ', 'USO', 'SMH', 'IGV', 'META', 'GOOGL', 'AMZN', 'TSLA', 'MU', 'SPCX', 'AAPL',
+]);
+
+function isTradeableShareSymbol(symbol) {
+  return typeof symbol === 'string' && TRADEABLE_SHARE_SYMBOLS.has(symbol);
+}
+
 class LiveQuoteService {
   constructor() {
     this.quotes = new Map();
     this.visibleContracts = new Set();
     this.openPositions = new Set();
+    // Contracts held by the automated accounts on the Automated tab. Tracked
+    // separately from openPositions so the two never overwrite each other --
+    // the viewer's own book and the bots' books are independent interests that
+    // happen to share one quote transport.
+    this.botPositions = new Set();
     this.listeners = new Set();
     this.interestListeners = new Set();
   }
@@ -31,6 +44,14 @@ class LiveQuoteService {
     const next = new Set(symbols || []);
     const changed = !sameSet(this.openPositions, next);
     this.openPositions = next;
+    this._prune();
+    if (changed) this._notifyInterests();
+  }
+
+  setBotPositions(symbols) {
+    const next = new Set(symbols || []);
+    const changed = !sameSet(this.botPositions, next);
+    this.botPositions = next;
     this._prune();
     if (changed) this._notifyInterests();
   }
@@ -83,7 +104,7 @@ class LiveQuoteService {
   }
 
   _wanted() {
-    return new Set([...this.visibleContracts, ...this.openPositions]);
+    return new Set([...this.visibleContracts, ...this.openPositions, ...this.botPositions]);
   }
 
   // Interest-set changes (a contract scrolling out of view, a position
@@ -132,6 +153,23 @@ function tickerSessionState(instrumentClass, nowMs = Date.now()) {
   return 'closed';
 }
 
+const SHARE_QUOTE_MAX_AGE_MS = 15_000;
+
+function freshShareQuote(quote, nowMs = Date.now(), maxAgeMs = SHARE_QUOTE_MAX_AGE_MS) {
+  if (!quote) return null;
+  const { bid, ask } = quote;
+  if (typeof bid !== 'number' || typeof ask !== 'number' ||
+      !Number.isFinite(bid) || !Number.isFinite(ask) || bid < 0 || ask <= 0 || bid > ask) {
+    return null;
+  }
+  const bidMs = Date.parse(quote.bid_ts);
+  const askMs = Date.parse(quote.ask_ts);
+  if (!Number.isFinite(bidMs) || !Number.isFinite(askMs)) return null;
+  const sideAges = [nowMs - bidMs, nowMs - askMs];
+  if (sideAges.some(age => age > maxAgeMs || age < -30_000)) return null;
+  return { bid, ask, mid: (bid + ask) / 2 };
+}
+
 class TickerStateStore {
   constructor(symbolClasses, { nowFn = Date.now, staleAfterMs = 30_000 } = {}) {
     this.symbolClasses = { ...(symbolClasses || {}) };
@@ -168,6 +206,7 @@ class TickerStateStore {
       if (current && quoteAt && Date.parse(quoteAt) < Date.parse(current.observedAt)) continue;
       this.quotes.set(symbol, {
         price: quote.price, bid: quote.bid ?? null, ask: quote.ask ?? null,
+        bid_ts: quote.bid_ts ?? null, ask_ts: quote.ask_ts ?? null,
         prev_close: quote.prev_close ?? null, chg_pct: quote.chg_pct ?? null,
         source: quote.source || 'unknown', observedAt: quoteAt,
         instrumentClass: quote.instrument_class || this.symbolClasses[symbol],
@@ -382,6 +421,42 @@ function parseRetryAfter(value, nowMs = Date.now()) {
   if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
   const dateMs = Date.parse(value);
   return Number.isFinite(dateMs) ? Math.max(0, dateMs - nowMs) : null;
+}
+
+function normalizePaperOrder({ side, quantity, orderType = 'market', limitPrice = null } = {}) {
+  const qty = Number(quantity);
+  if (side !== 'buy' && side !== 'sell') {
+    return { error: 'Choose buy or sell.' };
+  }
+  if (!Number.isInteger(qty) || qty < 1 || qty > 100_000) {
+    return { error: 'Quantity must be a positive whole number.' };
+  }
+  if (orderType !== 'market' && orderType !== 'limit') {
+    return { error: 'Choose market or limit.' };
+  }
+
+  if (orderType === 'market') {
+    return { value: { side, qty, order_type: 'market' } };
+  }
+
+  const price = Number(limitPrice);
+  if (!Number.isFinite(price) || price <= 0 || price > 1_000_000) {
+    return { error: 'Limit price must be greater than zero.' };
+  }
+  const cents = Math.round(price * 100);
+  if (Math.abs(price * 100 - cents) > 1e-7) {
+    return { error: 'Limit price must use increments of $0.01.' };
+  }
+  return { value: { side, qty, order_type: 'limit', limit_price: cents / 100 } };
+}
+
+function normalizeShareMarketOrder({ side, quantity, heldQuantity = 0 } = {}) {
+  const normalized = normalizePaperOrder({ side, quantity, orderType: 'market' });
+  if (normalized.error) return normalized;
+  if (side === 'sell' && normalized.value.qty > Math.max(0, Number(heldQuantity) || 0)) {
+    return { error: 'You cannot sell more shares than you hold.' };
+  }
+  return normalized;
 }
 
 const DISPLAY = 20;   // ±N strikes shown
@@ -600,6 +675,8 @@ function buildHeatmapRows(tbody, data, ranges, opts = {}) {
 if (typeof module !== 'undefined') {
   module.exports = {
     LiveQuoteService, LiveQuotePoller, TickerStateStore, tickerSessionState,
-    parseRetryAfter, computeAtmWindow,
+    SHARE_QUOTE_MAX_AGE_MS, freshShareQuote,
+    parseRetryAfter, normalizePaperOrder, normalizeShareMarketOrder,
+    isTradeableShareSymbol, computeAtmWindow,
   };
 }
