@@ -91,6 +91,9 @@ function validate(p) {
     const origin = r.source === 'last-known' ? r.origin_source : r.source;
     const expected = origin === 'dxlink' ? DXLINK_SYMBOLS[label] : origin === 'yfinance' ? YF_SYMBOLS[label] : null;
     check(r.source_symbol == null || !expected || r.source_symbol === expected, `Source symbol mismatch for ${label}.`);
+    check(r.price_basis == null || (origin === 'dxlink' && ['last_trade', 'bid_ask_midpoint'].includes(r.price_basis)) ||
+      (origin === 'yfinance' && r.price_basis === 'undated_last_price'), `Price basis conflicts with source for ${label}.`);
+    check(r.source !== 'yfinance' || r.quote_ts == null, `Undated Yahoo fill has a receipt time for ${label}.`);
   }
 }
 
@@ -123,7 +126,8 @@ function row(label, r, generatedAt, now, feedStale) {
   const invalidReference = rawReference !== null && rawReference < 0;
   const price = invalidCurrent ? null : rawCurrent, prev = invalidReference ? null : rawReference;
   const received = r.quote_ts ?? null;
-  const futureReceipt = received !== null && Date.parse(received) > now + 30000;
+  const futureReceipt = received !== null && Date.parse(received) > now;
+  const futureCycle = Date.parse(generatedAt) > now;
   const marketState = ['equity','etf'].includes(inst.asset_class) ? equitySession(now) : inst.asset_class === 'crypto' ? 'continuous_market' : 'unknown';
   const receiptWindow = received && ['equity','etf'].includes(inst.asset_class) ? equitySession(Date.parse(received)) : 'unknown';
   const extendedSession = ['premarket','postmarket'].includes(receiptWindow);
@@ -134,12 +138,13 @@ function row(label, r, generatedAt, now, feedStale) {
   if (lastKnown) reasons.push('last_known_price');            // price and prev_close may come from different times
   if (!lastKnown && source === 'yfinance') reasons.push('undated_fallback');
   if (futureReceipt) reasons.push('future_collector_receipt');
+  if (futureCycle) reasons.push('future_collector_cycle');
   if (extendedSession) reasons.push('extended_receipt_window_reference_session_unverified');
   if (unverifiedPriceSession) reasons.push('price_session_unverified');
   if (inst.id === 'fut.6j') reasons.push('contract_unresolved');
   if (prev === null) reasons.push(invalidReference ? 'invalid_reference' : 'missing_reference');
   else if (prev === 0) reasons.push('zero_reference');
-  const usable = price !== null && prev !== null && !lastKnown && source === 'dxlink' && received !== null && !futureReceipt && !unverifiedPriceSession && inst.id !== 'fut.6j';
+  const usable = price !== null && prev !== null && !lastKnown && source === 'dxlink' && received !== null && !futureReceipt && !futureCycle && !unverifiedPriceSession && inst.id !== 'fut.6j';
   const absolute = usable ? price - prev : null;
   const change = {
     status: usable ? 'partial' : 'unavailable', reasons: usable ? ['observation_and_reference_session_unverified', prev === 0 ? 'zero_reference' : null, extendedSession ? 'extended_receipt_window_reference_session_unverified' : null].filter(Boolean) : reasons,
@@ -159,7 +164,7 @@ function row(label, r, generatedAt, now, feedStale) {
   let freshness;
   if (price === null) freshness = { status: 'missing', age_seconds: null };
   else if (received === null) freshness = { status: 'unknown_time', age_seconds: null };
-  else if (futureReceipt) freshness = { status: 'invalid_time', age_seconds: null };
+  else if (futureReceipt || futureCycle) freshness = { status: 'invalid_time', age_seconds: null };
   else {
     const age = (now - Date.parse(received)) / 1000;
     freshness = { status: lastKnown || age > STALE_SECONDS ? 'stale' : marketState === 'closed' ? 'closed' : marketState === 'unknown' ? 'unknown_market_state' : 'fresh', age_seconds: age };
@@ -174,6 +179,7 @@ function row(label, r, generatedAt, now, feedStale) {
   if (lastKnown) warnings.push('Last-known value carried forward after the provider returned nothing; its time is the original observation time if known.');
   if (unknownIdentity) warnings.push('Carried JPY/USD value has no retained source identity; price withheld because spot and futures are different instruments.');
   if (futureReceipt) warnings.push('Collector receipt time is in the future; age and live status are unavailable.');
+  if (futureCycle) warnings.push('Collector cycle time is in the future; this row is not asserted live.');
   if (source === 'dxlink' && r.price_basis == null) warnings.push('Legacy strip does not identify whether price is a last trade or bid/ask midpoint; live status is withheld.');
   if (invalidCurrent || invalidReference) warnings.push('Nonpositive current price or negative reference is withheld for this instrument.');
   if (inst.id === 'fut.6j') warnings.push('The strip does not publish the resolved futures contract or expiry; a continuous-series roll cannot be checked.');

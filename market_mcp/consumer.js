@@ -174,7 +174,7 @@ class Consumer {
         out.capabilities.push({ dataset: id, producer_schema: 'unversioned collector price strip (intraday/prices.json)',
           availability: probe.error ? (probe.error.code === 'missing_artifact' ? 'missing_publication' : 'failed') : 'available',
           actual: p ? { collector_cycle_at: p.timestamp, feed_stale: p.feed_stale } : null,
-          freshness: p ? {...age(p.timestamp, this.now(), overview.STALE_SECONDS),basis:'collector cycle time, not publication or quote observation'} : { status: 'unknown' },
+          freshness: p ? {...(Date.parse(p.timestamp) > this.now() ? {status:'invalid_time',observed_at:p.timestamp,age_seconds:null,stale_after_seconds:overview.STALE_SECONDS} : age(p.timestamp, this.now(), overview.STALE_SECONDS)),basis:'collector cycle time, not publication or quote observation'} : { status: 'unknown' },
           source_locator: key, error: probe.error, units: units[id], warnings: warnings[id],
           fields: ['label','id','asset_class','instrument_type','unit','source','source_symbol','price','price_basis','collector_received_at','observed_at','previous_close','change','freshness','gaps'],
           filters: ['asset_class', 'symbols', 'sort', 'limit', 'offset'], asset_classes: overview.ASSET_CLASSES,
@@ -236,7 +236,7 @@ class Consumer {
     const now = this.now();
     out.actual = { collector_cycle_at: p.timestamp, snapshot_time: p.snapshot_time ?? null, feed_stale: p.feed_stale, payload_sha256: q.evidence.at(-1).retrieved_sha256 };
     out.producer_times = { observation: null, acquisition_start: p.timestamp, acquisition_end: null, publication: null };
-    out.freshness = { ...age(p.timestamp, now, overview.STALE_SECONDS), basis: 'collector cycle start, before fallbacks and artifact upload; each row carries its own collector receipt age' };
+    out.freshness = { ...(Date.parse(p.timestamp) > now ? {status:'invalid_time',observed_at:p.timestamp,age_seconds:null,stale_after_seconds:overview.STALE_SECONDS} : age(p.timestamp, now, overview.STALE_SECONDS)), basis: 'collector cycle start, before fallbacks and artifact upload; each row carries its own collector receipt age' };
     const { known, unmapped } = overview.rows(p, now);
     const wanted = a.symbols ? new Set(a.symbols) : null;
     const filtered = known.filter(r => (!a.asset_class || r.asset_class === a.asset_class) && (!wanted || wanted.has(r.label) || wanted.has(r.id)));

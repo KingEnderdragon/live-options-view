@@ -70,6 +70,13 @@ test('source identity conflicts fail instead of substituting a different instrum
   assert.equal(out.status, 'failed'); assert.equal(out.errors[0].code, 'incompatible_schema');
 });
 
+test('DXLink cannot claim an undated Yahoo price basis', async () => {
+  const s = setup(); edit(s.files, p => { p.prices.AAPL.price_basis = 'undated_last_price'; });
+  const out = await s.consumer.call('market_overview', {symbols:['AAPL']});
+  assert.equal(out.status, 'failed'); assert.equal(out.errors[0].code, 'incompatible_schema');
+  assert.match(out.errors[0].message, /Price basis conflicts with source/);
+});
+
 test('undated yfinance fills are never live and never get a synthesized change', async () => {
   const { consumer } = setup(); const r = by(await consumer.call('market_overview', { limit: 50 }));
   for (const label of ['VIX', 'OVX', 'KOSPI', 'BTC/USD']) {
@@ -145,6 +152,21 @@ test('collector receipt is separate from provider observation; old, future and c
   assert.equal(a.freshness.live, false);
 });
 
+test('even small future receipt or collector-cycle skew cannot assert live freshness', async () => {
+  const s = setup();
+  edit(s.files, p => { p.prices.AAPL.quote_ts = '2026-10-02T16:10:20Z'; });
+  let out = await s.consumer.call('market_overview', {symbols:['AAPL']});
+  let a = out.rows[0];
+  assert.equal(a.freshness.status, 'invalid_time'); assert.equal(a.freshness.age_seconds, null);
+  assert.equal(a.freshness.live, false); assert.equal(a.change.status, 'unavailable');
+  edit(s.files, p => { p.prices.AAPL.quote_ts = '2026-10-02T16:09:55Z'; p.timestamp = '2026-10-02T16:10:20Z'; });
+  out = await s.consumer.call('market_overview', {symbols:['AAPL']}); a = out.rows[0];
+  assert.equal(out.freshness.status, 'invalid_time');
+  assert.equal(a.freshness.status, 'invalid_time'); assert.equal(a.freshness.live, false);
+  const discovery = await s.consumer.call('discover_sources');
+  assert.equal(discovery.capabilities[4].freshness.status, 'invalid_time');
+});
+
 test('equity session labels cover premarket, postmarket, holiday, early close and DST', async () => {
   for (const [stamp, expected] of [
     ['2026-10-02T13:00:00Z','premarket'],
@@ -154,7 +176,7 @@ test('equity session labels cover premarket, postmarket, holiday, early close an
     ['2026-11-02T14:31:00Z','regular'],
   ]) {
     const s = setup({now:() => Date.parse(stamp)});
-    edit(s.files, p => { p.prices.AAPL.quote_ts = stamp; });
+    edit(s.files, p => { p.timestamp = stamp; p.prices.AAPL.quote_ts = stamp; });
     const a = by(await s.consumer.call('market_overview', {symbols:['AAPL']})).AAPL;
     assert.equal(a.freshness.market_state, expected, stamp);
     assert.equal(a.freshness.live, expected !== 'closed', stamp);
