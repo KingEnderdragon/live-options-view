@@ -62,6 +62,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import signal
 import shutil
 import subprocess
@@ -777,9 +778,74 @@ def _read_jsonl_gz(path: Path, day_dir: Path,
 
 
 def iter_rows(day_dir: Path, damaged: list[dict[str, Any]] | None = None,
-              sweep_files: list[Path] | None = None) -> Iterator[dict[str, Any]]:
-    for path in sweep_files if sweep_files is not None else sorted((day_dir / "sweeps").glob("sweep_*.jsonl.gz")):
-        yield from _read_jsonl_gz(path, day_dir, damaged)
+              sweep_files: list[Path] | None = None,
+              strict_manifest: list[dict[str, Any]] | None = None) -> Iterator[dict[str, Any]]:
+    files = sweep_files if sweep_files is not None else sorted((day_dir / "sweeps").glob("sweep_*.jsonl.gz"))
+    for index, path in enumerate(files):
+        if strict_manifest is None:
+            yield from _read_jsonl_gz(path, day_dir, damaged)
+            continue
+        entry = strict_manifest[index]
+        chains = entry.get("chains")
+        if not isinstance(chains, dict) or type(entry.get("rows")) is not int or entry["rows"] < 0:
+            raise ValueError("cutoff manifest lacks chain and row counts")
+        additional = entry.get("additional_chains", {})
+        if not isinstance(additional, dict) or any(not isinstance(expiries, dict) for expiries in additional.values()):
+            raise ValueError("invalid cutoff additional chain status")
+        start, end = entry.get("started_ms"), entry.get("ended_ms")
+        if type(start) is not int or type(end) is not int or not start <= end:
+            raise ValueError("invalid cutoff sweep interval")
+        all_states = list(chains.values()) + [state for expiries in additional.values() for state in expiries.values()]
+        for state in all_states:
+            fetched = state.get("fetched_ms") if isinstance(state, dict) else None
+            if fetched is not None and (type(fetched) is not int or not start <= fetched <= end):
+                raise ValueError("cutoff chain fetch outside sweep interval")
+        counts: Counter = Counter()
+        for row in _read_jsonl_gz(path, day_dir, damaged):
+            if not isinstance(row, dict) or row.get("sweep") != entry["sweep"]:
+                raise ValueError("cutoff sweep row identity mismatch")
+            t = row.get("t")
+            if type(t) is not int or not start <= t <= end:
+                raise ValueError("cutoff row outside matching sweep interval")
+            for field in ("bid_ms", "ask_ms", "spot_ms", "trade_ms"):
+                stamp = row.get(field)
+                if stamp is not None and (type(stamp) is not int or not 946684800000 <= stamp <= t):
+                    raise ValueError("cutoff row has future or non-millisecond evidence")
+            underlying = row.get("underlying")
+            role = row.get("collection_role")
+            if role == "additional_expiry":
+                state = additional.get(underlying, {}).get(row.get("expiration"))
+                key = ("additional_expiry", underlying, row.get("expiration"))
+                if state is not None and state.get("expiration") != row.get("expiration"):
+                    raise ValueError("cutoff additional row expiration mismatch")
+            elif role is None:
+                state = chains.get(underlying)
+                key = ("nearest", underlying)
+                if state is not None and state.get("expiration") not in (None, row.get("expiration")):
+                    raise ValueError("cutoff nearest row expiration mismatch")
+            else:
+                raise ValueError("unknown cutoff collection role")
+            if not isinstance(state, dict) or state.get("status") != "ok":
+                raise ValueError("cutoff row belongs to absent or failed chain")
+            counts[key] += 1
+            yield row
+        for underlying, state in chains.items():
+            expected = state.get("rows", 0) if isinstance(state, dict) else None
+            if type(expected) is not int or expected < 0 or (state.get("status") != "ok" and expected):
+                raise ValueError("invalid cutoff chain row count")
+            if counts[("nearest", underlying)] != expected:
+                raise ValueError("cutoff chain row count mismatch")
+        for underlying, expiries in additional.items():
+            for expiry, state in expiries.items():
+                expected = state.get("rows", 0) if isinstance(state, dict) else None
+                if (type(expected) is not int or expected < 0 or
+                    state.get("expiration") != expiry or
+                    (state.get("status") != "ok" and expected)):
+                    raise ValueError("invalid cutoff additional chain row count")
+                if counts[("additional_expiry", underlying, expiry)] != expected:
+                    raise ValueError("cutoff additional chain row count mismatch")
+        if sum(counts.values()) != entry["rows"]:
+            raise ValueError("cutoff sweep row count mismatch")
 
 
 # --------------------------------------------------------------------------
@@ -788,15 +854,18 @@ def iter_rows(day_dir: Path, damaged: list[dict[str, Any]] | None = None,
 
 def _contract_paths(day_dir: Path, start_ms: int | None, end_ms: int | None,
                     buckets: int = 64, damaged: list[dict[str, Any]] | None = None,
-                    sweep_files: list[Path] | None = None
+                    sweep_files: list[Path] | None = None,
+                    strict_manifest: list[dict[str, Any]] | None = None
                     ) -> Iterator[tuple[str, list[dict[str, Any]]]]:
     """Group archived rows by contract with bounded memory (hash-partitioned temp files)."""
     with tempfile.TemporaryDirectory(prefix="oa203-build-") as tmp:
         handles = [open(Path(tmp) / f"b{i:02d}.jsonl", "w", encoding="utf-8") for i in range(buckets)]
         try:
-            for row in iter_rows(day_dir, damaged, sweep_files):
+            for row in iter_rows(day_dir, damaged, sweep_files, strict_manifest):
                 if not row.get("symbol"):
                     continue
+                if strict_manifest is not None and row.get("collection_role") == "additional_expiry":
+                    continue  # Additional expiry samples do not change the daily ranking universe.
                 if (start_ms and row["t"] < start_ms) or (end_ms and row["t"] >= end_ms):
                     continue
                 bucket = int(hashlib.md5(row["symbol"].encode()).hexdigest(), 16) % buckets
@@ -873,7 +942,7 @@ def build_contract_rows(day_dir: Path, policy: ReturnPolicy, start_ms: int | Non
     backfill = {} if cutoff_sweep is not None else load_backfill(day_dir, damaged)
     rows = []
     for symbol, path_rows in _contract_paths(day_dir, start_ms, end_ms, damaged=damaged,
-                                             sweep_files=sweep_files):
+                                             sweep_files=sweep_files, strict_manifest=manifest if cutoff_sweep is not None else None):
         last = path_rows[-1]
         info = ContractInfo(
             symbol=symbol, underlying=last["underlying"], option_type=last["type"],
@@ -1020,7 +1089,10 @@ def _build_active_snapshot(archive: DayArchive, cfg: Config, sweep: int,
     """
     if not 1 <= sweep <= ACTIVE_EVERY_SWEEPS * ACTIVE_MAX_SNAPSHOTS_PER_DAY:
         raise ValueError("invalid snapshot sweep")
-    manifest = [m for m in archive.manifest() if type(m.get("sweep")) is int and m["sweep"] <= sweep]
+    manifest_damage: list[dict[str, Any]] = []
+    manifest = _read_manifest(archive.dir, manifest_damage, sweep)
+    if manifest_damage:
+        raise ValueError("damaged cutoff manifest; snapshot skipped")
     if [m["sweep"] for m in manifest] != list(range(1, sweep + 1)):
         raise ValueError("snapshot manifest is incomplete")
     cutoff_ms = manifest[-1].get("ended_ms")
@@ -1041,9 +1113,20 @@ def _build_active_snapshot(archive: DayArchive, cfg: Config, sweep: int,
                for m in source):
             raise ValueError("source sweep upload is unverified; snapshot skipped")
     name = f"inprogress/sweep_{sweep:04d}"
-    target = archive.path(name)
+    sweep_pointer_path = archive.path(name + ".json")
+    previous = json.loads(sweep_pointer_path.read_text(encoding="utf-8")) if sweep_pointer_path.exists() else None
+    if previous is not None:
+        revision = previous.get("archive", "").removeprefix(archive.prefix + "/")
+        if not re.fullmatch(re.escape(name) + r"/rev_[0-9a-f]{64}", revision):
+            raise ValueError("invalid existing snapshot revision")
+        target = archive.path(revision)
+        if not target.is_dir():
+            raise ValueError("published snapshot revision is missing locally")
+    else:
+        revisions = sorted(archive.path(name).glob("rev_*")) if archive.path(name).exists() else []
+        target = revisions[0] if revisions else None
     tmp = archive.path(name + ".building")
-    if target.exists():
+    if target is not None:
         summary = json.loads((target / "summary.json").read_text(encoding="utf-8"))
         if (summary.get("cutoff_sweep"), summary.get("cutoff_ms")) != (sweep, cutoff_ms):
             raise ValueError("immutable snapshot identity changed")
@@ -1054,9 +1137,12 @@ def _build_active_snapshot(archive: DayArchive, cfg: Config, sweep: int,
         if any((target / member).stat().st_size > ACTIVE_MAX_MEMBER_BYTES for member in ACTIVE_MEMBERS):
             raise ValueError("snapshot member exceeds MCP artifact budget")
         recorded = [json.loads(line) for line in (target / "manifest.jsonl").read_text(encoding="utf-8").splitlines() if line]
-        if [(m.get("sweep"), m.get("sha256")) for m in recorded] != [
-                (m["sweep"], m["sha256"]) for m in source]:
+        if recorded != source:
             raise ValueError("immutable snapshot source lineage changed")
+        if target.name != "rev_" + _sha256_file(target / "summary.json"):
+            raise ValueError("immutable snapshot revision digest changed")
+        if previous and previous.get("members", {}).get("summary.json") != _sha256_file(target / "summary.json"):
+            raise ValueError("published snapshot pointer digest changed")
     else:
         if tmp.exists():
             shutil.rmtree(tmp)
@@ -1078,7 +1164,10 @@ def _build_active_snapshot(archive: DayArchive, cfg: Config, sweep: int,
                                       "completed_sweeps": sweep,
                                       "truncated_sweeps": sum(bool(m.get("truncated")) for m in manifest),
                                       "chain_status_counts": dict(Counter(s.get("status", "unknown")
-                                                                           for m in manifest for s in m.get("chains", {}).values()))},
+                                                                           for m in manifest for s in (
+                                                                               list(m.get("chains", {}).values()) +
+                                                                               [state for expiries in m.get("additional_chains", {}).values()
+                                                                                for state in expiries.values()])))},
                        "contracts": len(rows), "outputs": outputs, "return_policy": cfg.policy.as_dict(),
                        "qualified_policy": cfg.qualified_policy.as_dict(),
                        "measurement": MEASUREMENT_NOTE, "member_sha256": digests,
@@ -1087,6 +1176,10 @@ def _build_active_snapshot(archive: DayArchive, cfg: Config, sweep: int,
                 staged.write_text(json.dumps(summary, sort_keys=True) + "\n", encoding="utf-8")
             if any((tmp / member).stat().st_size > ACTIVE_MAX_MEMBER_BYTES for member in ACTIVE_MEMBERS):
                 raise ValueError("snapshot member exceeds MCP artifact budget")
+            target = archive.path(name + "/rev_" + _sha256_file(tmp / "summary.json"))
+            if target.exists():
+                raise ValueError("immutable snapshot revision already exists")
+            target.parent.mkdir(parents=True, exist_ok=True)
             os.rename(tmp, target)
         finally:
             if tmp.exists():
@@ -1099,7 +1192,7 @@ def _build_active_snapshot(archive: DayArchive, cfg: Config, sweep: int,
     observed_cadence = (round((datetime.fromisoformat(published_at) - datetime.fromisoformat(previous_at)).total_seconds(), 1)
                         if previous_at else None)
     pointer = {"schema_version": 1, "trade_date": archive.day.isoformat(), "state": "in_progress",
-               "sweep": sweep, "cutoff_ms": cutoff_ms, "archive": f"{archive.prefix}/{name}",
+               "sweep": sweep, "cutoff_ms": cutoff_ms, "archive": f"{archive.prefix}/{target.relative_to(archive.dir).as_posix()}",
                "members": hashes, "built_at": summary["built_at"],
                "published_at": published_at, "previous_published_at": previous_at,
                "observed_cadence_s": observed_cadence,
@@ -1112,6 +1205,11 @@ def _build_active_snapshot(archive: DayArchive, cfg: Config, sweep: int,
             result = send(target / member, f"{pointer['archive']}/{member}", _content_type(member))
             if result.get("sha256") != hashes[member]:
                 raise ValueError("snapshot upload checksum mismatch")
+    archive.write_json(name + ".json", pointer)
+    if archive.upload:
+        result = send(sweep_pointer_path, f"{archive.prefix}/{name}.json", "application/json")
+        if result.get("sha256") != _sha256_file(sweep_pointer_path):
+            raise ValueError("snapshot sweep pointer upload checksum mismatch")
     archive.write_json("inprogress/latest.json", pointer)
     if archive.upload:
         result = send(archive.path("inprogress/latest.json"),

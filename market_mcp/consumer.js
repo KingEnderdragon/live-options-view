@@ -111,6 +111,16 @@ function exchangeDate(ms) {
   return `${get('year')}-${get('month')}-${get('day')}`;
 }
 const activePrefix = (session, sweep) => `oa203/scanner/${session}/inprogress/sweep_${String(sweep).padStart(4,'0')}/`;
+const activeRevision = (session, sweep, pointer) => {
+  const base=activePrefix(session,sweep);
+  check(object(pointer)&&pointer.schema_version===1&&pointer.trade_date===session&&pointer.state==='in_progress'&&
+    pointer.sweep===sweep&&typeof pointer.archive==='string'&&
+    new RegExp('^'+base+'rev_[0-9a-f]{64}$').test(pointer.archive)&&
+    object(pointer.members)&&['summary.json','leaderboard.csv','qualified_ask_bid_v1.csv','manifest.jsonl']
+      .every(name=>typeof pointer.members[name]==='string'&&/^[0-9a-f]{64}$/.test(pointer.members[name]))&&
+    pointer.archive.endsWith('rev_'+pointer.members['summary.json']), 'Unsupported active snapshot pointer.');
+  return pointer.archive+'/';
+};
 function activeSummary(p, session, sweep) {
   returnSummary(p, session);
   check(p.schema_version===1 && p.final===false && p.state==='in_progress' && p.cutoff_sweep===sweep &&
@@ -396,17 +406,19 @@ class Consumer {
       if(found.error){out.errors.push(found.error);out.status=found.error.code==='missing_artifact'?
         out.attempt?.status==='failed'?'failed':'missing':'failed';return out;}
       pointer=found.value;sweep=pointer?.sweep;
-      check(object(pointer)&&pointer.schema_version===1&&pointer.trade_date===selected&&pointer.state==='in_progress'&&
-        Number.isInteger(sweep)&&sweep>=1&&sweep<=9999&&pointer.archive===activePrefix(selected,sweep).slice(0,-1)&&
-        object(pointer.members)&&['summary.json','leaderboard.csv','qualified_ask_bid_v1.csv','manifest.jsonl']
-          .every(name=>typeof pointer.members[name]==='string'&&/^[0-9a-f]{64}$/.test(pointer.members[name])),
-      'Unsupported active snapshot pointer.');
+      check(Number.isInteger(sweep)&&sweep>=1&&sweep<=9999,'Unsupported active snapshot sweep.');
+      activeRevision(selected,sweep,pointer);
       if(out.attempt?.sweep>sweep||out.attempt?.sweep===sweep&&out.attempt.status==='failed')
         out.warnings.push(`Newer or matching snapshot attempt ${out.attempt.sweep} is ${out.attempt.status}: ${out.attempt.reason??'reason unavailable'}.`);
       if(out.attempt?.status==='building'&&this.now()-Date.parse(out.attempt.at)>300000)
         out.warnings.push(`Snapshot attempt ${out.attempt.sweep} has exceeded the 240-second build budget; completion is unconfirmed.`);
     }
-    const prefix=activePrefix(selected,sweep);
+    if(!pointer){
+      const found=await q.optionalJson(activePrefix(selected,sweep).slice(0,-1)+'.json');
+      if(found.error){out.errors.push(found.error);out.status=found.error.code==='missing_artifact'?'missing':'failed';return out;}
+      pointer=found.value;
+    }
+    const prefix=activeRevision(selected,sweep,pointer);
     const p=await q.json(prefix+'summary.json');activeSummary(p,selected,sweep);
     const summaryEvidence=q.evidence.at(-1);
     if(pointer) check(pointer.members['summary.json']===summaryEvidence.retrieved_sha256&&pointer.cutoff_ms===p.cutoff_ms,
@@ -433,7 +445,23 @@ class Consumer {
     const paged=slice(filtered,limit,offset);
     out.pagination=paged.pagination;out.actual={session:selected,selector:session,sweep,cutoff_ms:p.cutoff_ms,archive:prefix.slice(0,-1),
       final:false,return_policy:p.return_policy,qualified_policy:p.qualified_policy};
-    out.rows=paged.rows.map(row=>({...row,detail_reference:this.reference({dataset:'options_active',p,row,prefix,board,
+    const endpointField=qualified?'qualified_first_ask_to_later_bid_exit_ms':'mid_first_to_max_exit_ms';
+    const evidenceAge=row=>{
+      const endpoint=row[endpointField]===null?null:Number(row[endpointField]);
+      const quoteAge=row.mid_first_to_max_exit_quote_age_s===null?null:Number(row.mid_first_to_max_exit_quote_age_s);
+      const quote=qualified?Number(row.qualified_first_ask_to_later_bid_exit_bid_ms):
+        quoteAge===null?null:Math.round(endpoint-quoteAge*1000);
+      const basis=qualified?'qualified_first_ask_to_later_bid_exit_bid_ms':
+        'mid_first_to_max_exit_ms minus mid_first_to_max_exit_quote_age_s';
+      if(!Number.isSafeInteger(endpoint)||endpoint<p.session_open_ms||endpoint>p.cutoff_ms||
+         !Number.isSafeInteger(quote)||quote<946684800000||quote>endpoint||
+         !qualified&&(!Number.isFinite(quoteAge)||quoteAge<0))
+        return {status:'unknown',observed_at:null,age_seconds:null,stale_after_seconds:600,basis,
+          sample_at:Number.isSafeInteger(endpoint)?new Date(endpoint).toISOString():null};
+      return {...age(new Date(quote).toISOString(),this.now(),600),basis,sample_at:new Date(endpoint).toISOString()};
+    };
+    out.rows=paged.rows.map(row=>({...row,ranked_evidence_freshness:evidenceAge(row),
+      detail_reference:this.reference({dataset:'options_active',p,row,prefix,board,
       actual:out.actual,evidence:[...q.evidence],digests:{summary:summaryEvidence.retrieved_sha256,board:boardEvidence.retrieved_sha256,
         manifest:p.member_sha256['manifest.jsonl']}})}));
     out.summary=p;out.coverage=p.assessment;
@@ -442,12 +470,23 @@ class Consumer {
     out.session_window={open_ms:p.session_open_ms,close_ms:p.session_close_ms,meaning:'exchange boundaries; not acquisition timestamps'};
     out.producer_times={observation:null,acquisition_start:null,acquisition_end:new Date(p.cutoff_ms).toISOString(),
       publication:pointer?.published_at??null,built_at:p.built_at??null};
-    out.freshness={...age(new Date(p.cutoff_ms).toISOString(),this.now(),3600),basis:'last completed sweep cutoff; chain acquisition times differ'};
+    const cutoffAge=age(new Date(p.cutoff_ms).toISOString(),this.now(),3600);
+    const rowAges=out.rows.map(row=>row.ranked_evidence_freshness);
+    const knownAges=rowAges.map(x=>x.age_seconds).filter(Number.isFinite);
+    out.freshness={...cutoffAge,
+      status:cutoffAge.status==='stale'||rowAges.some(x=>x.status==='stale')?'stale':
+        rowAges.some(x=>x.status==='unknown')?'unknown':cutoffAge.status,
+      basis:'cutoff and displayed ranked quote endpoints are assessed separately',cutoff:cutoffAge,
+      ranked_evidence:{basis:'actual quote timestamp at the ranked endpoint',stale_after_seconds:600,
+        oldest_age_seconds:knownAges.length?Math.max(...knownAges):null,
+        stale_rows:rowAges.filter(x=>x.status==='stale').length,unknown_rows:rowAges.filter(x=>x.status==='unknown').length}};
     out.active_state=this.now()>=p.session_close_ms?'closed_pending_final':'in_progress';
     out.status=out.active_state==='closed_pending_final'?'closed_pending_final':filtered.length?'in_progress':'empty';
     if(p.assessment.truncated_sweeps||Object.keys(p.assessment.chain_status_counts??{}).some(s=>s!=='ok')) out.status='partial';
+    if(rowAges.some(x=>x.status==='stale'||x.status==='unknown')&&out.status==='in_progress')out.status='partial';
     out.warnings.push('These are sampled, non-simultaneous chain observations; quote comparisons do not establish fills.');
-    if(out.freshness.status==='stale')out.warnings.push('Latest active snapshot is older than the expected cadence.');
+    if(cutoffAge.status==='stale')out.warnings.push('Latest active cutoff is older than the expected cadence.');
+    if(rowAges.some(x=>x.status==='stale'))out.warnings.push('Displayed ranked quote evidence is older than two expected five-minute sweeps.');
     return out;
   }
   async detail(a,q,out) {
@@ -494,7 +533,8 @@ class Consumer {
       check(manifest.length===v.actual.sweep&&manifest.every((m,i)=>m.sweep===i+1&&
         m.file===`sweep_${String(m.sweep).padStart(4,'0')}.jsonl.gz`&&
         typeof m.sha256==='string'&&/^[0-9a-f]{64}$/.test(m.sha256)&&object(m.chains)&&
-        Number.isSafeInteger(m.ended_ms)&&m.ended_ms<=v.actual.cutoff_ms),
+        Number.isSafeInteger(m.started_ms)&&Number.isSafeInteger(m.ended_ms)&&
+        m.started_ms<=m.ended_ms&&m.ended_ms<=v.actual.cutoff_ms),
       'Invalid pinned active manifest.');
       const selected=manifest.filter(m=>Object.hasOwn(m.chains,v.row.underlying));
       const paged=slice(selected,Math.min(limit,ACTIVE_PATH_SWEEPS),offset);
@@ -513,8 +553,11 @@ class Consumer {
           check(q.evidence.at(-1).retrieved_sha256===m.sha256,'Pinned source sweep digest changed.','source_changed');
           q.evidence.at(-1).checksum_verification='matches_pinned_manifest_sweep_sha256';
           check(rows.every(r=>r.underlying===v.row.underlying&&r.sweep===m.sweep&&
-            Number.isSafeInteger(r.t)&&r.t>=summary.session_open_ms&&
+            m.chains[v.row.underlying].status==='ok'&&Number.isSafeInteger(r.t)&&
+            r.t>=m.started_ms&&r.t<=m.ended_ms&&r.t>=summary.session_open_ms&&
             r.t<Math.min(summary.cutoff_ms,summary.session_close_ms)&&
+            ['bid_ms','ask_ms','spot_ms','trade_ms'].every(field=>r[field]==null||
+              Number.isSafeInteger(r[field])&&r[field]>=946684800000&&r[field]<=r.t)&&
             ['call','put'].includes(r.type)&&[r.bid,r.ask].every(n=>n===null||
               typeof n==='number'&&Number.isFinite(n)&&n>=0)), 'Active quote row violates cutoff/session contract.');
           path.push(...rows);

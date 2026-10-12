@@ -2,29 +2,11 @@
 const test=require('node:test');const assert=require('node:assert/strict');
 const {Consumer}=require('./consumer');const {Source,DataError,hash,LIMITS,permitted}=require('./source');
 const {Protocol,tools}=require('./server');
-const {gzipSync}=require('node:zlib');
-const {fixtures,SESSION,NOW,CONTRACT}=require('./fixtures');
+const {gzipSync,gunzipSync}=require('node:zlib');
+const {fixtures,activeFixtures,SESSION,NOW,CONTRACT}=require('./fixtures');
 const BASE=`oa203/scanner/${SESSION}/`, ACTIVE=BASE+'inprogress/';
 function setup(){
-  const files=fixtures(), calls=[];
-  const manifest=files[BASE+'sweeps/manifest.jsonl'].trim().split('\n').map(JSON.parse).slice(0,6)
-    .map(m=>({...m,sha256:hash(files[BASE+'sweeps/'+m.file])}));
-  delete files[BASE+'summary.json'];
-  const prefix=ACTIVE+'sweep_0006/';
-  files[prefix+'leaderboard.csv']=files[BASE+'leaderboard.csv'];
-  files[prefix+'qualified_ask_bid_v1.csv']=files[BASE+'qualified_ask_bid_v1.csv'];
-  files[prefix+'manifest.jsonl']=manifest.map(m=>JSON.stringify(m)).join('\n')+'\n';
-  const members=Object.fromEntries(['leaderboard.csv','qualified_ask_bid_v1.csv','manifest.jsonl'].map(n=>[n,hash(files[prefix+n])]));
-  const cutoff=manifest.at(-1).ended_ms;
-  const summary={schema_version:1,trade_date:SESSION,final:false,state:'in_progress',cutoff_sweep:6,cutoff_ms:cutoff,
-    session_open_ms:1790947800000,session_close_ms:1790971200000,contracts:2,
-    assessment:{status:'partial',reasons:['session_in_progress'],completed_sweeps:6,truncated_sweeps:0,chain_status_counts:{ok:6}},
-    return_policy:{version:'oa203-returns-v1'},qualified_policy:{version:'oa203-qualified-ask-bid-v1'},
-    outputs:{leaderboard:'leaderboard.csv',qualified_ask_bid_v1:'qualified_ask_bid_v1.csv'},member_sha256:members,built_at:'2026-10-02T13:56:00Z'};
-  files[prefix+'summary.json']=JSON.stringify(summary);
-  const pointer={schema_version:1,trade_date:SESSION,state:'in_progress',sweep:6,cutoff_ms:cutoff,archive:prefix.slice(0,-1),
-    members:{...members,'summary.json':hash(files[prefix+'summary.json'])},built_at:summary.built_at,published_at:'2026-10-02T13:56:10Z',expected_cadence_s:1800};
-  files[ACTIVE+'latest.json']=JSON.stringify(pointer);
+  const {files,prefix,pointer,summary,manifest}=activeFixtures({withoutFinal:true}), calls=[];
   const source=new Source({read:async key=>{calls.push(key);if(!Object.hasOwn(files,key))throw new DataError('missing_artifact','absent',key);return files[key];}});
   const consumer=new Consumer(source,{now:()=>NOW});
   return {files,calls,consumer,prefix,pointer,summary,manifest};
@@ -32,7 +14,7 @@ function setup(){
 test('active all, clean, qualified and pinned detail survive pointer advance',async()=>{
   const f=setup();
   const all=await f.consumer.call('active_rankings',{session:SESSION,view:'all',limit:1});
-  assert.equal(all.status,'in_progress');assert.equal(all.actual.sweep,6);assert.equal(all.rows[0].symbol,CONTRACT);
+  assert.equal(all.status,'partial');assert.equal(all.actual.sweep,6);assert.equal(all.rows[0].symbol,CONTRACT);
   assert.equal(all.freshness.status,'stale');
   const clean=await f.consumer.call('active_rankings',{session:SESSION,view:'clean'});
   assert.equal(clean.rows.length,1);assert.equal(clean.rows[0].clean_rank,'1');
@@ -49,7 +31,7 @@ test('active all, clean, qualified and pinned detail survive pointer advance',as
   assert.ok(!f.calls.some(k=>k.includes('sweep_0007')));
 });
 test('active pointer and immutable member mismatches fail closed',async()=>{
-  for(const mutate of [f=>f.pointer.members['summary.json']='0'.repeat(64),f=>f.files[f.prefix+'leaderboard.csv']+='\n']){
+  for(const mutate of [f=>f.files[f.prefix+'summary.json']+='\n',f=>f.files[f.prefix+'leaderboard.csv']+='\n']){
     const f=setup();mutate(f);f.files[ACTIVE+'latest.json']=JSON.stringify(f.pointer);
     const out=await f.consumer.call('active_rankings',{session:SESSION});
     assert.equal(out.status,'failed');assert.equal(out.errors.at(-1).code,'source_changed');
@@ -91,7 +73,7 @@ test('newer failed attempt stays visible beside last successful snapshot',async(
   const f=setup();f.files[ACTIVE+'latest-attempt.json']=JSON.stringify({schema_version:1,trade_date:SESSION,
     sweep:12,status:'failed',reason:'timeout',at:'2026-10-02T15:00:00Z'});
   const out=await f.consumer.call('active_rankings',{session:SESSION,limit:1});
-  assert.equal(out.status,'in_progress');assert.equal(out.actual.sweep,6);
+  assert.equal(out.status,'partial');assert.equal(out.actual.sweep,6);
   assert.equal(out.attempt.status,'failed');assert.ok(out.warnings.some(w=>w.includes('timeout')));
 });
 test('a final daily result supersedes latest active only through the final producer path',async()=>{
@@ -103,12 +85,77 @@ test('a final daily result supersedes latest active only through the final produ
 });
 test('early-close boundary marks a still-published snapshot as pending final',async()=>{
   const f=setup();f.summary.session_close_ms=Date.parse('2026-10-02T16:00:00Z');
-  f.files[f.prefix+'summary.json']=JSON.stringify(f.summary);
-  f.pointer.members['summary.json']=hash(f.files[f.prefix+'summary.json']);
+  const revised=JSON.stringify(f.summary), revisedPrefix=ACTIVE+'sweep_0006/rev_'+hash(revised)+'/';
+  for(const name of ['leaderboard.csv','qualified_ask_bid_v1.csv','manifest.jsonl'])f.files[revisedPrefix+name]=f.files[f.prefix+name];
+  f.files[revisedPrefix+'summary.json']=revised;
+  f.pointer.archive=revisedPrefix.slice(0,-1);
+  f.pointer.members['summary.json']=hash(revised);
   f.files[ACTIVE+'latest.json']=JSON.stringify(f.pointer);
   f.consumer.now=()=>Date.parse('2026-10-02T16:10:00Z');
   const out=await f.consumer.call('active_rankings',{session:SESSION});
   assert.equal(out.status,'closed_pending_final');assert.equal(out.active_state,'closed_pending_final');
+});
+test('fresh cutoff with old ranked quote is stale and partial',async()=>{
+  const f=setup();
+  const now=Date.parse('2026-10-02T14:17:00Z');
+  f.consumer.now=()=>now;
+  f.summary.cutoff_ms=now-60000;
+  f.summary.assessment.chain_status_counts={ok:6,error:4};
+  const revised=JSON.stringify(f.summary), revisedPrefix=ACTIVE+'sweep_0006/rev_'+hash(revised)+'/';
+  for(const name of ['leaderboard.csv','qualified_ask_bid_v1.csv','manifest.jsonl'])f.files[revisedPrefix+name]=f.files[f.prefix+name];
+  f.files[revisedPrefix+'summary.json']=revised;
+  f.pointer.archive=revisedPrefix.slice(0,-1);f.pointer.cutoff_ms=f.summary.cutoff_ms;
+  f.pointer.members['summary.json']=hash(revised);f.files[ACTIVE+'latest.json']=JSON.stringify(f.pointer);
+  const out=await f.consumer.call('active_rankings',{session:SESSION,limit:1});
+  assert.equal(out.freshness.cutoff.status,'fresh');
+  assert.equal(out.freshness.status,'stale');
+  assert.equal(out.status,'partial');
+  assert.ok(out.rows[0].ranked_evidence_freshness.age_seconds>600);
+});
+test('quote timestamp age is reported even when ranked sample time is recent',async()=>{
+  const f=setup();f.consumer.now=()=>f.summary.cutoff_ms+60000;
+  const lines=f.files[f.prefix+'leaderboard.csv'].trim().split('\n'),headers=lines[0].split(',');
+  const cells=lines[1].split(',');
+  cells[headers.indexOf('mid_first_to_max_exit_ms')]=String(f.summary.cutoff_ms-1000);
+  cells[headers.indexOf('mid_first_to_max_exit_quote_age_s')]='1200';
+  lines[1]=cells.join(',');const board=lines.join('\n')+'\n';
+  f.summary.member_sha256['leaderboard.csv']=hash(board);
+  const revised=JSON.stringify(f.summary), revisedPrefix=ACTIVE+'sweep_0006/rev_'+hash(revised)+'/';
+  f.files[revisedPrefix+'leaderboard.csv']=board;
+  for(const name of ['qualified_ask_bid_v1.csv','manifest.jsonl'])f.files[revisedPrefix+name]=f.files[f.prefix+name];
+  f.files[revisedPrefix+'summary.json']=revised;
+  f.pointer.archive=revisedPrefix.slice(0,-1);f.pointer.members['summary.json']=hash(revised);
+  f.pointer.members['leaderboard.csv']=hash(board);f.files[ACTIVE+'latest.json']=JSON.stringify(f.pointer);
+  const out=await f.consumer.call('active_rankings',{session:SESSION,limit:1});
+  assert.equal(out.freshness.cutoff.status,'fresh');assert.equal(out.status,'partial');
+  assert.equal(out.rows[0].ranked_evidence_freshness.age_seconds,1261);
+});
+test('explicit sweep follows its pinned revision pointer',async()=>{
+  const f=setup();
+  const out=await f.consumer.call('active_rankings',{session:SESSION,sweep:6,limit:1});
+  assert.equal(out.actual.archive,f.pointer.archive);
+  delete f.files[ACTIVE+'sweep_0006.json'];
+  assert.equal((await f.consumer.call('active_rankings',{session:SESSION,sweep:6})).status,'missing');
+});
+test('pinned detail rejects out-of-sweep and future-timestamp quote evidence',async()=>{
+  for(const change of [r=>{r.t-=1;},r=>{r.bid_ms=r.t+1;},r=>{r.ask_ms=Math.floor(r.t/1000);}]){
+    const f=setup(),key=BASE+'sweeps/sweep_0001.jsonl.gz';
+    const rows=gunzipSync(f.files[key]).toString().trim().split('\n').map(JSON.parse);
+    change(rows[0]);f.files[key]=gzipSync(rows.map(r=>JSON.stringify(r)).join('\n')+'\n');
+    f.manifest[0].sha256=hash(f.files[key]);
+    const manifest=f.manifest.map(m=>JSON.stringify(m)).join('\n')+'\n';
+    f.summary.member_sha256['manifest.jsonl']=hash(manifest);
+    const revised=JSON.stringify(f.summary),revisedPrefix=ACTIVE+'sweep_0006/rev_'+hash(revised)+'/';
+    f.files[revisedPrefix+'leaderboard.csv']=f.files[f.prefix+'leaderboard.csv'];
+    f.files[revisedPrefix+'qualified_ask_bid_v1.csv']=f.files[f.prefix+'qualified_ask_bid_v1.csv'];
+    f.files[revisedPrefix+'manifest.jsonl']=manifest;f.files[revisedPrefix+'summary.json']=revised;
+    f.pointer.archive=revisedPrefix.slice(0,-1);f.pointer.members['summary.json']=hash(revised);
+    f.pointer.members['manifest.jsonl']=hash(manifest);f.files[ACTIVE+'latest.json']=JSON.stringify(f.pointer);
+    const ranking=await f.consumer.call('active_rankings',{session:SESSION,limit:1});
+    const detail=await f.consumer.call('result_detail',{reference:ranking.rows[0].detail_reference,limit:1});
+    assert.equal(detail.status,'partial');assert.equal(detail.quote_path.length,0);
+    assert.equal(detail.errors[0].code,'incompatible_schema');
+  }
 });
 test('MCP discovery, active query and pinned detail use read-only bounded schemas',async()=>{
   const f=setup(),p=new Protocol(f.consumer);
