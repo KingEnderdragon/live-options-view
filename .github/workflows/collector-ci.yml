@@ -9,6 +9,11 @@ on:
     paths:
       - "collector.py"
       - "market_signals.py"
+      - "market_overview.py"
+      - "market_overview_universe.json"
+      - "tests/test_market_overview.py"
+      - "scripts/probe_cross_market_symbols.py"
+      - "tests/test_probe_cross_market_symbols.py"
       - "crude_calibration.py"
       - "requirements.txt"
       - "Dockerfile"
@@ -35,6 +40,11 @@ on:
     paths:
       - "collector.py"
       - "market_signals.py"
+      - "market_overview.py"
+      - "market_overview_universe.json"
+      - "tests/test_market_overview.py"
+      - "scripts/probe_cross_market_symbols.py"
+      - "tests/test_probe_cross_market_symbols.py"
       - "crude_calibration.py"
       - "requirements.txt"
       - "Dockerfile"
@@ -78,6 +88,10 @@ jobs:
         run: python -m unittest discover -s tests -p test_moo144_tradier_collector.py -v
       - name: Run OA-203 options return scanner suite
         run: python -m unittest discover -s tests -p test_oa203_return_scanner.py -v
+      - name: Run cross-market overview suite (#132)
+        run: python -m unittest discover -s tests -p test_market_overview.py -v
+      - name: Run cross-market symbol probe safety suite (#132)
+        run: python -m unittest discover -s tests -p test_probe_cross_market_symbols.py -v
       - name: Run capture diagnostics suite
         run: python -m unittest discover -s tests -p test_capture_diagnostics.py -v
       - name: Run VWAP/RVOL collector suite

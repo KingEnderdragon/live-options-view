@@ -2,7 +2,7 @@
 
 Production follow-up status and Linux image evidence: [ROLLOUT.md](ROLLOUT.md).
 
-Five read-only tools expose existing producer artifacts. Node 22+; no package
+Six read-only tools expose existing producer artifacts. Node 22+; no package
 install, provider token, R2 credentials, scanner invocation or trading imports.
 The module remains in this repository because it consumes the existing calendar,
 schedule semantics and producer contracts. Its transports and tests are separate
@@ -19,7 +19,7 @@ node market_mcp/smoke.js --public --session 2026-10-02 --out public-smoke.json
 ```
 
 The first smoke command generates **synthetic** artifacts in a temporary directory,
-launches the actual stdio server and writes seven complete MCP responses. Fixture
+launches the actual stdio server and writes complete MCP responses. Fixture
 timestamps stay unchanged, so readings become stale against the real current clock.
 The public smoke is explicit and uses only anonymous reads of the fixed public R2
 origin from `worker.js`. It neither configures nor reads credentials.
@@ -72,6 +72,7 @@ Its Linux image checks pass; live client/grant gates remain pending. See
 | `market_context` | Optional `underlying` (`QQQ` default, or `SPY`; #121). QQQ reads `intraday/latest.json` (dataset `qqq_snapshot`), SPY reads `intraday/spy/latest.json` (dataset `spy_snapshot`). Returns `requested_underlying` and `actual.underlying`, the underlying block and a chain page filtered by expiry/type/strike/OCC contract. The payload's symbol, `underlying_market.symbol` and every contract root must match the request or it fails as `symbol_mismatch`; an archive locator outside the requested underlying's layout fails as `incompatible_schema`. Unsupported symbols, a contract for the other underlying, or a missing SPY publication return explicit errors; QQQ is never substituted. Detail references keep the originating underlying and snapshot. |
 | `squeeze_results` | Scheduled `latest.json`, `latest-attempt.json`, `latest-schedule.json`; uses the existing exported XNYS calendar and `formatSqueezeScheduleStatus`. |
 | `return_rankings` | One exact date's `summary.json` and bounded shortlist: legacy `leaderboard.csv` for all/clean, or `qualified_ask_bid_v1.csv` for `view: "qualified_ask_bid_v1"`. Preserves producer ranks, policy, reasons, underlying/type filters, and pagination. Older sessions report the qualified view as unavailable. |
+| `market_overview` | #132 first slice: the existing `intraday/prices.json` dashboard strip. Source identity distinguishes Yahoo JPY/USD spot from CME yen futures; unknown-origin carried yen is withheld. ETF proxies retain ETF identities. Selected-price basis and collector receipt time are labeled separately from unavailable provider observation time. Producer `chg_pct` is preserved where valid; unit change (`price - prev_close`) and 10Y bps after CBOE scale normalization are consumer-derived. The unresolved yen futures contract has no comparable change. Undated Yahoo fills and carried values are not live. Unsupported assets are named `gaps`, including under asset-class filters. Filters: `asset_class`, `symbols`, `sort`, `limit`, `offset`. |
 | `result_detail` | Retained snapshot JSON row; exact squeeze run's manifest/results/normalized inputs; selected return contract from bounded sweep pages with producer calculation cells/flags. |
 
 The qualified return view's provisional thresholds and evidence rules are in

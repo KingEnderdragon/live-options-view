@@ -43,11 +43,16 @@ async function run() {
       assert.equal(r.status, 200); assert.ok(!r.body.error); return r.body.result;
     };
     await call('initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'container-fixture', version: '1' } });
-    assert.equal((await call('tools/list')).tools.length, 5);
+    assert.equal((await call('tools/list')).tools.length, 6);
     const query = await call('tools/call', { name: 'market_context', arguments: { limit: 1 } });
     assert.equal(query.structuredContent.status, 'available');
     const detail = await call('tools/call', { name: 'result_detail', arguments: { reference: query.structuredContent.rows[0].detail_reference, limit: 1 } });
     assert.equal(detail.structuredContent.status, 'available');
+    const overview = await call('tools/call', { name: 'market_overview', arguments: { symbols: ['AAPL'], limit: 1 } });
+    assert.equal(overview.structuredContent.rows[0].id, 'AAPL');
+    const overviewDetail = await call('tools/call', { name: 'result_detail', arguments: { reference: overview.structuredContent.rows[0].detail_reference, limit: 1 } });
+    assert.equal(overviewDetail.structuredContent.producer_times.observation, null);
+    assert.equal(overviewDetail.structuredContent.producer_times.collector_receipt, overview.structuredContent.rows[0].collector_received_at);
     child.kill('SIGTERM');
     const deadline = setTimeout(() => child.kill('SIGKILL'), 30000);
     let result; try { result = await exited; } finally { clearTimeout(deadline); }
