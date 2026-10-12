@@ -19,6 +19,8 @@ import gzip
 import io
 import json
 import sys
+import time
+import urllib.error
 import urllib.request
 from collections import defaultdict
 from pathlib import Path
@@ -33,10 +35,18 @@ MAX_UNDERLYINGS = 50
 MAX_SESSIONS = 10
 
 
-def fetch(key: str) -> bytes:
+def fetch(key: str, attempts: int = 4) -> bytes:
+    """GET one public artifact; bounded retries with backoff on transport errors."""
     req = urllib.request.Request(f"{ORIGIN}/{key}", headers={"User-Agent": "oa203-windows-replay/1"})
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        return resp.read()
+    for attempt in range(attempts):
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                return resp.read()
+        except (urllib.error.URLError, ConnectionError, TimeoutError):
+            if attempt == attempts - 1:
+                raise
+            time.sleep(2 ** attempt)
+    raise AssertionError("unreachable")
 
 
 def load_session(day: str, underlyings: set[str], rows_by_symbol: dict, sampled: dict) -> dict:
