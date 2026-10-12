@@ -2,7 +2,7 @@
 // market_overview (#132, first usable slice): the collector's existing
 // intraday/prices.json -- the same price pipeline that feeds the dashboard
 // strip above the options chain -- exposed with explicit instrument identity,
-// source, observation time, freshness and change availability.
+// source, collector receipt time, freshness and change availability.
 //
 // Producer values are preserved. The consumer adds identity/units, a dollar
 // or unit change (price - prev_close) labeled as consumer-derived, scale
@@ -125,16 +125,16 @@ function row(label, r, generatedAt, now, feedStale) {
   const received = r.quote_ts ?? null;
   const futureReceipt = received !== null && Date.parse(received) > now + 30000;
   const marketState = ['equity','etf'].includes(inst.asset_class) ? equitySession(now) : inst.asset_class === 'crypto' ? 'continuous_market' : 'unknown';
-  const priceSession = received && ['equity','etf'].includes(inst.asset_class) ? equitySession(Date.parse(received)) : 'unknown';
-  const extendedSession = ['premarket','postmarket'].includes(priceSession);
-  const unverifiedPriceSession = ['equity','etf'].includes(inst.asset_class) && !['regular','premarket','postmarket'].includes(priceSession);
+  const receiptWindow = received && ['equity','etf'].includes(inst.asset_class) ? equitySession(Date.parse(received)) : 'unknown';
+  const extendedSession = ['premarket','postmarket'].includes(receiptWindow);
+  const unverifiedPriceSession = ['equity','etf'].includes(inst.asset_class) && !['regular','premarket','postmarket'].includes(receiptWindow);
 
   const reasons = [];
   if (price === null) reasons.push(invalidCurrent ? 'invalid_current' : r.price == null ? 'missing_current' : unknownIdentity ? 'unknown_instrument_identity' : 'unknown_source_scale');
   if (lastKnown) reasons.push('last_known_price');            // price and prev_close may come from different times
   if (!lastKnown && source === 'yfinance') reasons.push('undated_fallback');
   if (futureReceipt) reasons.push('future_collector_receipt');
-  if (extendedSession) reasons.push('extended_hours_reference_session_unverified');
+  if (extendedSession) reasons.push('extended_receipt_window_reference_session_unverified');
   if (unverifiedPriceSession) reasons.push('price_session_unverified');
   if (inst.id === 'fut.6j') reasons.push('contract_unresolved');
   if (prev === null) reasons.push(invalidReference ? 'invalid_reference' : 'missing_reference');
@@ -142,13 +142,13 @@ function row(label, r, generatedAt, now, feedStale) {
   const usable = price !== null && prev !== null && !lastKnown && source === 'dxlink' && received !== null && !futureReceipt && !unverifiedPriceSession && inst.id !== 'fut.6j';
   const absolute = usable ? price - prev : null;
   const change = {
-    status: usable ? prev === 0 || extendedSession ? 'partial' : 'ok' : 'unavailable', reasons: usable ? [prev === 0 ? 'zero_reference' : null, extendedSession ? 'extended_hours_reference_session_unverified' : null].filter(Boolean) : reasons,
+    status: usable ? 'partial' : 'unavailable', reasons: usable ? ['observation_and_reference_session_unverified', prev === 0 ? 'zero_reference' : null, extendedSession ? 'extended_receipt_window_reference_session_unverified' : null].filter(Boolean) : reasons,
     absolute: usable ? round(absolute, 6) : null,
     absolute_unit: usable ? (USD_UNITS.has(inst.unit) ? 'USD' : inst.unit) : null,
     percent: usable && prev !== 0 && inst.change_unit !== 'bps' ? (r.chg_pct ?? null) : null,
     bps: usable && inst.change_unit === 'bps' ? round(absolute * 100, 4) : null,
     reference_basis: 'DXLink Summary prevDayClosePrice; exact reference session, timestamp and adjustment basis are not published',
-    current_session: priceSession, reference_at: null, reference_session: null, adjustment_basis: null,
+    current_session: null, collector_receipt_window: receiptWindow, reference_at: null, reference_session: null, adjustment_basis: null,
     derivation: { percent: 'producer chg_pct (rounded to 2 dp), preserved', absolute: 'consumer: price - prev_close', bps: 'consumer: (price - prev_close) x 100 after normalization' },
   };
   if (usable && prev !== 0 && inst.change_unit !== 'bps' && r.chg_pct == null) { change.status = 'partial'; change.reasons.push('producer_percent_missing'); }
@@ -165,8 +165,9 @@ function row(label, r, generatedAt, now, feedStale) {
     freshness = { status: lastKnown || age > STALE_SECONDS ? 'stale' : marketState === 'closed' ? 'closed' : marketState === 'unknown' ? 'unknown_market_state' : 'fresh', age_seconds: age };
   }
   Object.assign(freshness, { stale_after_seconds: STALE_SECONDS, basis: 'quote_ts = collector receipt time of the selected price input; provider observation time is unavailable',
-    market_state: marketState, price_session: priceSession,
-    live: freshness.status === 'fresh' && source === 'dxlink' && !lastKnown && !feedStale && r.price_basis != null && (['regular','premarket','postmarket'].includes(marketState) || marketState === 'continuous_market') });
+    market_state: marketState, collector_receipt_window: receiptWindow,
+    live: freshness.status === 'fresh' && source === 'dxlink' && !lastKnown && !feedStale && r.price_basis != null && (['regular','premarket','postmarket'].includes(marketState) || marketState === 'continuous_market'),
+    live_basis: 'recent DXLink collector receipt during a possible market window; provider observation freshness is unverified' });
 
   const warnings = [];
   if (source === 'yfinance' && !lastKnown) warnings.push('Undated yfinance fill: no provider observation time and no previous close. Not a live observation.');
@@ -176,7 +177,7 @@ function row(label, r, generatedAt, now, feedStale) {
   if (source === 'dxlink' && r.price_basis == null) warnings.push('Legacy strip does not identify whether price is a last trade or bid/ask midpoint; live status is withheld.');
   if (invalidCurrent || invalidReference) warnings.push('Nonpositive current price or negative reference is withheld for this instrument.');
   if (inst.id === 'fut.6j') warnings.push('The strip does not publish the resolved futures contract or expiry; a continuous-series roll cannot be checked.');
-  if (extendedSession) warnings.push('Extended-hours price is compared with Summary prevDayClosePrice; that reference has no confirmed session or timestamp. This is not a regular-session change.');
+  if (extendedSession) warnings.push('Receipt occurred in an extended-hours window; the provider observation session and Summary close session are unverified. This is not labeled a regular-session change.');
   if (feedStale) warnings.push('Collector marked the DXLink feed stale at this cycle; this row is not asserted live.');
   if (inst.scale && scale === null && r.price != null) warnings.push(`Unknown scale for source ${source}; value withheld.`);
   return { label, id: inst.id, name: inst.name, asset_class: inst.asset_class, instrument_type: inst.instrument_type, unit: inst.unit,

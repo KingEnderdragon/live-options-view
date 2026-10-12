@@ -19,6 +19,13 @@ is being discussed.
 The universe file and `market_overview.py` rules below are groundwork for that
 follow-on. The first-slice tool does not use them or offer a watchlist.
 
+The tool labels the **query-time market window** and the **collector receipt
+window** for US equities/ETFs. Neither proves the provider's trade session.
+Arithmetic changes remain visible but partial because the provider observation
+time and previous-close session/adjustment basis are not published. A recent
+DXLink receipt is marked live only in the limited sense of feed receipt during
+a possible market window; provider observation freshness is unverified.
+
 ## What this slice adds
 
 | File | Purpose |

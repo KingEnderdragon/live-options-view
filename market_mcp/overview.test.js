@@ -21,7 +21,8 @@ test('price strip is allowlisted and market_overview is a read-only tool', () =>
 
 test('DXLink rows keep producer percent, gain identity, unit and consumer-derived dollar change', async () => {
   const { consumer } = setup(); const r = by(await consumer.call('market_overview', { limit: 50 }));
-  assert.equal(r.AAPL.id, 'AAPL'); assert.equal(r.AAPL.change.status, 'ok');
+  assert.equal(r.AAPL.id, 'AAPL'); assert.equal(r.AAPL.change.status, 'partial');
+  assert.ok(r.AAPL.change.reasons.includes('observation_and_reference_session_unverified'));
   assert.equal(r.AAPL.change.percent, 1); assert.equal(r.AAPL.change.absolute, 2); assert.equal(r.AAPL.change.absolute_unit, 'USD');
   assert.equal(r.AAPL.freshness.status, 'fresh'); assert.equal(r.AAPL.freshness.live, true);
   assert.equal(r.QQQ.id, 'etf.qqq'); assert.match(r.QQQ.name, /not the index/);
@@ -159,8 +160,9 @@ test('equity session labels cover premarket, postmarket, holiday, early close an
     assert.equal(a.freshness.live, expected !== 'closed', stamp);
     if (expected === 'premarket' || expected === 'postmarket') {
       assert.equal(a.change.status, 'partial', stamp);
-      assert.equal(a.change.current_session, expected);
-      assert.ok(a.change.reasons.includes('extended_hours_reference_session_unverified'));
+      assert.equal(a.change.current_session, null);
+      assert.equal(a.change.collector_receipt_window, expected);
+      assert.ok(a.change.reasons.includes('extended_receipt_window_reference_session_unverified'));
     }
   }
 });
