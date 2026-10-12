@@ -217,6 +217,10 @@ test('discovery appends the overview capability without moving existing position
   assert.deepEqual(out.capabilities.map(c => c.dataset), ['qqq_snapshot', 'scheduled_squeeze', 'options_returns', 'spy_snapshot', 'cross_market_overview']);
   assert.equal(out.capabilities[4].availability, 'available'); assert.equal(out.capabilities[4].source_locator, KEY);
   assert.ok(out.capabilities[4].gaps.length > 0);
+  assert.equal(out.capabilities[4].instruments.find(i => i.label === 'JPY/USD').id, 'fut.6j');
+  edit(files, p => { p.prices['JPY/USD'] = {price:0.0067,source:'yfinance',source_symbol:'JPYUSD=X',quote_ts:null}; });
+  out = await consumer.call('discover_sources');
+  assert.equal(out.capabilities[4].instruments.find(i => i.label === 'JPY/USD').id, 'fx.jpyusd');
   delete files[KEY]; out = await consumer.call('discover_sources');
   assert.equal(out.capabilities[4].availability, 'missing_publication');
 });

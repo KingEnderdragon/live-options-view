@@ -170,17 +170,19 @@ class Consumer {
       catch (e) { probe.error = errorRecord(e, key); probe.value = null; }
       if (id === 'cross_market_overview') {
         const p = probe.value;
+        const listed = p ? overview.rows(p, this.now()) : null;
         out.capabilities.push({ dataset: id, producer_schema: 'unversioned collector price strip (intraday/prices.json)',
           availability: probe.error ? (probe.error.code === 'missing_artifact' ? 'missing_publication' : 'failed') : 'available',
           actual: p ? { collector_cycle_at: p.timestamp, feed_stale: p.feed_stale } : null,
           freshness: p ? {...age(p.timestamp, this.now(), overview.STALE_SECONDS),basis:'collector cycle time, not publication or quote observation'} : { status: 'unknown' },
           source_locator: key, error: probe.error, units: units[id], warnings: warnings[id],
-          fields: ['label','id','asset_class','instrument_type','unit','source','price','previous_close','change','freshness','gaps'],
+          fields: ['label','id','asset_class','instrument_type','unit','source','source_symbol','price','price_basis','collector_received_at','observed_at','previous_close','change','freshness','gaps'],
           filters: ['asset_class', 'symbols', 'sort', 'limit', 'offset'], asset_classes: overview.ASSET_CLASSES,
-          instruments: Object.entries(overview.INSTRUMENTS).map(([label, i]) => ({ label, id: i.id, asset_class: i.asset_class, unit: i.unit })),
+          instruments: listed ? listed.known.map(r => ({ label:r.label, id:r.id, asset_class:r.asset_class, instrument_type:r.instrument_type, unit:r.unit, source:r.source, available:r.price !== null })) : [],
+          configured_labels: Object.keys(overview.INSTRUMENTS),
           source_dependent_identities: [{label:'JPY/USD',source:'yfinance',id:'fx.jpyusd',instrument_type:'spot_fx'},{label:'JPY/USD',source:'last-known without retained origin',id:'unknown.jpyusd',instrument_type:'unknown'}],
           gaps: overview.GAPS, cadence: 'collector price loop about every 10 s during collector sessions; yfinance fills cached 60 s',
-          coverage: p ? { strip_labels: Object.keys(p.prices).length } : null, historical_index: 'not_supported' });
+          coverage: p ? { strip_labels: Object.keys(p.prices).length, identified:listed.known.length, unmapped:listed.unmapped.length } : null, historical_index: 'not_supported' });
         continue;
       }
       const chain = chainSymbol(id);
