@@ -41,8 +41,11 @@ test('active all, clean, qualified and pinned detail survive pointer advance',as
   f.files[ACTIVE+'latest.json']='{}';
   const detail=await f.consumer.call('result_detail',{reference:all.rows[0].detail_reference,limit:6});
   assert.equal(detail.status,'in_progress');assert.equal(detail.actual.sweep,6);
-  assert.equal(detail.quote_path.length,6);assert.ok(detail.quote_path.every(r=>r.sweep<=6));
-  assert.equal(detail.pagination.next_offset,null);
+  assert.equal(detail.quote_path.length,2);assert.ok(detail.quote_path.every(r=>r.sweep<=6));
+  assert.equal(detail.pagination.next_offset,2);
+  const last=await f.consumer.call('result_detail',{reference:all.rows[0].detail_reference,limit:6,offset:4});
+  assert.equal(last.quote_path.length,2);assert.equal(last.quote_path.at(-1).sweep,6);
+  assert.equal(last.pagination.next_offset,null);
   assert.ok(!f.calls.some(k=>k.includes('sweep_0007')));
 });
 test('active pointer and immutable member mismatches fail closed',async()=>{
@@ -59,6 +62,13 @@ test('pinned detail rejects changed source sweep and never mixes quote path',asy
   assert.equal(out.status,'failed');assert.equal(out.errors[0].code,'source_changed');
   assert.equal(out.quote_path,undefined);
 });
+test('missing pinned source sweep is partial with an exact retry offset',async()=>{
+  const f=setup(),first=await f.consumer.call('active_rankings',{session:SESSION,limit:1});
+  delete f.files[BASE+'sweeps/sweep_0002.jsonl.gz'];
+  const out=await f.consumer.call('result_detail',{reference:first.rows[0].detail_reference,limit:2});
+  assert.equal(out.status,'partial');assert.equal(out.errors[0].code,'missing_artifact');
+  assert.deepEqual(out.pagination.retry_offsets,[1]);assert.equal(out.quote_path.length,1);
+});
 test('active missing, before-open, holiday and invalid filters stay explicit',async()=>{
   const f=setup();delete f.files[ACTIVE+'latest.json'];
   assert.equal((await f.consumer.call('active_rankings',{session:SESSION})).status,'missing');
@@ -74,7 +84,7 @@ test('active missing, before-open, holiday and invalid filters stay explicit',as
 test('active detail and paging retain request and byte bounds',async()=>{
   const f=setup();const first=await f.consumer.call('active_rankings',{session:SESSION,limit:1});
   const detail=await f.consumer.call('result_detail',{reference:first.rows[0].detail_reference,limit:50,offset:3});
-  assert.equal(detail.quote_path.length,3);assert.equal(detail.pagination.limit,LIMITS.path_sweeps);
+  assert.equal(detail.quote_path.length,2);assert.equal(detail.pagination.limit,2);
   assert.ok(f.calls.length<=LIMITS.requests*2);
 });
 test('newer failed attempt stays visible beside last successful snapshot',async()=>{

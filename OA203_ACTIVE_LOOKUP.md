@@ -33,8 +33,10 @@ The MCP appends `active_rankings`. It resolves `session: "current"` through
 the existing bounded XNYS calendar, or accepts one explicit date. `sweep`
 pins a retained generation; omitting it follows `latest.json`. It offers
 `all`, `clean` and `qualified_ask_bid_v1` using producer ranks and rows.
-`result_detail` verifies the pinned summary, board, manifest and at most six
-source sweeps by digest. Pointer advancement does not change an existing
+`result_detail` verifies the pinned summary, board, manifest and at most two
+source sweeps per page by digest. Two measured-size expanded sweeps leave
+headroom under the MCP's 64 MiB per-query budget; the hard byte/request/time
+limits still apply. Pointer advancement does not change an existing
 reference. It reports the effective session, cutoff, state, freshness,
 coverage, cadence and newer failed attempt. Closed sessions with a final
 summary route to the existing final-return path; active snapshots never

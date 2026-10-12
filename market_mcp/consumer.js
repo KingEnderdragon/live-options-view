@@ -19,6 +19,9 @@ const occRoot = symbol => /^[A-Z]+/.exec(symbol || '')?.[0] ?? '';
 const SYMBOL = /^[A-Z][A-Z0-9.-]{0,9}$/;
 const CONTRACT = /^[A-Z0-9.]{1,10}\d{6}[CP]\d{8}$/;
 const QUALIFIED_RANK = 'qualified_first_ask_to_later_bid_rank';
+// A real expanded sweep is about 20 MiB. Two leave room for the pinned
+// summary/board/manifest inside the existing 64 MiB per-query ceiling.
+const ACTIVE_PATH_SWEEPS = 2;
 const dates = value => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) &&
   Number.isFinite(Date.parse(value)) && new Date(value).toISOString().slice(0, 10) === value && value >= '2020-01-01' && value <= '2100-12-31';
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -494,15 +497,15 @@ class Consumer {
         Number.isSafeInteger(m.ended_ms)&&m.ended_ms<=v.actual.cutoff_ms),
       'Invalid pinned active manifest.');
       const selected=manifest.filter(m=>Object.hasOwn(m.chains,v.row.underlying));
-      const paged=slice(selected,Math.min(limit,LIMITS.path_sweeps),offset);
+      const paged=slice(selected,Math.min(limit,ACTIVE_PATH_SWEEPS),offset);
       out.pagination={...paged.pagination,scope:'pinned chain sweeps; quote rows filtered to this contract'};
-      const path=[];const sweeps=[];
+      const path=[];const sweeps=[];const retryOffsets=[];
       out.coverage=summary.assessment;out.summary=summary;out.active_state='in_progress';
       out.producer_times={observation:null,acquisition_start:null,acquisition_end:new Date(summary.cutoff_ms).toISOString(),
         publication:null,built_at:summary.built_at??null};
       out.freshness={status:'historical',basis:'exact pinned active cutoff'};
       out.session_window={open_ms:summary.session_open_ms,close_ms:summary.session_close_ms};
-      for(const m of paged.rows) {
+      for(const [index,m] of paged.rows.entries()) {
         sweeps.push({...m,chains:{[v.row.underlying]:m.chains[v.row.underlying]}});
         const key=`oa203/scanner/${v.actual.session}/sweeps/${m.file}`;
         try {
@@ -520,10 +523,10 @@ class Consumer {
           }
         } catch(e) {
           if(e.code==='source_changed')throw e;
-          out.errors.push(errorRecord(e,key));out.status='partial';
+          out.errors.push(errorRecord(e,key));out.status='partial';retryOffsets.push(offset+index);
         }
       }
-      out.quote_path=path;out.sweeps=sweeps;
+      out.quote_path=path;out.sweeps=sweeps;out.pagination.retry_offsets=retryOffsets;
       if(out.status!=='partial')out.status='in_progress';
       out.warnings.push('Calculation cells and ranks are producer values from the exact immutable cutoff; no after-cutoff observations are used.');
       return out;
