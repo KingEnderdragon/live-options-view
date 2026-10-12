@@ -35,9 +35,9 @@ jobs:
       contents: read
       packages: write
     env:
-      SOURCE_SHA: 1dde53f78709a41c41e17af37c1f9e422626f5af
+      SOURCE_SHA: 1eec17c1b1ae20d3f45a058074198e20349eb7c5
       IMAGE: ghcr.io/owentanzer/market-mcp-read-only
-      RELEASE_TAG: 1dde53f78709a41c41e17af37c1f9e422626f5af-run-${{ github.run_id }}-${{ github.run_attempt }}
+      RELEASE_TAG: 1eec17c1b1ae20d3f45a058074198e20349eb7c5-run-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - name: Check out reviewed publisher from master
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -47,7 +47,7 @@ jobs:
       - name: Check out approved merge commit
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: 1dde53f78709a41c41e17af37c1f9e422626f5af
+          ref: 1eec17c1b1ae20d3f45a058074198e20349eb7c5
           path: source
           fetch-depth: 0
           persist-credentials: false
