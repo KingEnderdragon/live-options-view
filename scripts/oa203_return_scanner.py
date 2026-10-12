@@ -63,6 +63,8 @@ import io
 import json
 import os
 import signal
+import shutil
+import subprocess
 import statistics
 import sys
 import tempfile
@@ -624,7 +626,8 @@ class DayArchive:
     def artifacts(self) -> list[str]:
         return sorted(p.relative_to(self.dir).as_posix() for p in self.dir.rglob("*")
                       if p.is_file() and not p.name.endswith(".tmp")
-                      and p.name not in {UPLOAD_JOURNAL, UPLOAD_RECEIPT})
+                      and p.name not in {UPLOAD_JOURNAL, UPLOAD_RECEIPT}
+                      and "inprogress" not in p.relative_to(self.dir).parts)
 
     def _journal(self) -> dict[str, Any]:
         path = self.path(UPLOAD_JOURNAL)
@@ -773,8 +776,9 @@ def _read_jsonl_gz(path: Path, day_dir: Path,
             damaged.append(entry)
 
 
-def iter_rows(day_dir: Path, damaged: list[dict[str, Any]] | None = None) -> Iterator[dict[str, Any]]:
-    for path in sorted((day_dir / "sweeps").glob("sweep_*.jsonl.gz")):
+def iter_rows(day_dir: Path, damaged: list[dict[str, Any]] | None = None,
+              sweep_files: list[Path] | None = None) -> Iterator[dict[str, Any]]:
+    for path in sweep_files if sweep_files is not None else sorted((day_dir / "sweeps").glob("sweep_*.jsonl.gz")):
         yield from _read_jsonl_gz(path, day_dir, damaged)
 
 
@@ -783,13 +787,14 @@ def iter_rows(day_dir: Path, damaged: list[dict[str, Any]] | None = None) -> Ite
 # --------------------------------------------------------------------------
 
 def _contract_paths(day_dir: Path, start_ms: int | None, end_ms: int | None,
-                    buckets: int = 64, damaged: list[dict[str, Any]] | None = None
+                    buckets: int = 64, damaged: list[dict[str, Any]] | None = None,
+                    sweep_files: list[Path] | None = None
                     ) -> Iterator[tuple[str, list[dict[str, Any]]]]:
     """Group archived rows by contract with bounded memory (hash-partitioned temp files)."""
     with tempfile.TemporaryDirectory(prefix="oa203-build-") as tmp:
         handles = [open(Path(tmp) / f"b{i:02d}.jsonl", "w", encoding="utf-8") for i in range(buckets)]
         try:
-            for row in iter_rows(day_dir, damaged):
+            for row in iter_rows(day_dir, damaged, sweep_files):
                 if not row.get("symbol"):
                     continue
                 if (start_ms and row["t"] < start_ms) or (end_ms and row["t"] >= end_ms):
@@ -850,14 +855,25 @@ def load_backfill(day_dir: Path, damaged: list[dict[str, Any]] | None = None) ->
 def build_contract_rows(day_dir: Path, policy: ReturnPolicy, start_ms: int | None = None,
                         end_ms: int | None = None,
                         damaged: list[dict[str, Any]] | None = None,
-                        qualified_policy: QualifiedPolicy = QualifiedPolicy()) -> list[dict[str, Any]]:
+                        qualified_policy: QualifiedPolicy = QualifiedPolicy(),
+                        cutoff_sweep: int | None = None) -> list[dict[str, Any]]:
     """Rank every archived contract; damaged inputs are salvaged and recorded in ``damaged``."""
-    manifest = _read_manifest(day_dir, damaged)
+    manifest = _read_manifest(day_dir, damaged, cutoff_sweep)
+    if cutoff_sweep is not None:
+        manifest = [m for m in manifest if type(m.get("sweep")) is int and 1 <= m["sweep"] <= cutoff_sweep]
+        if [m["sweep"] for m in manifest] != list(range(1, cutoff_sweep + 1)):
+            raise ValueError("cutoff manifest is incomplete or out of order")
+        sweep_files = [day_dir / "sweeps" / f"sweep_{m['sweep']:04d}.jsonl.gz" for m in manifest]
+        if any(not p.is_file() for p in sweep_files):
+            raise FileNotFoundError("cutoff sweep file is missing")
+    else:
+        sweep_files = None
     ok = chain_ok_sweeps(manifest)
     prefix_ok = chain_ok_prefixes(manifest)
-    backfill = load_backfill(day_dir, damaged)
+    backfill = {} if cutoff_sweep is not None else load_backfill(day_dir, damaged)
     rows = []
-    for symbol, path_rows in _contract_paths(day_dir, start_ms, end_ms, damaged=damaged):
+    for symbol, path_rows in _contract_paths(day_dir, start_ms, end_ms, damaged=damaged,
+                                             sweep_files=sweep_files):
         last = path_rows[-1]
         info = ContractInfo(
             symbol=symbol, underlying=last["underlying"], option_type=last["type"],
@@ -882,7 +898,8 @@ def build_contract_rows(day_dir: Path, policy: ReturnPolicy, start_ms: int | Non
     return rank(rows)
 
 
-def _read_manifest(day_dir: Path, damaged: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+def _read_manifest(day_dir: Path, damaged: list[dict[str, Any]] | None = None,
+                   max_sweep: int | None = None) -> list[dict[str, Any]]:
     path = day_dir / "sweeps" / "manifest.jsonl"
     if not path.exists():
         return []
@@ -891,7 +908,10 @@ def _read_manifest(day_dir: Path, damaged: list[dict[str, Any]] | None = None) -
         if not line.strip():
             continue
         try:
-            entries.append(json.loads(line))
+            item = json.loads(line)
+            entries.append(item)
+            if max_sweep is not None and item.get("sweep") == max_sweep:
+                break  # later manifest coverage cannot affect a cutoff build
         except ValueError as exc:  # e.g. a partial line from a crash mid-append
             entry = {"file": "sweeps/manifest.jsonl", "line": number, "error": str(exc)[:200]}
             log("oa203_damaged_artifact", **entry)
@@ -908,17 +928,19 @@ def _cell(value: Any) -> Any:
     return value
 
 
-def write_outputs(day_dir: Path, rows: list[dict[str, Any]], top: int = 200) -> dict[str, str]:
+def write_outputs(day_dir: Path, rows: list[dict[str, Any]], top: int = 200,
+                  include_contracts: bool = True) -> dict[str, str]:
     columns: list[str] = []
     for row in rows:
         for key in row:
             if key not in columns:
                 columns.append(key)
-    with published(day_dir / "contracts.csv.gz") as tmp,             gzip.open(tmp, "wt", encoding="utf-8", newline="") as out:
-        writer = csv.DictWriter(out, fieldnames=columns, extrasaction="ignore")
-        writer.writeheader()
-        for row in rows:
-            writer.writerow({k: _cell(row.get(k)) for k in columns})
+    if include_contracts:
+        with published(day_dir / "contracts.csv.gz") as tmp, gzip.open(tmp, "wt", encoding="utf-8", newline="") as out:
+            writer = csv.DictWriter(out, fieldnames=columns, extrasaction="ignore")
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({k: _cell(row.get(k)) for k in columns})
     board = [r for r in rows if (r.get("rank") or 10**9) <= top or (r.get("clean_rank") or 10**9) <= top]
     with published(day_dir / "leaderboard.csv") as tmp,             open(tmp, "w", encoding="utf-8", newline="") as out:
         writer = csv.DictWriter(out, fieldnames=columns, extrasaction="ignore")
@@ -932,8 +954,162 @@ def write_outputs(day_dir: Path, rows: list[dict[str, Any]], top: int = 200) -> 
         writer.writeheader()
         for row in qualified_board:
             writer.writerow({k: _cell(row.get(k)) for k in columns})
-    return {"contracts": "contracts.csv.gz", "leaderboard": "leaderboard.csv",
-            "qualified_ask_bid_v1": "qualified_ask_bid_v1.csv"}
+    return {**({"contracts": "contracts.csv.gz"} if include_contracts else {}),
+            "leaderboard": "leaderboard.csv", "qualified_ask_bid_v1": "qualified_ask_bid_v1.csv"}
+
+
+ACTIVE_MEMBERS = ("summary.json", "leaderboard.csv", "qualified_ask_bid_v1.csv", "manifest.jsonl")
+ACTIVE_BUILD_SECONDS = 240
+ACTIVE_EVERY_SWEEPS = 6
+ACTIVE_MAX_SNAPSHOTS_PER_DAY = 16
+
+
+def write_active_attempt(archive: DayArchive, sweep: int, status: str,
+                         reason: str | None = None) -> None:
+    payload = {"schema_version": 1, "trade_date": archive.day.isoformat(), "sweep": sweep,
+               "status": status, "reason": reason,
+               "at": datetime.now(timezone.utc).isoformat()}
+    name = "inprogress/latest-attempt.json"
+    archive.path("inprogress").mkdir(parents=True, exist_ok=True)
+    archive.write_json(name, payload)
+    if archive.upload:
+        send = _r2_uploader()
+        result = send(archive.path(name), f"{archive.prefix}/{name}", "application/json")
+        if result.get("sha256") != _sha256_file(archive.path(name)):
+            raise ValueError("active attempt upload checksum mismatch")
+
+
+@contextlib.contextmanager
+def active_build_lock(archive: DayArchive) -> Iterator[None]:
+    """Prevent duplicate local generations across scanner restarts."""
+    lock = archive.path("inprogress/.build.lock")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    token = os.urandom(16).hex()
+    try:
+        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        if time.time() - lock.stat().st_mtime <= ACTIVE_BUILD_SECONDS + 60:
+            raise RuntimeError("active snapshot build already running")
+        lock.unlink()
+        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    with os.fdopen(fd, "w", encoding="utf-8") as out:
+        out.write(token)
+    try:
+        yield
+    finally:
+        if lock.exists() and lock.read_text(encoding="utf-8") == token:
+            lock.unlink()
+
+
+def build_active_snapshot(archive: DayArchive, cfg: Config, sweep: int,
+                          open_ms: int, close_ms: int,
+                          uploader: Callable[[Path, str, str], dict[str, Any]] | None = None) -> dict[str, Any]:
+    with active_build_lock(archive):
+        return _build_active_snapshot(archive, cfg, sweep, open_ms, close_ms, uploader)
+
+
+def _build_active_snapshot(archive: DayArchive, cfg: Config, sweep: int,
+                           open_ms: int, close_ms: int,
+                           uploader: Callable[[Path, str, str], dict[str, Any]] | None = None) -> dict[str, Any]:
+    """Build an immutable cutoff generation, then publish its moving pointer last.
+
+    The CLI may be retried after interruption. An existing generation is reused
+    only when its recorded member digests still match. No source sweep is copied.
+    """
+    if not 1 <= sweep <= ACTIVE_EVERY_SWEEPS * ACTIVE_MAX_SNAPSHOTS_PER_DAY:
+        raise ValueError("invalid snapshot sweep")
+    manifest = [m for m in archive.manifest() if type(m.get("sweep")) is int and m["sweep"] <= sweep]
+    if [m["sweep"] for m in manifest] != list(range(1, sweep + 1)):
+        raise ValueError("snapshot manifest is incomplete")
+    cutoff_ms = manifest[-1].get("ended_ms")
+    if type(cutoff_ms) is not int or not open_ms < cutoff_ms <= close_ms + 60_000:
+        raise ValueError("invalid snapshot cutoff")
+    source = []
+    for m in manifest:
+        path = archive.path(f"sweeps/sweep_{m['sweep']:04d}.jsonl.gz")
+        if not path.is_file() or m.get("file") != path.name:
+            raise FileNotFoundError(f"missing snapshot source sweep {m['sweep']}")
+        source.append({**m, "sha256": _sha256_file(path)})
+    if archive.upload:
+        journal = archive._journal()
+        if any((journal.get(f"sweeps/sweep_{m['sweep']:04d}.jsonl.gz") or {}).get("sha256") != m["sha256"]
+               for m in source):
+            raise ValueError("source sweep upload is unverified; snapshot skipped")
+    name = f"inprogress/sweep_{sweep:04d}"
+    target = archive.path(name)
+    tmp = archive.path(name + ".building")
+    if target.exists():
+        summary = json.loads((target / "summary.json").read_text(encoding="utf-8"))
+        if (summary.get("cutoff_sweep"), summary.get("cutoff_ms")) != (sweep, cutoff_ms):
+            raise ValueError("immutable snapshot identity changed")
+        digest = summary.get("member_sha256") or {}
+        if any(not (target / member).is_file() or _sha256_file(target / member) != digest.get(member)
+               for member in ACTIVE_MEMBERS if member != "summary.json"):
+            raise ValueError("immutable snapshot member changed")
+        recorded = [json.loads(line) for line in (target / "manifest.jsonl").read_text(encoding="utf-8").splitlines() if line]
+        if [(m.get("sweep"), m.get("sha256")) for m in recorded] != [
+                (m["sweep"], m["sha256"]) for m in source]:
+            raise ValueError("immutable snapshot source lineage changed")
+    else:
+        if tmp.exists():
+            shutil.rmtree(tmp)
+        tmp.mkdir(parents=True)
+        try:
+            damaged: list[dict[str, Any]] = []
+            rows = build_contract_rows(archive.dir, cfg.policy, open_ms, cutoff_ms, damaged,
+                                       cfg.qualified_policy, cutoff_sweep=sweep)
+            if damaged:
+                raise ValueError("damaged cutoff source; snapshot skipped")
+            outputs = write_outputs(tmp, rows, include_contracts=False)
+            with published(tmp / "manifest.jsonl") as staged:
+                staged.write_text("".join(json.dumps(m, sort_keys=True) + "\n" for m in source), encoding="utf-8")
+            digests = {member: _sha256_file(tmp / member) for member in ACTIVE_MEMBERS if member != "summary.json"}
+            summary = {"schema_version": 1, "trade_date": archive.day.isoformat(), "final": False,
+                       "state": "in_progress", "cutoff_sweep": sweep, "cutoff_ms": cutoff_ms,
+                       "session_open_ms": open_ms, "session_close_ms": close_ms,
+                       "assessment": {"status": "partial", "reasons": ["session_in_progress"],
+                                      "completed_sweeps": sweep,
+                                      "truncated_sweeps": sum(bool(m.get("truncated")) for m in manifest),
+                                      "chain_status_counts": dict(Counter(s.get("status", "unknown")
+                                                                           for m in manifest for s in m.get("chains", {}).values()))},
+                       "contracts": len(rows), "outputs": outputs, "return_policy": cfg.policy.as_dict(),
+                       "qualified_policy": cfg.qualified_policy.as_dict(),
+                       "measurement": MEASUREMENT_NOTE, "member_sha256": digests,
+                       "built_at": datetime.now(timezone.utc).isoformat()}
+            with published(tmp / "summary.json") as staged:
+                staged.write_text(json.dumps(summary, sort_keys=True) + "\n", encoding="utf-8")
+            os.rename(tmp, target)
+        finally:
+            if tmp.exists():
+                shutil.rmtree(tmp)
+    hashes = {member: _sha256_file(target / member) for member in ACTIVE_MEMBERS}
+    prior = archive.path("inprogress/latest.json")
+    existing = json.loads(prior.read_text(encoding="utf-8")) if prior.exists() else None
+    published_at = datetime.now(timezone.utc).isoformat()
+    previous_at = existing.get("published_at") if existing else None
+    observed_cadence = (round((datetime.fromisoformat(published_at) - datetime.fromisoformat(previous_at)).total_seconds(), 1)
+                        if previous_at else None)
+    pointer = {"schema_version": 1, "trade_date": archive.day.isoformat(), "state": "in_progress",
+               "sweep": sweep, "cutoff_ms": cutoff_ms, "archive": f"{archive.prefix}/{name}",
+               "members": hashes, "built_at": summary["built_at"],
+               "published_at": published_at, "previous_published_at": previous_at,
+               "observed_cadence_s": observed_cadence,
+               "expected_cadence_s": ACTIVE_EVERY_SWEEPS * 300}
+    if existing and existing.get("sweep", 0) > sweep:
+        return existing  # retries may never move the pointer backwards
+    if archive.upload:
+        send = uploader or _r2_uploader()
+        for member in ACTIVE_MEMBERS:
+            result = send(target / member, f"{pointer['archive']}/{member}", _content_type(member))
+            if result.get("sha256") != hashes[member]:
+                raise ValueError("snapshot upload checksum mismatch")
+    archive.write_json("inprogress/latest.json", pointer)
+    if archive.upload:
+        result = send(archive.path("inprogress/latest.json"),
+                      f"{archive.prefix}/inprogress/latest.json", "application/json")
+        if result.get("sha256") != _sha256_file(archive.path("inprogress/latest.json")):
+            raise ValueError("snapshot pointer upload checksum mismatch")
+    return pointer
 
 
 # --------------------------------------------------------------------------
@@ -1272,6 +1448,8 @@ def run_day(cfg: Config, *, client: Tradier | None = None,
     sleep_until(open_at)
     sweep = max((m["sweep"] for m in archive.manifest()), default=0)
     previous_start = None
+    active_proc: subprocess.Popen | None = None
+    active_started = 0.0
     while not STOP and now() < close_at:
         sweep += 1
         name = f"sweeps/sweep_{sweep:04d}.jsonl.gz"
@@ -1301,6 +1479,27 @@ def run_day(cfg: Config, *, client: Tradier | None = None,
             request_stats_delta=entry["request_stats_delta"],
             max_request_seconds=client.stats.get("max_request_seconds", 0),
             effective_rpm=getattr(client, "effective_rpm", cfg.max_rpm))
+        if active_proc is not None and active_proc.poll() is not None:
+            log("oa203_active_snapshot_exit", code=active_proc.returncode)
+            active_proc = None
+        if active_proc is not None and time.monotonic() - active_started > ACTIVE_BUILD_SECONDS + 10:
+            # The supervisor normally enforces 240 s itself. This is only a
+            # last-resort guard if it stopped responding.
+            active_proc.kill()
+            log("oa203_active_snapshot_supervisor_killed", sweep=sweep)
+            active_proc = None
+        if (os.getenv("OA203_ACTIVE_SNAPSHOTS_ENABLED") == "1" and
+                sweep % ACTIVE_EVERY_SWEEPS == 0 and
+                sweep <= ACTIVE_EVERY_SWEEPS * ACTIVE_MAX_SNAPSHOTS_PER_DAY and
+                active_proc is None):
+            command = [sys.executable, str(Path(__file__).resolve()), "snapshot-supervise",
+                       "--dir", str(archive.dir), "--sweep", str(sweep),
+                       "--open-ms", str(_session_ms(bounds)[0]),
+                       "--close-ms", str(_session_ms(bounds)[1])]
+            active_proc = subprocess.Popen(command, stdout=subprocess.DEVNULL,
+                                           stderr=subprocess.DEVNULL)
+            active_started = time.monotonic()
+            log("oa203_active_snapshot_started", sweep=sweep, pid=active_proc.pid)
     if STOP:
         # Bounded: local writes only. The next run reconciles uploads and,
         # once the close has passed, finalizes the day with this recorded.
@@ -1431,6 +1630,12 @@ def main(argv: list[str] | None = None) -> int:
     smoke.add_argument("--no-backfill", action="store_true")
     build = sub.add_parser("build", help="rebuild leaderboard from a local day directory")
     build.add_argument("--dir", type=Path, required=True)
+    for command in ("snapshot", "snapshot-supervise"):
+        snap = sub.add_parser(command, help="build or supervise one cutoff snapshot")
+        snap.add_argument("--dir", type=Path, required=True)
+        snap.add_argument("--sweep", type=int, required=True)
+        snap.add_argument("--open-ms", type=int, required=True)
+        snap.add_argument("--close-ms", type=int, required=True)
     insp = sub.add_parser("inspect", help="show one contract's path and return calculation")
     insp.add_argument("--dir", type=Path, required=True)
     insp.add_argument("--symbol", required=True)
@@ -1481,6 +1686,31 @@ def main(argv: list[str] | None = None) -> int:
         rows = build_contract_rows(args.dir, cfg.policy, *_bounds_from_summary(args.dir),
                                    qualified_policy=cfg.qualified_policy)
         print(json.dumps(write_outputs(args.dir, rows)))
+        return 0
+    if args.command in ("snapshot", "snapshot-supervise"):
+        if args.command == "snapshot-supervise":
+            archive = DayArchive(args.dir.parent, date.fromisoformat(args.dir.name), cfg.r2_prefix, cfg.upload)
+            command = [sys.executable, str(Path(__file__).resolve()), "snapshot", "--dir", str(args.dir),
+                       "--sweep", str(args.sweep), "--open-ms", str(args.open_ms),
+                       "--close-ms", str(args.close_ms)]
+            try:
+                write_active_attempt(archive, args.sweep, "building")
+                subprocess.run(command, timeout=ACTIVE_BUILD_SECONDS, check=True)
+                write_active_attempt(archive, args.sweep, "complete")
+            except Exception as exc:
+                reason = "timeout" if isinstance(exc, subprocess.TimeoutExpired) else "build_failed"
+                try:
+                    write_active_attempt(archive, args.sweep, "failed", reason)
+                except Exception as report_exc:
+                    log("oa203_active_attempt_report_failed", error=str(report_exc)[:200])
+                log("oa203_active_snapshot_skipped", sweep=args.sweep,
+                    reason=reason)
+                return 1
+            return 0
+        archive = DayArchive(args.dir.parent, date.fromisoformat(args.dir.name), cfg.r2_prefix, cfg.upload)
+        pointer = build_active_snapshot(archive, cfg, args.sweep, args.open_ms, args.close_ms)
+        log("oa203_active_snapshot_published", sweep=args.sweep,
+            archive=pointer["archive"], cutoff_ms=pointer["cutoff_ms"])
         return 0
     if args.command == "inspect":
         print(json.dumps(inspect_contract(args.dir, args.symbol, cfg.policy, cfg.qualified_policy),

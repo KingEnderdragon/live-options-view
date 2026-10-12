@@ -2,7 +2,7 @@
 
 Production follow-up status and Linux image evidence: [ROLLOUT.md](ROLLOUT.md).
 
-Six read-only tools expose existing producer artifacts. Node 22+; no package
+Seven read-only tools expose existing producer artifacts. Node 22+; no package
 install, provider token, R2 credentials, scanner invocation or trading imports.
 The module remains in this repository because it consumes the existing calendar,
 schedule semantics and producer contracts. Its transports and tests are separate
@@ -36,6 +36,17 @@ artifact keys. No fallback from fixtures to network occurs. The client flow is:
 5. `return_rankings({"session":"2026-10-02","view":"clean","limit":3})`.
 6. `result_detail({"reference":"<detail_reference from one returned row>","limit":1})`.
 7. For a return path, follow `pagination.next_offset` with the **same** reference.
+
+For the active Banana candidate, call `discover_sources` to inspect
+`options_active`, then `active_rankings({"session":"current","view":"clean","limit":3})`.
+The response names the selected exchange session and provisional cutoff.
+Follow a returned `detail_reference` through `result_detail` for its pinned
+quote path. Use `view:"all"` or `view:"qualified_ask_bid_v1"` to change the
+producer ranking; use `sweep:<number>` to revisit one retained generation.
+When the final daily summary exists, the active tool returns the final
+producer product. A missing current-day snapshot never selects yesterday.
+This tool is an undeployed review candidate: the producer publication gate,
+remote retention policy and live client verification remain outstanding.
 
 The smoke client includes standard `_meta` and verifies text/structured results
 agree. Stdout contains only newline-delimited JSON-RPC server messages.
@@ -72,6 +83,7 @@ Its Linux image checks pass; live client/grant gates remain pending. See
 | `market_context` | Optional `underlying` (`QQQ` default, or `SPY`; #121). QQQ reads `intraday/latest.json` (dataset `qqq_snapshot`), SPY reads `intraday/spy/latest.json` (dataset `spy_snapshot`). Returns `requested_underlying` and `actual.underlying`, the underlying block and a chain page filtered by expiry/type/strike/OCC contract. The payload's symbol, `underlying_market.symbol` and every contract root must match the request or it fails as `symbol_mismatch`; an archive locator outside the requested underlying's layout fails as `incompatible_schema`. Unsupported symbols, a contract for the other underlying, or a missing SPY publication return explicit errors; QQQ is never substituted. Detail references keep the originating underlying and snapshot. |
 | `squeeze_results` | Scheduled `latest.json`, `latest-attempt.json`, `latest-schedule.json`; uses the existing exported XNYS calendar and `formatSqueezeScheduleStatus`. |
 | `return_rankings` | One exact date's `summary.json` and bounded shortlist: legacy `leaderboard.csv` for all/clean, or `qualified_ask_bid_v1.csv` for `view: "qualified_ask_bid_v1"`. Preserves producer ranks, policy, reasons, underlying/type filters, and pagination. Older sessions report the qualified view as unavailable. |
+| `active_rankings` | Current or explicit XNYS session's immutable, producer-built cutoff generation. All/clean/qualified views, bounded filters and explicit retained sweep selection. Provisional state, cutoff, cadence and newer attempts stay visible; a final daily result uses the final path. Requires producer publication, currently disabled. |
 | `market_overview` | #132 first slice: the existing `intraday/prices.json` dashboard strip. Source identity distinguishes Yahoo JPY/USD spot from CME yen futures; unknown-origin carried yen is withheld. ETF proxies retain ETF identities. Selected-price basis and collector receipt time are labeled separately from unavailable provider observation time. Producer `chg_pct` is preserved where valid; unit change (`price - prev_close`) and 10Y bps after CBOE scale normalization are consumer-derived. The unresolved yen futures contract has no comparable change. Undated Yahoo fills and carried values are not live. Unsupported assets are named `gaps`, including under asset-class filters. Filters: `asset_class`, `symbols`, `sort`, `limit`, `offset`. |
 | `result_detail` | Retained snapshot JSON row; exact squeeze run's manifest/results/normalized inputs; selected return contract from bounded sweep pages with producer calculation cells/flags. |
 

@@ -3,8 +3,62 @@
 Issue: [#131](https://github.com/OwenTanzer/live-options-view/issues/131).
 Companion: #130 (multi-session windows, draft PR #134), whose window contract
 this lookup also serves.
-Status: **design for review**. It contains no code, collection changes or
-deployments.
+Status: **implementation candidate for independent review**. The code is
+disabled for production collection by default. No collection setting or
+deployment has been changed.
+
+## Candidate implementation and activation gates
+
+The scanner now has a cutoff-aware `build_contract_rows(..., cutoff_sweep=N)`
+path. It stops reading the manifest at N and opens only those N sweep files.
+Later quotes, later manifest coverage and after-close backfill are excluded.
+Every six completed sweeps, an opt-in supervisor can launch one child build
+with a 240-second wall-clock timeout. It never waits in the sampling loop.
+Only one local builder may hold the build lock. A timed-out build is killed,
+reported as a failed attempt and skipped; a later six-sweep trigger can try
+again. The scanner's existing five-minute collection target is unchanged.
+
+The child publishes `summary.json`, `leaderboard.csv`,
+`qualified_ask_bid_v1.csv` and a cutoff `manifest.jsonl` under the immutable
+`inprogress/sweep_NNNN/` path. The manifest records SHA-256 for each original
+sweep. The upload checks the scanner's verified sweep-upload journal first,
+uploads and verifies every immutable member, then uploads `latest.json` last.
+The pointer carries member digests, cutoff, publication time and observed
+cadence. A retry may republish the same generation but never move the pointer
+backwards. Local snapshots are not part of the scanner's mutable daily upload
+journal. `latest-attempt.json` records building, complete or failed attempts.
+The post-close daily output remains the only final ranking.
+
+The MCP appends `active_rankings`. It resolves `session: "current"` through
+the existing bounded XNYS calendar, or accepts one explicit date. `sweep`
+pins a retained generation; omitting it follows `latest.json`. It offers
+`all`, `clean` and `qualified_ask_bid_v1` using producer ranks and rows.
+`result_detail` verifies the pinned summary, board, manifest and at most six
+source sweeps by digest. Pointer advancement does not change an existing
+reference. It reports the effective session, cutoff, state, freshness,
+coverage, cadence and newer failed attempt. Closed sessions with a final
+summary route to the existing final-return path; active snapshots never
+masquerade as final.
+
+**Activation remains gated.** `OA203_ACTIVE_SNAPSHOTS_ENABLED=1` is required
+to trigger builds, and is unset by default. The code caps generation triggers
+at 16 per session. The approved intent to retain snapshots still needs a
+specific remote retention duration, eviction job/lifecycle rule and cost
+estimate. Nothing here automatically purges remote snapshots. Do not enable
+publication until that bounded policy, scanner memory/CPU sizing for a second
+process, and the 240-second budget have passed engineering review. The
+current 27–75-second / 430–585-MB desktop measurements do not establish
+Railway behavior. The separate #134 window producer contract is still in
+repair; this candidate exposes only the existing daily session product and
+does not claim weekly or multi-session support. No live Chej/client check
+has occurred.
+
+Offline acceptance: `python -m unittest tests.test_oa203_active
+tests.test_oa203_return_scanner` and `node --test market_mcp/*.test.js`.
+The cutoff fixture rebuilds the same early ranking after six later sweeps
+and a partial later manifest write, then confirms the uncut daily result has
+different low-coverage/clean classification. MCP fixtures cover pointer
+advancement, digest mismatch, bounded detail and missing states.
 
 Goal: Chej asks during the trading day "what leads Big Banana so far today?"
 and gets an honestly labeled, as-of leaderboard built only from evidence
