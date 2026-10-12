@@ -5,6 +5,7 @@ import json
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from datetime import date
 from pathlib import Path
 
@@ -129,6 +130,15 @@ class ActiveCutoff(unittest.TestCase):
         with self.archive.path("inprogress/sweep_0006/leaderboard.csv").open(newline="") as source:
             row = next(csv.DictReader(source))
         self.assertEqual(int(row["mid_first_to_max_exit_ms"]), OPEN + 5 * 300000)
+
+    def test_oversized_member_is_not_pointed_to(self):
+        for i in range(1, 4):
+            self.add_sweep(i)
+        with mock.patch.object(scanner, "ACTIVE_MAX_MEMBER_BYTES", 100):
+            with self.assertRaisesRegex(ValueError, "MCP artifact budget"):
+                scanner.build_active_snapshot(self.archive, self.cfg, 3, OPEN, CLOSE)
+        self.assertFalse(self.archive.path("inprogress/latest.json").exists())
+        self.assertFalse(self.archive.path("inprogress/sweep_0003").exists())
 
 
 if __name__ == "__main__":

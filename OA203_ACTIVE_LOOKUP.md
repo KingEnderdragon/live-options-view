@@ -35,8 +35,9 @@ pins a retained generation; omitting it follows `latest.json`. It offers
 `all`, `clean` and `qualified_ask_bid_v1` using producer ranks and rows.
 `result_detail` verifies the pinned summary, board, manifest and at most two
 source sweeps per page by digest. Two measured-size expanded sweeps leave
-headroom under the MCP's 64 MiB per-query budget; the hard byte/request/time
-limits still apply. Pointer advancement does not change an existing
+headroom under the MCP's 64 MiB per-query budget; the publisher rejects a
+member over 4 MiB or a manifest line over 256 KiB before moving the pointer.
+The hard byte/request/time limits still apply. Pointer advancement does not change an existing
 reference. It reports the effective session, cutoff, state, freshness,
 coverage, cadence and newer failed attempt. Closed sessions with a final
 summary route to the existing final-return path; active snapshots never

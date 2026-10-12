@@ -962,6 +962,8 @@ ACTIVE_MEMBERS = ("summary.json", "leaderboard.csv", "qualified_ask_bid_v1.csv",
 ACTIVE_BUILD_SECONDS = 240
 ACTIVE_EVERY_SWEEPS = 6
 ACTIVE_MAX_SNAPSHOTS_PER_DAY = 16
+ACTIVE_MAX_MEMBER_BYTES = 4 * 1024 * 1024  # market MCP Source.LIMITS.artifact_bytes
+ACTIVE_MAX_MANIFEST_LINE_BYTES = 256 * 1024  # market MCP Source.LIMITS.jsonl_line_bytes
 
 
 def write_active_attempt(archive: DayArchive, sweep: int, status: str,
@@ -1029,7 +1031,10 @@ def _build_active_snapshot(archive: DayArchive, cfg: Config, sweep: int,
         path = archive.path(f"sweeps/sweep_{m['sweep']:04d}.jsonl.gz")
         if not path.is_file() or m.get("file") != path.name:
             raise FileNotFoundError(f"missing snapshot source sweep {m['sweep']}")
-        source.append({**m, "sha256": _sha256_file(path)})
+        entry = {**m, "sha256": _sha256_file(path)}
+        if len(json.dumps(entry, sort_keys=True).encode("utf-8")) > ACTIVE_MAX_MANIFEST_LINE_BYTES:
+            raise ValueError("snapshot manifest line exceeds MCP parser budget")
+        source.append(entry)
     if archive.upload:
         journal = archive._journal()
         if any((journal.get(f"sweeps/sweep_{m['sweep']:04d}.jsonl.gz") or {}).get("sha256") != m["sha256"]
@@ -1046,6 +1051,8 @@ def _build_active_snapshot(archive: DayArchive, cfg: Config, sweep: int,
         if any(not (target / member).is_file() or _sha256_file(target / member) != digest.get(member)
                for member in ACTIVE_MEMBERS if member != "summary.json"):
             raise ValueError("immutable snapshot member changed")
+        if any((target / member).stat().st_size > ACTIVE_MAX_MEMBER_BYTES for member in ACTIVE_MEMBERS):
+            raise ValueError("snapshot member exceeds MCP artifact budget")
         recorded = [json.loads(line) for line in (target / "manifest.jsonl").read_text(encoding="utf-8").splitlines() if line]
         if [(m.get("sweep"), m.get("sha256")) for m in recorded] != [
                 (m["sweep"], m["sha256"]) for m in source]:
@@ -1078,6 +1085,8 @@ def _build_active_snapshot(archive: DayArchive, cfg: Config, sweep: int,
                        "built_at": datetime.now(timezone.utc).isoformat()}
             with published(tmp / "summary.json") as staged:
                 staged.write_text(json.dumps(summary, sort_keys=True) + "\n", encoding="utf-8")
+            if any((tmp / member).stat().st_size > ACTIVE_MAX_MEMBER_BYTES for member in ACTIVE_MEMBERS):
+                raise ValueError("snapshot member exceeds MCP artifact budget")
             os.rename(tmp, target)
         finally:
             if tmp.exists():
