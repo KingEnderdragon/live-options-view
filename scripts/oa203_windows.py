@@ -43,8 +43,9 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 from typing import Any, Iterable, Mapping, Sequence
+from zoneinfo import ZoneInfo
 
 from oa203_returns import (ContractInfo, Observation, QualifiedPolicy,
                            _qualified_endpoint, _relative_spread)
@@ -53,6 +54,7 @@ WINDOW_POLICY_VERSION = "oa203-windows-v1"
 BASES = ("mid", "exec", "qualified")
 KINDS = ("weekly_cheapest", "weekly_fixed", "weekly_cheapest_best_exit",
          "overnight", "sessions_2", "sessions_3")
+MARKET_TZ = ZoneInfo("America/New_York")
 
 
 @dataclass(frozen=True)
@@ -65,14 +67,14 @@ class WindowPolicy:
     overnight_across_gaps: bool = True          # D5: Fri->Mon and holiday gaps included
     multi_session_mode: str = "rolling"         # D6
     multi_session_lengths: tuple[int, ...] = (2, 3)
-    close_tolerance_s: int = 600                # D7: close endpoint within 10 min before close
+    close_tolerance_s: int = 900                # D7: owner-approved 15 min before close
     open_tolerance_s: int = 900                 # D7: open endpoint within 15 min after open
     allow_expiration_day_exit: bool = True      # D9
     # Roots whose standard series settle AM on expiration day (no PM quotes).
     # Weekly PM-settled roots (SPXW, NDXP, RUTW) are not listed.
     am_settled_roots: frozenset[str] = frozenset({"SPX", "NDX", "RUT", "VIX"})
     qualified: QualifiedPolicy = field(default_factory=QualifiedPolicy)
-    decisions_status: str = "provisional_recommended_defaults"
+    decisions_status: str = "D1-D5_D7_D8_approved; D6_D9_opening_tolerance_provisional"
 
     def __post_init__(self) -> None:
         if (type(self.early_week_sessions) is not int or not 1 <= self.early_week_sessions <= 4
@@ -105,6 +107,15 @@ class Session:
     close_ms: int
     early_close: bool = False
 
+    def __post_init__(self) -> None:
+        day = date.fromisoformat(self.day)
+        if (type(self.open_ms) is not int or type(self.close_ms) is not int or
+                self.open_ms < 0 or self.open_ms >= self.close_ms):
+            raise ValueError("invalid session interval")
+        if (datetime.fromtimestamp(self.open_ms / 1000, MARKET_TZ).date() != day or
+                datetime.fromtimestamp((self.close_ms - 1) / 1000, MARKET_TZ).date() != day):
+            raise ValueError("session bounds disagree with exchange date")
+
 
 @dataclass(frozen=True)
 class Window:
@@ -113,6 +124,13 @@ class Window:
     sessions: tuple[Session, ...]
     entry_sessions: tuple[Session, ...]
     exit_session: Session
+
+    def __post_init__(self) -> None:
+        if (not self.sessions or self.exit_session != self.sessions[-1] or
+                not self.entry_sessions or self.entry_sessions != self.sessions[:len(self.entry_sessions)] or
+                any(a.close_ms > b.open_ms for a, b in zip(self.sessions, self.sessions[1:])) or
+                len({s.day for s in self.sessions}) != len(self.sessions)):
+            raise ValueError("invalid window session order")
 
     def as_dict(self) -> dict[str, Any]:
         return {"kind": self.kind, "window_id": self.window_id,
@@ -177,15 +195,43 @@ def multi_session_windows(sessions: Sequence[Session], policy: WindowPolicy = Wi
 
 
 def _finite_pos(v: Any) -> bool:
-    return isinstance(v, (int, float)) and math.isfinite(v) and v > 0
+    return type(v) in (int, float) and math.isfinite(v) and v > 0
+
+
+def _quote_structure_reasons(obs: Observation, side: str) -> list[str]:
+    """Evidence possible at acquisition time, independent of freshness limits."""
+    reasons = []
+    if type(obs.t) is not int or obs.t < 0:
+        reasons.append(f"{side}_observation_time_invalid")
+    for name in ("bid", "ask"):
+        value = getattr(obs, name)
+        if value is None:
+            reasons.append(f"{side}_{name}_missing")
+        elif not _finite_pos(value):
+            reasons.append(f"{side}_{name}_invalid")
+    if not any(x.endswith(("_missing", "_invalid")) for x in reasons):
+        if obs.ask <= obs.bid:
+            reasons.append(f"{side}_{'crossed' if obs.ask < obs.bid else 'locked'}")
+    for name in ("bid_ms", "ask_ms"):
+        stamp = getattr(obs, name)
+        if stamp is None:
+            reasons.append(f"{side}_{name}_missing")
+        elif type(stamp) is not int or stamp < 0:
+            reasons.append(f"{side}_{name}_invalid")
+        elif type(obs.t) is int and stamp > obs.t:
+            reasons.append(f"{side}_{name}_future")
+    return reasons
 
 
 def entry_value(obs: Observation, basis: str, policy: WindowPolicy) -> tuple[float | None, list[str]]:
     """Entry price for one observation, using only that observation's evidence."""
+    if basis not in BASES:
+        raise ValueError(f"unknown basis: {basis}")
+    structural = _quote_structure_reasons(obs, "entry")
+    if structural:
+        return None, structural
     if basis == "mid":
-        return (obs.mid, []) if obs.mid else (None, ["entry_not_two_sided"])
-    if not _finite_pos(obs.ask) or obs.crossed:
-        return None, ["entry_ask_invalid"]
+        return (obs.mid, []) if _finite_pos(obs.mid) else (None, ["entry_mid_invalid"])
     if basis == "exec":
         return obs.ask, []
     bad, missing = _qualified_endpoint(obs, policy.qualified, "entry")
@@ -195,10 +241,13 @@ def entry_value(obs: Observation, basis: str, policy: WindowPolicy) -> tuple[flo
 
 
 def exit_value(obs: Observation, basis: str, policy: WindowPolicy) -> tuple[float | None, list[str]]:
+    if basis not in BASES:
+        raise ValueError(f"unknown basis: {basis}")
+    structural = _quote_structure_reasons(obs, "exit")
+    if structural:
+        return None, structural
     if basis == "mid":
-        return (obs.mid, []) if obs.mid else (None, ["exit_not_two_sided"])
-    if not _finite_pos(obs.bid) or obs.crossed:
-        return None, ["exit_bid_invalid"]
+        return (obs.mid, []) if _finite_pos(obs.mid) else (None, ["exit_mid_invalid"])
     if basis == "exec":
         return obs.bid, []
     bad, missing = _qualified_endpoint(obs, policy.qualified, "exit")
@@ -206,7 +255,11 @@ def exit_value(obs: Observation, basis: str, policy: WindowPolicy) -> tuple[floa
 
 
 def _in_session(path: Sequence[Observation], s: Session) -> list[Observation]:
-    return sorted((o for o in path if s.open_ms <= o.t < s.close_ms), key=lambda o: o.t)
+    return sorted((o for o in path if type(o.t) is int and s.open_ms <= o.t < s.close_ms), key=lambda o: o.t)
+
+
+def _invalid_path_time(path: Sequence[Observation]) -> list[str]:
+    return ["observation_time_invalid"] if any(type(o.t) is not int or o.t < 0 for o in path) else []
 
 
 def _first_after_open(path, s: Session, value_fn, basis: str, policy: WindowPolicy):
@@ -219,7 +272,7 @@ def _first_after_open(path, s: Session, value_fn, basis: str, policy: WindowPoli
         if v is not None:
             return o, v, []
         reasons += why
-    return None, None, ["open_endpoint_missing"] + sorted(set(reasons))
+    return None, None, ["open_endpoint_missing"] + sorted(set(reasons + _invalid_path_time(path)))
 
 
 def _last_before_close(path, s: Session, value_fn, basis: str, policy: WindowPolicy):
@@ -232,7 +285,7 @@ def _last_before_close(path, s: Session, value_fn, basis: str, policy: WindowPol
         if v is not None:
             return o, v, []
         reasons += why
-    return None, None, ["close_endpoint_missing"] + sorted(set(reasons))
+    return None, None, ["close_endpoint_missing"] + sorted(set(reasons + _invalid_path_time(path)))
 
 
 def open_endpoint(path, s: Session, basis: str, policy: WindowPolicy):
@@ -260,19 +313,20 @@ def cheapest_entry(path, sessions: Sequence[Session], basis: str, policy: Window
             elif best is None or v < best[1]:
                 best = (o, v)
     if best is None:
-        return None, None, ["no_eligible_entry"] + sorted(reasons)
+        return None, None, ["no_eligible_entry"] + sorted(reasons | set(_invalid_path_time(path)))
     return best[0], best[1], []
 
 
-def best_later_exit(path, after_t: int, through: Session, basis: str, policy: WindowPolicy):
+def best_later_exit(path, after_t: int, window: Window, basis: str, policy: WindowPolicy):
     best = None
-    for o in sorted(path, key=lambda o: o.t):
-        if o.t <= after_t or o.t >= through.close_ms:
+    for o in sorted((o for o in path if type(o.t) is int), key=lambda o: o.t):
+        if o.t <= after_t or not any(s.open_ms <= o.t < s.close_ms for s in window.sessions):
             continue
         v, _ = exit_value(o, basis, policy)
         if v is not None and (best is None or v > best[1]):
             best = (o, v)
-    return (best[0], best[1], []) if best else (None, None, ["no_strictly_later_exit"])
+    return (best[0], best[1], []) if best else (None, None, ["no_strictly_later_exit"] +
+                                               _invalid_path_time(path))
 
 
 # -- evaluation -----------------------------------------------------------
@@ -329,6 +383,8 @@ def _leg(window: Window, entry, exit_, info: ContractInfo, basis: str) -> dict[s
         for name in ("bid", "ask", "bid_ms", "ask_ms", "bid_size", "ask_size", "underlying_price"):
             row[f"{side}_{name}"] = getattr(o, name)
         row[f"{side}_quote_age_s"] = o.quote_age_s
+        row[f"{side}_bid_quote_age_s"] = (o.t - o.bid_ms) / 1000 if o.bid_ms is not None else None
+        row[f"{side}_ask_quote_age_s"] = (o.t - o.ask_ms) / 1000 if o.ask_ms is not None else None
         row[f"{side}_relative_spread"] = (round(_relative_spread(o), 6)
                                           if _finite_pos(o.bid) and _finite_pos(o.ask) else None)
     return row
@@ -361,7 +417,7 @@ def evaluate(window: Window, info: ContractInfo, path: Sequence[Observation],
             row[basis] = {"status": "excluded", "reasons": ep[2], "pct": None}
             continue
         if window.kind == "weekly_cheapest_best_exit":
-            xp = best_later_exit(path, ep[0].t, window.exit_session, basis, policy)
+            xp = best_later_exit(path, ep[0].t, window, basis, policy)
         elif window.kind == "overnight":
             xp = _first_after_open(path, window.exit_session, exit_value, basis, policy)
         else:

@@ -1,5 +1,6 @@
 import sys
 import unittest
+from dataclasses import replace
 from datetime import datetime, time
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -48,6 +49,14 @@ def week_path():
 
 
 class Construction(unittest.TestCase):
+    def test_reversed_or_overlapping_intervals_rejected(self):
+        with self.assertRaises(ValueError):
+            w.Session("2026-10-05", ms("2026-10-05", 16, 0), ms("2026-10-05", 9, 30))
+        with self.assertRaises(ValueError):
+            w.Session("2026-10-05", ms("2026-10-06", 9, 30), ms("2026-10-06", 16, 0))
+        with self.assertRaises(ValueError):
+            w.Window("overnight", "bad", (SESSIONS[1], SESSIONS[0]), (SESSIONS[1],), SESSIONS[0])
+
     def test_weekly_windows_normal_week(self):
         windows, skipped = w.weekly_windows(SESSIONS)
         self.assertEqual(skipped, [])
@@ -82,7 +91,9 @@ class Construction(unittest.TestCase):
     def test_policy_is_versioned_and_provisional(self):
         d = w.WindowPolicy().as_dict()
         self.assertEqual(d["version"], "oa203-windows-v1")
-        self.assertEqual(d["decisions_status"], "provisional_recommended_defaults")
+        self.assertIn("D1-D5_D7_D8_approved", d["decisions_status"])
+        self.assertEqual(d["close_tolerance_s"], 900)
+        self.assertEqual(d["qualified_endpoint_policy"]["max_quote_age_s"], 1800)
         with self.assertRaises(ValueError):
             w.WindowPolicy(early_week_sessions=0)
         with self.assertRaises(ValueError):
@@ -116,6 +127,11 @@ class Weekly(unittest.TestCase):
         best = self.run_kind("weekly_cheapest_best_exit")
         self.assertEqual(best["exec"]["exit"], 4.0)
         self.assertGreater(best["exec"]["pct"], self.run_kind("weekly_cheapest")["exec"]["pct"])
+        future = ob("2026-10-09", 14, 0, 99.0, 100.0)
+        future = replace(future, bid_ms=future.t + 60_000)
+        guarded = self.run_kind("weekly_cheapest_best_exit", path=week_path() + [future])
+        self.assertEqual(guarded["exec"]["exit"], 4.0)
+        self.assertEqual(guarded["mid"]["exit"], 4.05)
 
     def test_no_look_ahead_on_entry(self):
         base = self.run_kind("weekly_cheapest")
@@ -156,6 +172,55 @@ class Weekly(unittest.TestCase):
         r = self.run_kind("weekly_cheapest", path=crossed)
         self.assertEqual(r["exec"]["exit"], 2.8)  # skips the crossed 15:57 quote, never blends
 
+    def test_15_minute_close_latest_qualifying_and_quote_side_age(self):
+        path = week_path()[:-1] + [ob("2026-10-09", 15, 46, 2.0, 2.1),
+                                  ob("2026-10-09", 15, 48, 2.4, 2.5),
+                                  ob("2026-10-09", 15, 57, 3.0, 2.9)]
+        row = self.run_kind("weekly_cheapest", path=path)
+        self.assertEqual(row["qualified"]["exit"], 2.4)
+        self.assertEqual(row["qualified"]["exit_lead_before_close_s"], 720)
+        self.assertEqual(row["qualified"]["exit_bid_quote_age_s"], 0)
+        self.assertIn("close_endpoint_missing", self.run_kind(
+            "weekly_cheapest", path=path, policy=w.WindowPolicy(close_tolerance_s=600))["qualified"]["reasons"])
+        fresh = ob("2026-10-09", 15, 48, 2.4, 2.5)
+        stale = replace(fresh, bid_ms=fresh.t - 1801_000)
+        row = self.run_kind("weekly_cheapest", path=week_path()[:-1] + [stale])
+        self.assertIn("close_endpoint_missing", row["qualified"]["reasons"])
+
+    def test_future_or_missing_quote_times_never_enter_any_basis(self):
+        clean_entry = ob("2026-10-05", 9, 35, 1.9, 2.0)
+        clean_exit = ob("2026-10-09", 15, 55, 2.9, 3.0)
+        variants = (replace(clean_entry, bid_ms=clean_entry.t + 60_000),
+                    replace(clean_entry, ask_ms=clean_entry.t + 60_000),
+                    replace(clean_entry, bid_ms=None), replace(clean_entry, ask_ms=None))
+        for bad in variants:
+            with self.subTest(bid_ms=bad.bid_ms, ask_ms=bad.ask_ms):
+                r = self.run_kind("weekly_cheapest", path=[bad, clean_exit])
+                for basis in w.BASES:
+                    self.assertEqual(r[basis]["status"], "excluded")
+                    self.assertTrue(any("future" in why or "missing" in why for why in r[basis]["reasons"]))
+        for bad in (replace(clean_exit, bid_ms=clean_exit.t + 60_000),
+                    replace(clean_exit, ask_ms=clean_exit.t + 60_000),
+                    replace(clean_exit, bid_ms=None), replace(clean_exit, ask_ms=None)):
+            r = self.run_kind("weekly_fixed", path=[clean_entry, bad])
+            for basis in w.BASES:
+                self.assertEqual(r[basis]["status"], "excluded")
+
+    def test_stale_is_distinct_from_impossible_future_evidence(self):
+        fresh = ob("2026-10-09", 15, 55, 2.9, 3.0)
+        stale = replace(fresh, bid_ms=fresh.t - 1801_000)
+        r = self.run_kind("weekly_fixed", path=[ob("2026-10-05", 9, 35, 1.9, 2.0), stale])
+        self.assertEqual(r["mid"]["status"], "eligible")
+        self.assertEqual(r["exec"]["status"], "eligible")
+        self.assertEqual(r["qualified"]["status"], "excluded")
+        self.assertIn("exit_bid_timestamp_stale", r["qualified"]["reasons"])
+
+    def test_missing_observation_time_cannot_form_an_endpoint(self):
+        missing = replace(ob("2026-10-05", 9, 35, 1.9, 2.0), t=None)
+        row = self.run_kind("weekly_fixed", path=[missing, ob("2026-10-09", 15, 55, 2.9, 3.0)])
+        for basis in w.BASES:
+            self.assertIn("observation_time_invalid", row[basis]["reasons"])
+
     def test_delayed_first_quote_makes_fixed_entry_missing(self):
         path = [o for o in week_path() if o.t != ms("2026-10-05", 9, 35)]
         r = self.run_kind("weekly_fixed", path=path)
@@ -163,6 +228,16 @@ class Weekly(unittest.TestCase):
 
 
 class OvernightAndSessions(unittest.TestCase):
+    def test_overnight_rejects_future_entry_and_exit_sides(self):
+        win = w.overnight_windows(SESSIONS)[0]
+        entry = ob("2026-10-05", 15, 55, 1.0, 1.1)
+        exit_ = ob("2026-10-06", 9, 35, 1.3, 1.4)
+        for path in ([replace(entry, ask_ms=entry.t + 60_000), exit_],
+                     [entry, replace(exit_, bid_ms=exit_.t + 60_000)]):
+            row = w.evaluate(win, info(), path, WEEK)
+            for basis in w.BASES:
+                self.assertEqual(row[basis]["status"], "excluded")
+
     def test_overnight_close_to_open(self):
         win = w.overnight_windows(SESSIONS)[0]
         r = w.evaluate(win, info(), week_path(), WEEK)

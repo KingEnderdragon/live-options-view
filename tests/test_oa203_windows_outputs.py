@@ -46,7 +46,7 @@ class Outputs(unittest.TestCase):
         self.assertEqual(sorted(p.name for p in out.iterdir()), ["paths.csv.gz", "rankings.csv", "summary.json"])
         s = json.loads((out / "summary.json").read_text(encoding="utf-8"))
         self.assertEqual((s["state"], s["state_reasons"]), ("final", []))
-        self.assertEqual(s["policy"]["decisions_status"], "provisional_recommended_defaults")
+        self.assertIn("D1-D5_D7_D8_approved", s["policy"]["decisions_status"])
         self.assertEqual(s["counts"]["exec"]["eligible"], 2)
         self.assertEqual(s["counts"]["exec"]["negative"], 1)
         self.assertEqual(s["counts"]["exec"]["exclusion_reasons"], {"expires_before_exit": 1})
@@ -60,10 +60,19 @@ class Outputs(unittest.TestCase):
         self.assertEqual([r["symbol"] for r in rows], ["AAA261009C00100000", "BBB261009C00100000", "CCC261006C00100000"])
         self.assertEqual(rows[2]["exec_status"], "excluded")
         self.assertIn("expires_before_exit", rows[2]["exec_reasons"])
+        self.assertEqual(rows[0]["qualified_exit_bid_quote_age_s"], "0.0")
+
+    def test_bounded_replay_cannot_claim_full_final_state(self):
+        out = outputs.write_window(self.root, self.window, rows_for(self.window), w.WindowPolicy(), FINAL,
+                                   [], "2026-10-12T07:00:00+00:00", {"mode": "offline_replay"})
+        summary = json.loads((out / "summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(summary["state"], "partial")
+        self.assertIn("bounded_universe_replay", summary["state_reasons"])
 
     def test_shortlist_is_cut_after_full_ranking(self):
         out = self.write(shortlist=1)
-        ranked = list(csv.DictReader((out / "rankings.csv").open(encoding="utf-8")))
+        with (out / "rankings.csv").open(encoding="utf-8") as source:
+            ranked = list(csv.DictReader(source))
         self.assertEqual([(r["basis"], r["rank"], r["symbol"]) for r in ranked],
                          [(b, "1", "AAA261009C00100000") for b in w.BASES])
         s = json.loads((out / "summary.json").read_text(encoding="utf-8"))

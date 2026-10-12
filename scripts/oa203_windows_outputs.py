@@ -37,8 +37,10 @@ PATH_COLUMNS = ["symbol", "underlying", "root", "option_type", "strike", "expira
                 "flags", "contract_exclusions"]
 BASIS_COLUMNS = ["status", "reasons", "pct", "entry", "exit", "abs_change_per_contract", "entry_ms", "exit_ms",
                  "entry_session", "exit_session", "entry_delay_from_boundary_s", "exit_lead_before_close_s",
-                 "entry_bid", "entry_ask", "entry_ask_size", "entry_quote_age_s", "entry_relative_spread",
-                 "exit_bid", "exit_ask", "exit_bid_size", "exit_quote_age_s", "exit_relative_spread"]
+                 "entry_bid", "entry_ask", "entry_bid_ms", "entry_ask_ms", "entry_ask_size",
+                 "entry_bid_quote_age_s", "entry_ask_quote_age_s", "entry_quote_age_s", "entry_relative_spread",
+                 "exit_bid", "exit_ask", "exit_bid_ms", "exit_ask_ms", "exit_bid_size",
+                 "exit_bid_quote_age_s", "exit_ask_quote_age_s", "exit_quote_age_s", "exit_relative_spread"]
 
 
 @contextmanager
@@ -116,6 +118,8 @@ def write_window(root: Path, window: w.Window, rows: Sequence[Mapping[str, Any]]
     out = root / "oa203" / "windows" / w.WINDOW_POLICY_VERSION / window.kind / window.window_id
     state, reasons = window_state(window, session_status,
                                   [s["key"] for s in sources if s.get("missing")])
+    if scope.get("mode") == "offline_replay" and state == "final":
+        state, reasons = "partial", ["bounded_universe_replay"]
     rankings, counts = rankings_csv(rows, shortlist)
     paths = gzip.compress(path_rows_csv(rows), mtime=0)
     summary = {
@@ -129,7 +133,9 @@ def write_window(root: Path, window: w.Window, rows: Sequence[Mapping[str, Any]]
         "labels": ["Sampled quotes (~5-minute sweeps); between-sample moves are missed.",
                    "Quote comparisons, not executed fills; spread/size qualification does not establish fills, fees or capacity.",
                    "Cheapest-entry and best-exit variants are hindsight results, not predictions."
-                   if window.kind.startswith("weekly_cheapest") else "Fixed-endpoint window."],
+                   if window.kind.startswith("weekly_cheapest") else
+                   ("Separate opening-price comparison; first qualifying sampled ask near the open."
+                    if window.kind == "weekly_fixed" else "Fixed-endpoint window.")],
     }
     for name, data in (("rankings.csv", rankings), ("paths.csv.gz", paths)):
         with _atomic(out / name) as tmp:

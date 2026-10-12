@@ -2,9 +2,12 @@
 
 Issue: [#130](https://github.com/OwenTanzer/live-options-view/issues/130).
 Companion: #131 (on-demand MCP lookup), which will consume this contract.
-Status: **design for review**. It contains no code, collection changes or
-deployments. The owner hasn't fixed the window definitions; each choice below
-is a proposal with a recommended default, not a decision.
+Status: **draft implementation for review**. The pure window module, bounded
+offline replay, local-only writer and opt-in SPY/QQQ second-chain collector
+code are present. Nothing in this PR is deployed or published. See
+`docs/plans/oa203-pr134-review.md` for the current decision status and live
+acceptance checklist. The D1–D5, D7 and bounded D8 decisions in issue #130
+supersede the original provisional recommendations below.
 
 ## What the existing archive already supports
 

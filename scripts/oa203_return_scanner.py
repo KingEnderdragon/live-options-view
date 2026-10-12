@@ -127,6 +127,7 @@ class Config:
     spool_dir: Path = Path("/data/oa203")
     r2_prefix: str = "oa203/scanner"
     upload: bool = True
+    spy_qqq_second_expiry: bool = False  # separately activated after review; at most two chains each
     policy: ReturnPolicy = field(default_factory=ReturnPolicy)
     qualified_policy: QualifiedPolicy = field(default_factory=QualifiedPolicy)
 
@@ -142,6 +143,7 @@ class Config:
             universe_lead_min=_env_int("OA203_UNIVERSE_LEAD_MIN", 30),
             spool_dir=Path(os.getenv("OA203_SPOOL_DIR", "/data/oa203")),
             r2_prefix=os.getenv("OA203_R2_PREFIX", "oa203/scanner"),
+            spy_qqq_second_expiry=os.getenv("OA203_SPY_QQQ_SECOND_EXPIRY", "false").lower() == "true",
             qualified_policy=QualifiedPolicy(
                 min_entry_premium=float(os.getenv("OA203_QUAL_MIN_PREMIUM", "0.10")),
                 max_relative_spread=float(os.getenv("OA203_QUAL_MAX_REL_SPREAD", "0.30")),
@@ -161,6 +163,7 @@ class Config:
             "reserve": self.reserve, "block_size": self.block_size, "workers": self.workers,
             "backfill_top": self.backfill_top, "universe_lead_min": self.universe_lead_min,
             "r2_prefix": self.r2_prefix, "return_policy": self.policy.as_dict(),
+            "spy_qqq_second_expiry": self.spy_qqq_second_expiry,
             "qualified_policy": self.qualified_policy.as_dict(),
         }
 
@@ -434,8 +437,20 @@ def nearest_expiration(dates: Iterable[str], today: date) -> str | None:
     return upcoming[0] if upcoming else None
 
 
+def second_friday_expiration(dates: Iterable[str], today: date, nearest: str) -> str | None:
+    """Keep the next Friday cohort across Friday-to-Monday, within two chains.
+
+    A rolling >=5-calendar-day threshold drops the next Friday cohort on
+    Monday. The next listed Friday strictly after the nearest expiry remains the same
+    cohort from the previous Friday through the following week's Thursday.
+    """
+    candidates = sorted(d for d in dates if d > nearest
+                        and date.fromisoformat(d).weekday() == 4)
+    return candidates[0] if candidates else None
+
+
 def select_universe(client: Tradier, ranked: list[tuple[str, dict[str, int]]], today: date,
-                    target: int, workers: int = 3) -> dict[str, Any]:
+                    target: int, workers: int = 3, spy_qqq_second_expiry: bool = False) -> dict[str, Any]:
     """First ``target`` ranked underlyings with an unexpired expiry on Tradier."""
     selected: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
@@ -453,8 +468,11 @@ def select_universe(client: Tradier, ranked: list[tuple[str, dict[str, int]]], t
         expiry = nearest_expiration(dates, today)
         if expiry is None:
             return {**base, "skip_reason": "no_unexpired_expiration"}
+        extra = (second_friday_expiration(dates, today, expiry)
+                 if spy_qqq_second_expiry and symbol in {"SPY", "QQQ"} else None)
         return {**base, "expiration": expiry,
-                "days_to_expiration": (date.fromisoformat(expiry) - today).days}
+                "days_to_expiration": (date.fromisoformat(expiry) - today).days,
+                **({"additional_expiration": extra} if extra else {})}
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         while len(selected) < target and position < len(ranked):
@@ -466,7 +484,7 @@ def select_universe(client: Tradier, ranked: list[tuple[str, dict[str, int]]], t
                 (skipped if "skip_reason" in result else selected).append(result)
     selected = sorted(selected, key=lambda r: r["occ_rank"])[:target]
     return {
-        "selection_version": SELECTION_VERSION,
+        "selection_version": "oa203-universe-v2-second-expiry" if spy_qqq_second_expiry else SELECTION_VERSION,
         "rule": ("rank underlyings by previous-session OCC cleared contracts "
                  "(sum over account types / 2); keep the first N with an unexpired "
                  "Tradier expiration; chain = nearest expiration on/after the trade date"),
@@ -475,6 +493,8 @@ def select_universe(client: Tradier, ranked: list[tuple[str, dict[str, int]]], t
         "shortfall": max(0, target - len(selected)),
         "candidates_examined": position,
         "selected": selected,
+        "additional_expiry_rule": ("next listed Friday strictly after nearest expiry for SPY/QQQ only; "
+                                   "at most one extra expiry" if spy_qqq_second_expiry else "disabled"),
         "skipped": skipped,
         "skip_counts": dict(Counter(s["skip_reason"] for s in skipped)),
     }
@@ -532,6 +552,7 @@ def run_sweep(client: Tradier, universe: list[dict[str, Any]], sweep: int, out_p
     def safe_error(exc):
         return json.dumps(exception_details(exc, (getattr(client, "token", ""),)))
     chains: dict[str, dict[str, Any]] = {}
+    additional_chains: dict[str, dict[str, dict[str, Any]]] = {}
     truncated = False
     with published(out_path) as tmp, gzip.open(tmp, "wt", encoding="utf-8") as out,             ThreadPoolExecutor(max_workers=workers) as pool:
         for start in range(0, len(universe), block_size):
@@ -557,7 +578,7 @@ def run_sweep(client: Tradier, universe: list[dict[str, Any]], sweep: int, out_p
 
             for u, contracts, fetched, error in pool.map(fetch, block):
                 name = u["underlying"]
-                status: dict[str, Any] = {"fetched_ms": fetched}
+                status: dict[str, Any] = {"fetched_ms": fetched, "expiration": u["expiration"]}
                 if error is not None:
                     status.update(status="error", error=error)
                 elif not contracts:
@@ -570,11 +591,37 @@ def run_sweep(client: Tradier, universe: list[dict[str, Any]], sweep: int, out_p
                 if name not in quotes:
                     status["spot_missing"] = quote_error or "not returned"
                 chains[name] = status
+                extra = u.get("additional_expiration")
+                if extra:
+                    extra_status: dict[str, Any] = {"expiration": extra, "fetched_ms": now_ms()}
+                    if STOP or (deadline and datetime.now(ET) >= deadline):
+                        extra_status["status"] = "skipped_deadline"
+                        truncated = True
+                    else:
+                        try:
+                            extra_contracts = client.chain(name, extra)
+                            extra_status["fetched_ms"] = now_ms()
+                            if not extra_contracts:
+                                extra_status["status"] = "empty"
+                            elif any(c.get("expiration_date") != extra for c in extra_contracts):
+                                extra_status["status"] = "expiry_mismatch"
+                            else:
+                                extra_rows = chain_rows(sweep, extra_status["fetched_ms"], name,
+                                                        extra_contracts, quotes.get(name))
+                                for row in extra_rows:
+                                    row["collection_role"] = "additional_expiry"
+                                    out.write(json.dumps(row, separators=(",", ":")) + "\n")
+                                extra_status.update(status="ok", rows=len(extra_rows))
+                        except Exception as exc:
+                            extra_status.update(status="error", error=safe_error(exc))
+                    additional_chains[name] = {extra: extra_status}
     counts = Counter(s["status"] for s in chains.values())
     truncated = truncated or bool(deadline and datetime.now(ET) >= deadline)
     return {"sweep": sweep, "file": out_path.name, "started_ms": started, "ended_ms": now_ms(),
             "truncated": truncated, "status_counts": dict(counts),
-            "rows": sum(s.get("rows", 0) for s in chains.values()), "chains": chains}
+            "rows": sum(s.get("rows", 0) for s in chains.values()) +
+                    sum(s.get("rows", 0) for e in additional_chains.values() for s in e.values()),
+            "chains": chains, "additional_chains": additional_chains}
 
 
 # --------------------------------------------------------------------------
@@ -792,6 +839,10 @@ def _contract_paths(day_dir: Path, start_ms: int | None, end_ms: int | None,
             for row in iter_rows(day_dir, damaged):
                 if not row.get("symbol"):
                     continue
+                # Preserve the established daily leaderboard and backfill
+                # universe. The extra raw rows are reserved for windows.
+                if row.get("collection_role") == "additional_expiry":
+                    continue
                 if (start_ms and row["t"] < start_ms) or (end_ms and row["t"] >= end_ms):
                     continue
                 bucket = int(hashlib.md5(row["symbol"].encode()).hexdigest(), 16) % buckets
@@ -1004,11 +1055,30 @@ def assess_session(universe: dict[str, Any], manifest: list[dict[str, Any]], ope
     if in_session and not complete_sweeps:
         reasons.append("no_complete_sweep")
 
-    chain_total = sum(len(m["chains"]) for m in in_session)
-    chain_ok = sum(m["status_counts"].get("ok", 0) for m in in_session)
+    # The nearest-chain daily contract remains unchanged. Additional chains
+    # are separate expected fetches: an omitted status is a failure, not a
+    # smaller denominator. Report their coverage independently so two missed
+    # SPY/QQQ chains cannot disappear inside 500 successful nearest chains.
+    expected_extra = {(u["underlying"], u["additional_expiration"])
+                      for u in universe.get("selected") or [] if u.get("additional_expiration")}
+    nearest_total = sum(len(m["chains"]) for m in in_session)
+    nearest_ok = sum(m["status_counts"].get("ok", 0) for m in in_session)
+    extra_statuses = [m.get("additional_chains", {}).get(name, {}).get(expiry)
+                      for m in in_session for name, expiry in sorted(expected_extra)]
+    extra_ok = sum(bool(st and st.get("status") == "ok" and st.get("expiration") == expiry
+                        and type(st.get("rows")) is int and st["rows"] > 0)
+                   for m in in_session for name, expiry in expected_extra
+                   for st in [m.get("additional_chains", {}).get(name, {}).get(expiry)])
+    extra_expected = len(extra_statuses)
+    extra_recorded = sum(st is not None for st in extra_statuses)
+    extra_failures = extra_expected - extra_ok
+    chain_total = nearest_total + extra_expected
+    chain_ok = nearest_ok + extra_ok
     ok_rate = chain_ok / chain_total if chain_total else 0.0
     if chain_total and ok_rate < MIN_CHAIN_SUCCESS:
         reasons.append(f"chain_success_rate:{ok_rate:.4f}")
+    if extra_failures:
+        reasons.append(f"additional_chain_failures:{extra_failures}")
 
     selected = {u["underlying"] for u in universe.get("selected") or []}
     covered = {name for m in in_session for name, status in m["chains"].items()
@@ -1016,6 +1086,13 @@ def assess_session(universe: dict[str, Any], manifest: list[dict[str, Any]], ope
     coverage = len(covered & selected) / len(selected) if selected else 0.0
     if coverage < MIN_UNIVERSE_COVERAGE:
         reasons.append(f"universe_coverage:{coverage:.4f}")
+    extra_covered = {(name, expiry) for m in in_session for name, expiry in expected_extra
+                     if (st := m.get("additional_chains", {}).get(name, {}).get(expiry))
+                     and st.get("status") == "ok" and st.get("expiration") == expiry
+                     and type(st.get("rows")) is int and st["rows"] > 0}
+    extra_coverage = len(extra_covered) / len(expected_extra) if expected_extra else None
+    if expected_extra and extra_coverage < 1:
+        reasons.append(f"additional_expiry_coverage:{extra_coverage:.4f}")
 
     durations = [m["ended_ms"] - m["started_ms"] for m in complete_sweeps]
     typical = statistics.median(durations) if durations else None
@@ -1048,9 +1125,15 @@ def assess_session(universe: dict[str, Any], manifest: list[dict[str, Any]], ope
         "reasons": reasons,
         "sweeps_in_session": len(in_session),
         "complete_sweeps": len(complete_sweeps),
-        "chain_fetches": chain_total,
+        "chain_fetches": nearest_total + extra_recorded,
+        "chain_expected": chain_total,
         "chain_success_rate": round(ok_rate, 6),
         "universe_coverage": round(coverage, 6),
+        "additional_chain_expected": extra_expected,
+        "additional_chain_statuses_recorded": extra_recorded,
+        "additional_chain_successes": extra_ok,
+        "additional_chain_success_rate": (round(extra_ok / extra_expected, 6) if extra_expected else None),
+        "additional_expiry_coverage": (round(extra_coverage, 6) if extra_coverage is not None else None),
         "typical_sweep_s": round(typical / 1000, 1) if typical else None,
         "max_gap_s": round(max_gap / 1000, 1),
         "gaps_ms": gaps,
@@ -1083,7 +1166,8 @@ def build_universe_for(day: date, client: Tradier, cfg: Config, archive: DayArch
     with published(archive.path(f"occ_volume_{report_date.isoformat()}.csv.gz")) as tmp:
         tmp.write_bytes(gzip.compress(body))
     ranked = rank_underlyings(parse_occ_volume(body, report_date))
-    universe = select_universe(client, ranked, day, cfg.universe_size, cfg.workers)
+    universe = select_universe(client, ranked, day, cfg.universe_size, cfg.workers,
+                               cfg.spy_qqq_second_expiry)
     universe.update({
         "trade_date": day.isoformat(),
         "occ_report_date": report_date.isoformat(),
@@ -1125,11 +1209,16 @@ def finalize(archive: DayArchive, client: Tradier, cfg: Config, universe: dict[s
         "trade_date": archive.day.isoformat(),
         "session_open_ms": open_ms, "session_close_ms": close_ms,
         "assessment": assess_session(universe, manifest, bounds_open, bounds_close, pending, backfill,
-                                     dict(client.stats), expected_sweep_s(selected_count, cfg) * 1000,
+                                     dict(client.stats), (expected_sweep_s(selected_count, cfg) +
+                                         sum(bool(u.get("additional_expiration"))
+                                             for u in universe.get("selected") or []) /
+                                         max(1, cfg.max_rpm) * 60) * 1000,
                                      archive.interruptions(), damaged),
         "measurement": MEASUREMENT_NOTE,
         "universe": {k: universe.get(k) for k in ("target", "selected_count", "shortfall",
                                                   "skip_counts", "occ_report_date")},
+        "additional_expiries": {u["underlying"]: u["additional_expiration"]
+                                for u in universe.get("selected") or [] if u.get("additional_expiration")},
         "contracts": len(rows),
         "ranked_contracts": sum(1 for r in rows if r.get("rank")),
         "clean_ranked_contracts": sum(1 for r in rows if r.get("clean_rank")),
