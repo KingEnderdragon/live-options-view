@@ -74,10 +74,10 @@ jobs:
           push_output="$(docker push "$image")"
           digest="$(printf '%s\n' "$push_output" | sed -nE 's/.*digest: (sha256:[0-9a-f]{64}).*/\1/p' | tail -n 1)"
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-          tag_hash="$(docker buildx imagetools inspect --raw "$image" | sha256sum | cut -d ' ' -f 1)"
-          digest_hash="$(docker buildx imagetools inspect --raw "$IMAGE@$digest" | sha256sum | cut -d ' ' -f 1)"
-          test "sha256:$tag_hash" = "$digest"
-          test "sha256:$digest_hash" = "$digest"
+          tag_digest="$(docker buildx imagetools inspect "$image" --format '{{json .Manifest}}' | jq -r .digest)"
+          pinned_digest="$(docker buildx imagetools inspect "$IMAGE@$digest" --format '{{json .Manifest}}' | jq -r .digest)"
+          test "$tag_digest" = "$digest"
+          test "$pinned_digest" = "$digest"
           printf 'Published %s@%s from %s\n' "$IMAGE" "$digest" "$SOURCE_SHA"
           printf 'Image: `%s@%s`\nSource commit: `%s`\n' "$IMAGE" "$digest" "$SOURCE_SHA" >> "$GITHUB_STEP_SUMMARY"
 
