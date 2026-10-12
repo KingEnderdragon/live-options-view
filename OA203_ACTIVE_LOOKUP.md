@@ -30,6 +30,23 @@ This comes from source on `master` and the public 2026-10-09 artifacts.
 - **#131 forbids duplicating producer calculations in the consumer.** The
   ranking must come from `oa203_returns.py`'s own build.
 
+## Measured build cost (2026-10-09, 52,832 contracts, 77 sweeps)
+
+`build_contract_rows` was run on the full downloaded day on a 32-thread
+desktop, untraced. Peak memory is from a separate traced run. Railway is
+likely slower.
+
+| Cutoff | Time | Peak memory |
+| --- | --- | --- |
+| After sweep 12 (~1 h in) | 27 s | ~430 MB |
+| After sweep 40 (midday) | 48 s | ~500 MB |
+| Full day | 75 s | ~585 MB |
+
+Every cutoff build currently reads **all** sweep files and then discards
+rows after the cutoff. Sweep files are one per sweep, so a cutoff build can
+read only the sweeps ≤ N listed in the truncated manifest. That makes early
+snapshots proportionally cheaper and removes the future rows by construction.
+
 ## Options
 
 | | Option | Feasibility | Verdict |
@@ -68,10 +85,15 @@ oa203/scanner/<date>/inprogress/latest.json      # pointer: sweep, cutoff_ms, di
 - **State.** Each snapshot is `in_progress`, with the as-of cutoff and the
   sweeps included. The post-close `summary.json` stays the only `final`
   product. Snapshots never overwrite daily outputs.
-- **It must never slow collection.** The build runs between sweeps under a
-  hard time budget (decision A2). If the budget is exceeded, the snapshot is
-  skipped and logged, and sampling continues. If the build is slow, the
-  cadence drops; the sweep rate doesn't.
+- **It must never slow collection.** A late-day build (~75 s locally, likely
+  more on Railway) is too long to run inline between ~5-minute sweeps. The
+  build runs in a **separate process** under a hard wall-clock budget
+  (decision A2), at most one at a time. A build still running when the next
+  snapshot is due is not doubled up. A build that exceeds the budget is killed,
+  logged and skipped. If the build is slow, the snapshot cadence drops; the
+  sweep rate doesn't.
+- **Read only what the cutoff needs.** The build reads sweep files ≤ N from
+  the truncated manifest instead of filtering all 77 files after reading them.
 
 ### Consumer: MCP tool
 
@@ -111,7 +133,7 @@ endpoint.
 | ID | Question | Recommended default | Alternatives |
 | --- | --- | --- | --- |
 | A1 | Snapshot cadence | Every **6 sweeps** (about 30 min), plus one at the close before finalization | Every 3 sweeps (about 15 min); hourly |
-| A2 | Build time budget between sweeps | Skip the snapshot if the build would exceed **60 s**. Measure the actual build time on a full day first. | A separate worker process with its own budget |
+| A2 | Build budget | Separate process, one at a time, **240 s** wall-clock cap (under one sweep interval), kill and skip on overrun. Measured 27–75 s locally (above). | Inline between sweeps with a 60 s cap, which would skip most afternoon snapshots |
 | A3 | MCP surface | **New `active_rankings` tool** (keeps `return_rankings` final-only) | Extend `return_rankings` with `session: "current"` and `snapshot` |
 | A4 | Which views get snapshots | all, clean and qualified (the same three as final) | Qualified only, to cut build cost |
 | A5 | Snapshot retention | Keep the day's snapshots. Optionally prune them after the session is final. | Keep only the latest |
