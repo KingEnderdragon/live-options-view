@@ -28,11 +28,11 @@ function fixtures(){
   const prefix=`oa203/scanner/${SESSION}/`;
   json(prefix+'summary.json',{trade_date:SESSION,final:true,session_open_ms:1790947800000,session_close_ms:1790971200000,finalized_at:'2026-10-02T20:06:03Z',assessment:{status:'complete',reasons:[],chain_success_rate:1,universe_coverage:1},return_policy:{version:'oa203-returns-v1',min_entry_premium:0.05,stale_quote_s:1800,spike_ratio:3,min_coverage:0.5},qualified_policy:{version:'oa203-qualified-ask-bid-v1',max_relative_spread:0.3},measurement:'Sampled-return leaderboard',outputs:{contracts:'contracts.csv.gz',leaderboard:'leaderboard.csv',qualified_ask_bid_v1:'qualified_ask_bid_v1.csv'}});
   json(prefix+'universe.json',{selection_version:'oa203-universe-v1',selected:[{underlying:'QQQ',occ_rank:1}],skipped:[]});
-  files[prefix+'leaderboard.csv']='symbol,underlying,option_type,rank,rank_in_type,clean_rank,clean_rank_in_type,clean,mid_first_to_max_pct,mid_first_to_max_entry,mid_first_to_max_exit,mid_first_to_max_entry_ms,mid_first_to_max_exit_ms,mid_first_to_max_flags,contract_flags\n'+
-    `${CONTRACT},QQQ,call,1,1,,,False,3,0.02,0.08,1790947800000,1790948100000,tiny_entry,low_coverage\n`+
-    `${PUT},QQQ,put,2,1,1,1,True,0.90909091,1.1,2.1,1790947800000,1790948100000,,\n`;
-  files[prefix+'qualified_ask_bid_v1.csv']='symbol,underlying,option_type,rank,clean_rank,clean,qualified_first_ask_to_later_bid_rank,qualified_first_ask_to_later_bid_status,qualified_first_ask_to_later_bid_reasons,qualified_first_ask_to_later_bid_pct,qualified_first_ask_to_later_bid_entry_ms,qualified_first_ask_to_later_bid_exit_ms,qualified_first_ask_to_later_bid_entry_bid_size,qualified_first_ask_to_later_bid_exit_bid_size\n'+
-    `${PUT},QQQ,put,2,1,True,1,eligible,,0.5,1790947800000,1790948100000,2,2\n`;
+  files[prefix+'leaderboard.csv']='symbol,underlying,option_type,rank,rank_in_type,clean_rank,clean_rank_in_type,clean,mid_first_to_max_pct,mid_first_to_max_entry,mid_first_to_max_exit,mid_first_to_max_entry_ms,mid_first_to_max_exit_ms,mid_first_to_max_exit_quote_age_s,mid_first_to_max_flags,contract_flags\n'+
+    `${CONTRACT},QQQ,call,1,1,,,False,3,0.02,0.08,1790947800000,1790948100000,0,tiny_entry,low_coverage\n`+
+    `${PUT},QQQ,put,2,1,1,1,True,0.90909091,1.1,2.1,1790947800000,1790948100000,0,,\n`;
+  files[prefix+'qualified_ask_bid_v1.csv']='symbol,underlying,option_type,rank,clean_rank,clean,qualified_first_ask_to_later_bid_rank,qualified_first_ask_to_later_bid_status,qualified_first_ask_to_later_bid_reasons,qualified_first_ask_to_later_bid_pct,qualified_first_ask_to_later_bid_entry_ms,qualified_first_ask_to_later_bid_exit_ms,qualified_first_ask_to_later_bid_exit_bid_ms,qualified_first_ask_to_later_bid_entry_bid_size,qualified_first_ask_to_later_bid_exit_bid_size\n'+
+    `${PUT},QQQ,put,2,1,True,1,eligible,,0.5,1790947800000,1790948100000,1790948100000,2,2\n`;
   const manifests=[];
   for(let sweep=1;sweep<=8;sweep++){
     const t=1790947800000+(sweep-1)*300000;const name=`sweep_${String(sweep).padStart(4,'0')}.jsonl.gz`;
@@ -56,7 +56,34 @@ function pricesFixture(){
     META:dx(700,690),GOOGL:dx(180,182),AMZN:{price:250,bid:null,ask:null,prev_close:null,chg_pct:null,volume:null,source:'last-known',quote_ts:'2026-10-02T14:00:00Z',stale:true},
     TSLA:dx(380,375),MU:dx(100,101),SPCX:dx(160,158),AAPL:dx(202,200),SPY:dx(668,670)}};
 }
-async function writeFixtures(root){for(const [key,value] of Object.entries(fixtures())){const target=path.join(root,key);await fs.mkdir(path.dirname(target),{recursive:true});await fs.writeFile(target,value);}}
-module.exports={fixtures,writeFixtures,SESSION,NOW,RUN,ARCHIVE,CONTRACT,PUT,SPY_CONTRACT};
+function activeFixtures({withoutFinal=false}={}){
+  const files=fixtures(), base=`oa203/scanner/${SESSION}/`, active=base+'inprogress/';
+  if(withoutFinal)delete files[base+'summary.json'];
+  const manifest=files[base+'sweeps/manifest.jsonl'].trim().split('\n').map(JSON.parse).slice(0,6)
+    .map(m=>({...m,sha256:hash(files[base+'sweeps/'+m.file])}));
+  const members={};
+  const content={
+    'leaderboard.csv':files[base+'leaderboard.csv'],
+    'qualified_ask_bid_v1.csv':files[base+'qualified_ask_bid_v1.csv'],
+    'manifest.jsonl':manifest.map(m=>JSON.stringify(m)).join('\n')+'\n'};
+  for(const [name,value] of Object.entries(content))members[name]=hash(value);
+  const cutoff=manifest.at(-1).ended_ms;
+  const summary={schema_version:1,trade_date:SESSION,final:false,state:'in_progress',cutoff_sweep:6,cutoff_ms:cutoff,
+    session_open_ms:1790947800000,session_close_ms:1790971200000,contracts:2,
+    assessment:{status:'partial',reasons:['session_in_progress'],completed_sweeps:6,truncated_sweeps:0,chain_status_counts:{ok:6}},
+    return_policy:{version:'oa203-returns-v1'},qualified_policy:{version:'oa203-qualified-ask-bid-v1'},
+    outputs:{leaderboard:'leaderboard.csv',qualified_ask_bid_v1:'qualified_ask_bid_v1.csv'},member_sha256:members,built_at:'2026-10-02T13:56:00Z'};
+  content['summary.json']=JSON.stringify(summary);
+  const summaryHash=hash(content['summary.json']);
+  const prefix=active+'sweep_0006/rev_'+summaryHash+'/';
+  for(const [name,value] of Object.entries(content))files[prefix+name]=value;
+  const pointer={schema_version:1,trade_date:SESSION,state:'in_progress',sweep:6,cutoff_ms:cutoff,archive:prefix.slice(0,-1),
+    members:{...members,'summary.json':summaryHash},built_at:summary.built_at,published_at:'2026-10-02T13:56:10Z',expected_cadence_s:1800};
+  files[active+'latest.json']=JSON.stringify(pointer);
+  files[active+'sweep_0006.json']=JSON.stringify(pointer);
+  return {files,prefix,pointer,summary,manifest};
+}
+async function writeFixtures(root){for(const [key,value] of Object.entries(activeFixtures().files)){const target=path.join(root,key);await fs.mkdir(path.dirname(target),{recursive:true});await fs.writeFile(target,value);}}
+module.exports={fixtures,activeFixtures,writeFixtures,SESSION,NOW,RUN,ARCHIVE,CONTRACT,PUT,SPY_CONTRACT};
 
 

@@ -17,7 +17,7 @@ async function smoke({publicAccess=false,session=SESSION}={}){
   try{
     const init=await request('initialize',{protocolVersion:'2025-11-25',capabilities:{},clientInfo:{name:'market-mcp-smoke',version:'1'}});assert.equal(init.result.protocolVersion,'2025-11-25');
     child.stdin.write(JSON.stringify({jsonrpc:'2.0',method:'notifications/initialized'})+'\n');
-    const listed=await request('tools/list',{_meta:{}});assert.equal(listed.result.tools.length,6);
+    const listed=await request('tools/list',{_meta:{}});assert.equal(listed.result.tools.length,7);
     await call('discover_sources',{session});
     const market=await call('market_context',{type:'call',limit:1});
     if(market.rows?.[0])await call('result_detail',{reference:market.rows[0].detail_reference});
@@ -31,7 +31,18 @@ async function smoke({publicAccess=false,session=SESSION}={}){
     if(overview.rows?.[0])await call('result_detail',{reference:overview.rows[0].detail_reference});
     const returns=await call('return_rankings',{session,view:'clean',limit:1});
     if(returns.rows?.[0])await call('result_detail',{reference:returns.rows[0].detail_reference,limit:1});
-    if(!publicAccess){assert.equal(market.status,'available');assert.equal(spy.dataset,'spy_snapshot');assert.equal(spy.actual.underlying,'SPY');assert.ok(spy.rows[0].OptionSymbol.startsWith('SPY'));assert.equal(squeeze.status,'available');assert.equal(overview.rows[0].id,'AAPL');assert.equal(returns.status,'available');assert.ok(transcript.at(-1).response.quote_path.length);}
+    if(!publicAccess){
+      assert.equal(market.status,'available');assert.equal(spy.dataset,'spy_snapshot');assert.equal(spy.actual.underlying,'SPY');
+      assert.ok(spy.rows[0].OptionSymbol.startsWith('SPY'));assert.equal(squeeze.status,'available');
+      assert.equal(overview.rows[0].id,'AAPL');assert.equal(returns.status,'available');
+      const active=await call('active_rankings',{session,sweep:6,view:'clean',limit:1});
+      assert.equal(active.actual.sweep,6);assert.equal(active.rows.length,1);
+      const detail=await call('result_detail',{reference:active.rows[0].detail_reference,limit:1});
+      assert.equal(detail.actual.archive,active.actual.archive);assert.equal(detail.quote_path.length,1);
+      const missing=await call('active_rankings',{session,sweep:7});assert.equal(missing.status,'missing');
+      const invalid=await call('active_rankings',{session,sweep:6,url:'https://example.com'});
+      assert.equal(invalid.status,'failed');assert.equal(invalid.errors[0].code,'invalid_filter');
+    }
     return {kind:publicAccess?'public_anonymous_local_stdio':'synthetic_fixtures_local_stdio',session,tools:listed.result.tools.map(t=>t.name),transcript};
   }finally{
     child.stdin.end();child.kill();lines.close();for(const w of waiters.values())clearTimeout(w.timer);

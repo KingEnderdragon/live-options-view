@@ -5,7 +5,7 @@ const { formatSqueezeScheduleStatus } = require('../docs/shared.js');
 const { DataError, LIMITS, UUID, errorRecord } = require('./source');
 const overview = require('./overview');
 
-const DATASETS = ['qqq_snapshot', 'spy_snapshot', 'scheduled_squeeze', 'options_returns', 'cross_market_overview'];
+const DATASETS = ['qqq_snapshot', 'spy_snapshot', 'scheduled_squeeze', 'options_returns', 'cross_market_overview', 'options_active'];
 // Chain underlyings (#121). QQQ keeps its original artifact and dataset id, so
 // an omitted selector behaves exactly as before; SPY has its own tree.
 const UNDERLYINGS = Object.freeze({
@@ -19,6 +19,10 @@ const occRoot = symbol => /^[A-Z]+/.exec(symbol || '')?.[0] ?? '';
 const SYMBOL = /^[A-Z][A-Z0-9.-]{0,9}$/;
 const CONTRACT = /^[A-Z0-9.]{1,10}\d{6}[CP]\d{8}$/;
 const QUALIFIED_RANK = 'qualified_first_ask_to_later_bid_rank';
+// A real expanded sweep is about 20 MiB. Two leave room for the pinned
+// summary/board/manifest inside the existing 64 MiB per-query ceiling.
+const ACTIVE_PATH_SWEEPS = 2;
+const OPTIONAL_STAMP_VALUE = Object.freeze({bid_ms:'bid',ask_ms:'ask',trade_ms:'last'});
 const dates = value => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) &&
   Number.isFinite(Date.parse(value)) && new Date(value).toISOString().slice(0, 10) === value && value >= '2020-01-01' && value <= '2100-12-31';
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -102,6 +106,28 @@ function returnSummary(p, session) {
   check(object(p) && p.trade_date === session && typeof p.final === 'boolean' && object(p.assessment) &&
     ['complete', 'partial'].includes(p.assessment.status) && p.return_policy?.version === 'oa203-returns-v1', 'Unsupported selected-session return contract.');
 }
+function exchangeDate(ms) {
+  const parts = new Intl.DateTimeFormat('en-US', {timeZone:'America/New_York',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(ms);
+  const get = name => parts.find(p=>p.type===name)?.value;
+  return `${get('year')}-${get('month')}-${get('day')}`;
+}
+const activePrefix = (session, sweep) => `oa203/scanner/${session}/inprogress/sweep_${String(sweep).padStart(4,'0')}/`;
+const activeRevision = (session, sweep, pointer) => {
+  const base=activePrefix(session,sweep);
+  check(object(pointer)&&pointer.schema_version===1&&pointer.trade_date===session&&pointer.state==='in_progress'&&
+    pointer.sweep===sweep&&typeof pointer.archive==='string'&&
+    new RegExp('^'+base+'rev_[0-9a-f]{64}$').test(pointer.archive)&&
+    object(pointer.members)&&['summary.json','leaderboard.csv','qualified_ask_bid_v1.csv','manifest.jsonl']
+      .every(name=>typeof pointer.members[name]==='string'&&/^[0-9a-f]{64}$/.test(pointer.members[name]))&&
+    pointer.archive.endsWith('rev_'+pointer.members['summary.json']), 'Unsupported active snapshot pointer.');
+  return pointer.archive+'/';
+};
+function activeSummary(p, session, sweep) {
+  returnSummary(p, session);
+  check(p.schema_version===1 && p.final===false && p.state==='in_progress' && p.cutoff_sweep===sweep &&
+    Number.isSafeInteger(p.cutoff_ms) && p.cutoff_ms>p.session_open_ms && p.cutoff_ms<=p.session_close_ms+60000 &&
+    object(p.member_sha256) && p.qualified_policy?.version==='oa203-qualified-ask-bid-v1', 'Unsupported active snapshot summary.');
+}
 
 const units = {
   spy_snapshot: null, // filled below from qqq_snapshot
@@ -110,6 +136,7 @@ const units = {
   options_returns: { '*_pct': 'fractional return (1 = 100%)', '*_entry, *_exit': 'USD/share', '*_ms, t, bid_ms, ask_ms': 'UTC epoch milliseconds', '*_abs_change_per_contract': 'USD/contract', '*_relative_spread': 'spread / midpoint', '*_size': 'contracts at quoted side', '*_entry_delay_s': 'seconds from first archived sample', rank: 'producer ordinal rank' },
 };
 units.spy_snapshot = units.qqq_snapshot;
+units.options_active = units.options_returns;
 units.cross_market_overview = overview.units;
 const warnings = {
   cross_market_overview: overview.warnings,
@@ -138,13 +165,14 @@ class Consumer {
   async call(name, a = {}) {
     const q = this.source.query();
     const marketDataset = supportedUnderlying(underlyingOf(a)) ? UNDERLYINGS[underlyingOf(a)].dataset : 'unsupported_underlying';
-    const dataset = ({market_context:marketDataset, squeeze_results:'scheduled_squeeze', return_rankings:'options_returns', market_overview:'cross_market_overview'})[name] || (name === 'discover_sources' ? 'source_catalog' : 'detail');
+    const dataset = ({market_context:marketDataset, squeeze_results:'scheduled_squeeze', return_rankings:'options_returns', active_rankings:'options_returns', market_overview:'cross_market_overview'})[name] || (name === 'discover_sources' ? 'source_catalog' : 'detail');
     let out = this.envelope(dataset, a, q);
     try {
       if (name === 'discover_sources') out = await this.discover(a, q, out);
       else if (name === 'market_context') out = await this.market(a, q, out);
       else if (name === 'squeeze_results') out = await this.squeeze(a, q, out);
       else if (name === 'return_rankings') out = await this.returns(a, q, out);
+      else if (name === 'active_rankings') out = await this.active(a, q, out);
       else if (name === 'market_overview') out = await this.overview(a, q, out);
       else if (name === 'result_detail') out = await this.detail(a, q, out);
       else throw new DataError('invalid_filter', 'Unknown tool.');
@@ -196,6 +224,18 @@ class Consumer {
         cadence: chain ? 'collector session cycles; field timestamps govern age' : id === 'scheduled_squeeze' ? '09:00 and 12:00 America/New_York exchange-session calendar' : 'selected finalized session; about five-minute samples',
         coverage: probe.value?.coverage || probe.value?.assessment || (chain ? `latest ${chain} 0DTE snapshot only` : null), historical_index: 'not_supported' });
     }
+    const activeSession=a.session??exchangeDate(this.now());
+    const activeKey=`oa203/scanner/${activeSession}/inprogress/latest.json`;
+    const activeProbe=await q.optionalJson(activeKey);
+    out.capabilities.push({dataset:'options_active',producer_schema:'active snapshot v1',
+      availability:activeProbe.error?(activeProbe.error.code==='missing_artifact'?'missing_publication':'failed'):'available',
+      source_locator:activeKey,error:activeProbe.error,actual:activeProbe.value?{session:activeSession,
+        sweep:activeProbe.value.sweep,cutoff_ms:activeProbe.value.cutoff_ms,archive:activeProbe.value.archive}:null,
+      fields:['summary','leaderboard','qualified_ask_bid_v1','pinned_manifest','selected_contract_quote_path'],
+      filters:['session','sweep','underlying','type','view','limit','offset'],cadence:'every six completed sweeps, approximately 30 minutes when builds succeed',
+      views:['all','clean','qualified_ask_bid_v1'],units:units.options_active,
+      warnings:['In-progress ranks are provisional; follow one detail_reference for its exact cutoff.'],
+      historical_index:'explicit retained sweep only; no broad history listing'});
     out.underlyings = out.capabilities.filter(c => c.underlying).map(c => ({ symbol: c.underlying, dataset: c.dataset,
       availability: c.availability, default: c.underlying === 'QQQ', selector: 'market_context.underlying' }));
     out.unsupported = ['shared_PCR','shared_max_pain','shared_reference_OI_skew','historical_VWAP_RVOL','account_trading_momentum','buy_only_Black_Scholes','private_accounts_positions_orders'];
@@ -319,8 +359,137 @@ class Consumer {
     const filtered=rows.filter(r=>r[field]!==null && (!a.underlying||r.underlying===a.underlying) && (!a.type||r.option_type===a.type));
     filtered.sort((x,y)=>Number(x[field])-Number(y[field])); // producer rank, never re-score
     const paged=slice(filtered,limit,offset); out.pagination=paged.pagination;
-    out.rows=paged.rows.map(row=>({...row,detail_reference:this.reference({dataset:'options_returns',p,row,prefix,board,actual:out.actual,evidence:[...q.evidence]})}));
+    out.rows=paged.rows.map(row=>({...row,detail_reference:this.reference({dataset:'options_returns',p,row,prefix,board,actual:out.actual,evidence:q.evidence.slice(-4)})}));
     out.status=p.assessment.status==='partial'||!p.final?'partial':filtered.length?'available':'empty';return out;
+  }
+  async active(a,q,out) {
+    args(a,['session','sweep','underlying','type','view','limit','offset']);
+    const {limit,offset}=page(a);
+    const session=a.session??'current';
+    check(session==='current'||dates(session),'session must be current or one valid date.','invalid_filter');
+    if(a.sweep!==undefined) check(Number.isInteger(a.sweep)&&a.sweep>=1&&a.sweep<=9999,'sweep must be 1..9999.','invalid_filter');
+    if(a.underlying!==undefined) check(SYMBOL.test(a.underlying),'Invalid underlying.','invalid_filter');
+    if(a.type!==undefined) check(['call','put'].includes(a.type),'Invalid option type.','invalid_filter');
+    check(['all','clean','qualified_ask_bid_v1'].includes(a.view??'all'),'Invalid active view.','invalid_filter');
+    const selected=session==='current'?exchangeDate(this.now()):session;
+    out.actual={session:selected,selector:session,sweep:a.sweep??null,final:false};
+    const calendarPoint=Date.parse(selected+'T12:00:00Z');
+    const calendarValid=Date.parse(this.calendar?.valid_from)<=calendarPoint &&
+      calendarPoint<Date.parse(this.calendar?.valid_until);
+    const slots=calendarValid?(this.calendar?.slots??[]).filter(t=>exchangeDate(Date.parse(t))===selected):[];
+    if(session==='current'&&!calendarValid){out.status='unavailable';out.warnings.push('Exchange calendar coverage is unavailable for current-session selection.');return out;}
+    if(!calendarValid)out.warnings.push('Exchange calendar coverage for this explicit date is unavailable; session bounds come only from the producer snapshot.');
+    if(calendarValid&&!slots.length){out.status='holiday';out.warnings.push('No exchange session is scheduled for the selected date.');return out;}
+    const open=slots.length?Date.parse(slots[0])+30*60000:null;
+    if(a.sweep===undefined) {
+      const final=await q.optionalJson(`oa203/scanner/${selected}/summary.json`);
+      if(!final.error) {
+        returnSummary(final.value,selected);
+        if(final.value.final) {
+          const result=await this.returns({session:selected,underlying:a.underlying,type:a.type,view:a.view,limit,offset},q,out);
+          result.active_state='final';result.status=result.status==='available'?'final':result.status;
+          return result;
+        }
+      } else if(final.error.code!=='missing_artifact') out.errors.push(final.error);
+      if(open!==null&&this.now()<open){out.status='before_open';out.session_window={open_ms:open,close_ms:null};return out;}
+    }
+    let pointer=null, sweep=a.sweep;
+    if(sweep===undefined) {
+      const attempt=await q.optionalJson(`oa203/scanner/${selected}/inprogress/latest-attempt.json`);
+      if(!attempt.error) {
+        check(object(attempt.value)&&attempt.value.schema_version===1&&attempt.value.trade_date===selected&&
+          Number.isInteger(attempt.value.sweep)&&attempt.value.sweep>=1&&attempt.value.sweep<=9999&&
+          ['building','complete','failed'].includes(attempt.value.status)&&Number.isFinite(Date.parse(attempt.value.at)),
+        'Unsupported active attempt status.');
+        out.attempt=attempt.value;
+      } else if(attempt.error.code!=='missing_artifact')out.errors.push(attempt.error);
+      const found=await q.optionalJson(`oa203/scanner/${selected}/inprogress/latest.json`);
+      if(found.error){out.errors.push(found.error);out.status=found.error.code==='missing_artifact'?
+        out.attempt?.status==='failed'?'failed':'missing':'failed';return out;}
+      pointer=found.value;sweep=pointer?.sweep;
+      check(Number.isInteger(sweep)&&sweep>=1&&sweep<=9999,'Unsupported active snapshot sweep.');
+      activeRevision(selected,sweep,pointer);
+      if(out.attempt?.sweep>sweep||out.attempt?.sweep===sweep&&out.attempt.status==='failed')
+        out.warnings.push(`Newer or matching snapshot attempt ${out.attempt.sweep} is ${out.attempt.status}: ${out.attempt.reason??'reason unavailable'}.`);
+      if(out.attempt?.status==='building'&&this.now()-Date.parse(out.attempt.at)>300000)
+        out.warnings.push(`Snapshot attempt ${out.attempt.sweep} has exceeded the 240-second build budget; completion is unconfirmed.`);
+    }
+    if(!pointer){
+      const found=await q.optionalJson(activePrefix(selected,sweep).slice(0,-1)+'.json');
+      if(found.error){out.errors.push(found.error);out.status=found.error.code==='missing_artifact'?'missing':'failed';return out;}
+      pointer=found.value;
+    }
+    const prefix=activeRevision(selected,sweep,pointer);
+    const p=await q.json(prefix+'summary.json');activeSummary(p,selected,sweep);
+    const summaryEvidence=q.evidence.at(-1);
+    if(pointer) check(pointer.members['summary.json']===summaryEvidence.retrieved_sha256&&pointer.cutoff_ms===p.cutoff_ms,
+      'Active pointer and summary disagree.','source_changed');
+    const board=a.view==='qualified_ask_bid_v1'?'qualified_ask_bid_v1.csv':'leaderboard.csv';
+    const text=await q.get(prefix+board), boardEvidence=q.evidence.at(-1);
+    const expected=pointer?.members[board]??p.member_sha256[board];
+    check(expected===boardEvidence.retrieved_sha256&&p.member_sha256[board]===boardEvidence.retrieved_sha256,
+      'Active snapshot member digest mismatch.','source_changed');
+    boardEvidence.checksum_verification=pointer?'matches_pointer_and_summary':'matches_snapshot_summary';
+    const rows=csv(text), qualified=a.view==='qualified_ask_bid_v1';
+    check(p.contracts===0&&rows.length===0||['symbol','underlying','option_type','rank','clean_rank','clean'].every(k=>rows.columns.includes(k)),
+      'Missing active leaderboard columns.');
+    check(rows.every(r=>CONTRACT.test(r.symbol)&&SYMBOL.test(r.underlying)&&['call','put'].includes(r.option_type)&&
+      ['rank','clean_rank'].every(k=>r[k]===null||/^[1-9]\d*$/.test(r[k]??'')&&Number.isSafeInteger(Number(r[k])))&&['True','False'].includes(r.clean)&&
+      (r.clean_rank===null||r.clean==='True')), 'Invalid active leaderboard rows.');
+    if(qualified) check(rows.every(r=>r.qualified_first_ask_to_later_bid_status==='eligible'&&
+      /^[1-9]\d*$/.test(r[QUALIFIED_RANK]??'')&&Number.isSafeInteger(Number(r[QUALIFIED_RANK]))&&
+      r.qualified_first_ask_to_later_bid_pct!==null&&Number.isFinite(Number(r.qualified_first_ask_to_later_bid_pct))),
+    'Invalid active qualified rows.');
+    const field=qualified?QUALIFIED_RANK:a.view==='clean'?'clean_rank':'rank';
+    const filtered=rows.filter(r=>r[field]!==null&&(!a.underlying||r.underlying===a.underlying)&&(!a.type||r.option_type===a.type));
+    filtered.sort((x,y)=>Number(x[field])-Number(y[field]));
+    const paged=slice(filtered,limit,offset);
+    out.pagination=paged.pagination;out.actual={session:selected,selector:session,sweep,cutoff_ms:p.cutoff_ms,archive:prefix.slice(0,-1),
+      built_at:pointer.built_at??null,
+      final:false,return_policy:p.return_policy,qualified_policy:p.qualified_policy};
+    const endpointField=qualified?'qualified_first_ask_to_later_bid_exit_ms':'mid_first_to_max_exit_ms';
+    const evidenceAge=row=>{
+      const endpoint=row[endpointField]===null?null:Number(row[endpointField]);
+      const quoteAge=row.mid_first_to_max_exit_quote_age_s===null?null:Number(row.mid_first_to_max_exit_quote_age_s);
+      const quote=qualified?Number(row.qualified_first_ask_to_later_bid_exit_bid_ms):
+        quoteAge===null?null:Math.round(endpoint-quoteAge*1000);
+      const basis=qualified?'qualified_first_ask_to_later_bid_exit_bid_ms':
+        'mid_first_to_max_exit_ms minus mid_first_to_max_exit_quote_age_s';
+      if(!Number.isSafeInteger(endpoint)||endpoint<p.session_open_ms||endpoint>p.cutoff_ms||
+         !Number.isSafeInteger(quote)||quote<946684800000||quote>endpoint||
+         !qualified&&(!Number.isFinite(quoteAge)||quoteAge<0))
+        return {status:'unknown',observed_at:null,age_seconds:null,stale_after_seconds:600,basis,
+          sample_at:Number.isSafeInteger(endpoint)?new Date(endpoint).toISOString():null};
+      return {...age(new Date(quote).toISOString(),this.now(),600),basis,sample_at:new Date(endpoint).toISOString()};
+    };
+    out.rows=paged.rows.map(row=>({...row,ranked_evidence_freshness:evidenceAge(row),
+      detail_reference:this.reference({dataset:'options_active',p,row,prefix,board,
+      actual:out.actual,evidence:[...q.evidence],digests:{summary:summaryEvidence.retrieved_sha256,board:boardEvidence.retrieved_sha256,
+        manifest:p.member_sha256['manifest.jsonl']}})}));
+    out.summary=p;out.coverage=p.assessment;
+    out.cadence={expected_seconds:pointer?.expected_cadence_s??1800,
+      observed_seconds:pointer?.observed_cadence_s??null,previous_publication:pointer?.previous_published_at??null};
+    out.session_window={open_ms:p.session_open_ms,close_ms:p.session_close_ms,meaning:'exchange boundaries; not acquisition timestamps'};
+    out.producer_times={observation:null,acquisition_start:null,acquisition_end:new Date(p.cutoff_ms).toISOString(),
+      publication:pointer?.published_at??null,built_at:pointer?.built_at??p.built_at??null};
+    const cutoffAge=age(new Date(p.cutoff_ms).toISOString(),this.now(),3600);
+    const rowAges=out.rows.map(row=>row.ranked_evidence_freshness);
+    const knownAges=rowAges.map(x=>x.age_seconds).filter(Number.isFinite);
+    out.freshness={...cutoffAge,
+      status:cutoffAge.status==='stale'||rowAges.some(x=>x.status==='stale')?'stale':
+        rowAges.some(x=>x.status==='unknown')?'unknown':cutoffAge.status,
+      basis:'cutoff and displayed ranked quote endpoints are assessed separately',cutoff:cutoffAge,
+      ranked_evidence:{basis:'actual quote timestamp at the ranked endpoint',stale_after_seconds:600,
+        oldest_age_seconds:knownAges.length?Math.max(...knownAges):null,
+        stale_rows:rowAges.filter(x=>x.status==='stale').length,unknown_rows:rowAges.filter(x=>x.status==='unknown').length}};
+    out.active_state=this.now()>=p.session_close_ms?'closed_pending_final':'in_progress';
+    out.status=out.active_state==='closed_pending_final'?'closed_pending_final':filtered.length?'in_progress':'empty';
+    if(p.assessment.truncated_sweeps||Object.keys(p.assessment.chain_status_counts??{}).some(s=>s!=='ok')) out.status='partial';
+    if(rowAges.some(x=>x.status==='stale'||x.status==='unknown')&&out.status==='in_progress')out.status='partial';
+    out.warnings.push('These are sampled, non-simultaneous chain observations; quote comparisons do not establish fills.');
+    if(cutoffAge.status==='stale')out.warnings.push('Latest active cutoff is older than the expected cadence.');
+    if(rowAges.some(x=>x.status==='stale'))out.warnings.push('Displayed ranked quote evidence is older than two expected five-minute sweeps.');
+    return out;
   }
   async detail(a,q,out) {
     args(a,['reference','offset','limit'],['reference']); const {limit,offset}=page(a);
@@ -355,6 +524,60 @@ class Consumer {
       check(Array.isArray(results)&&Array.isArray(inputs),'Unsupported squeeze detail shape.');
       out.result=results.find(r=>r.ticker===v.row.ticker)??null;out.inputs=inputs.find(r=>r.ticker===v.row.ticker)??null;out.manifest=manifest;out.coverage=manifest.coverage??v.p.coverage??null;
       if(!out.result||!out.inputs) {out.status='partial';out.warnings.push('Selected candidate detail is absent from the run archive.');}return out;
+    }
+    if(v.dataset==='options_active') {
+      const summary=await q.json(v.prefix+'summary.json');activeSummary(summary,v.actual.session,v.actual.sweep);
+      check(q.evidence.at(-1).retrieved_sha256===v.digests.summary,'Pinned active summary changed.','source_changed');
+      await q.get(v.prefix+v.board);
+      check(q.evidence.at(-1).retrieved_sha256===v.digests.board,'Pinned active board changed.','source_changed');
+      const manifest=jsonl(await q.get(v.prefix+'manifest.jsonl'));
+      check(q.evidence.at(-1).retrieved_sha256===v.digests.manifest,'Pinned active manifest changed.','source_changed');
+      check(manifest.length===v.actual.sweep&&manifest.every((m,i)=>m.sweep===i+1&&
+        m.file===`sweep_${String(m.sweep).padStart(4,'0')}.jsonl.gz`&&
+        typeof m.sha256==='string'&&/^[0-9a-f]{64}$/.test(m.sha256)&&object(m.chains)&&
+        Number.isSafeInteger(m.started_ms)&&Number.isSafeInteger(m.ended_ms)&&
+        m.started_ms<=m.ended_ms&&m.ended_ms<=v.actual.cutoff_ms),
+      'Invalid pinned active manifest.');
+      const selected=manifest.filter(m=>Object.hasOwn(m.chains,v.row.underlying));
+      const paged=slice(selected,Math.min(limit,ACTIVE_PATH_SWEEPS),offset);
+      out.pagination={...paged.pagination,scope:'pinned chain sweeps; quote rows filtered to this contract'};
+      const path=[];const sweeps=[];const retryOffsets=[];
+      out.coverage=summary.assessment;out.summary=summary;out.active_state='in_progress';
+      out.producer_times={observation:null,acquisition_start:null,acquisition_end:new Date(summary.cutoff_ms).toISOString(),
+        publication:null,built_at:v.actual.built_at??summary.built_at??null};
+      out.freshness={status:'historical',basis:'exact pinned active cutoff'};
+      out.session_window={open_ms:summary.session_open_ms,close_ms:summary.session_close_ms};
+      for(const [index,m] of paged.rows.entries()) {
+        sweeps.push({...m,chains:{[v.row.underlying]:m.chains[v.row.underlying]}});
+        const key=`oa203/scanner/${v.actual.session}/sweeps/${m.file}`;
+        try {
+          const rows=jsonl(await q.get(key),{predicate:r=>r.symbol===v.row.symbol,maxRows:LIMITS.rows,maxLineBytes:LIMITS.quote_line_bytes});
+          check(q.evidence.at(-1).retrieved_sha256===m.sha256,'Pinned source sweep digest changed.','source_changed');
+          q.evidence.at(-1).checksum_verification='matches_pinned_manifest_sweep_sha256';
+          check(rows.every(r=>r.underlying===v.row.underlying&&r.sweep===m.sweep&&
+            m.chains[v.row.underlying].status==='ok'&&Number.isSafeInteger(r.t)&&
+            r.t>=m.started_ms&&r.t<=m.ended_ms&&r.t>=summary.session_open_ms&&
+            r.t<Math.min(summary.cutoff_ms,summary.session_close_ms)&&
+            ['bid_ms','ask_ms','spot_ms','trade_ms'].every(field=>r[field]==null||
+              r[field]===0&&OPTIONAL_STAMP_VALUE[field]&&r[OPTIONAL_STAMP_VALUE[field]]==null||
+              Number.isSafeInteger(r[field])&&r[field]>=946684800000&&r[field]<=r.t)&&
+            ['call','put'].includes(r.type)&&[r.bid,r.ask].every(n=>n===null||
+              typeof n==='number'&&Number.isFinite(n)&&n>=0)), 'Active quote row violates cutoff/session contract.');
+          path.push(...rows.map(r=>({ ...r,
+            ...Object.fromEntries(Object.entries(OPTIONAL_STAMP_VALUE)
+              .filter(([stamp,value])=>r[stamp]===0&&r[value]==null).map(([stamp])=>[stamp,null])) })));
+          if(!rows.length||m.truncated||m.chains[v.row.underlying].status!=='ok') {
+            out.status='partial';out.warnings.push(`Sweep ${m.sweep} has incomplete selected-contract coverage.`);
+          }
+        } catch(e) {
+          if(e.code==='source_changed')throw e;
+          out.errors.push(errorRecord(e,key));out.status='partial';retryOffsets.push(offset+index);
+        }
+      }
+      out.quote_path=path;out.sweeps=sweeps;out.pagination.retry_offsets=retryOffsets;
+      if(out.status!=='partial')out.status='in_progress';
+      out.warnings.push('Calculation cells and ranks are producer values from the exact immutable cutoff; no after-cutoff observations are used.');
+      return out;
     }
     // OA-203 session files are mutable rebuild products. Detect change instead
     // of attaching a new quote path to an old ranking/reference.

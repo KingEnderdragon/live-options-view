@@ -2,9 +2,9 @@
 'use strict';
 const fs = require('node:fs/promises'); const assert = require('node:assert/strict');
 const { createHttpServer } = require('./http'); const { Consumer } = require('./consumer'); const { Source } = require('./source');
-const { fixtures, SESSION } = require('./fixtures'); const { testAuth, request } = require('./test-auth');
+const { activeFixtures, SESSION } = require('./fixtures'); const { testAuth, request } = require('./test-auth');
 async function run() {
-  const files = fixtures(), { settings, auth, keys } = testAuth(); await auth.refresh();
+  const {files,prefix}=activeFixtures(), { settings, auth, keys } = testAuth(); await auth.refresh();
   const server = createHttpServer(new Consumer(new Source({ read: async key => files[key] })), { policy: settings, auth });
   await new Promise(r => server.listen(0, '127.0.0.1', r)); const token = keys.token(), transcript = []; let id = 0;
   const rpc = async message => { const r = await request(server, message, { token }); assert.equal(r.status, message.id ? 200 : 202); return r.body; };
@@ -13,7 +13,7 @@ async function run() {
     const challenge = await request(server, { jsonrpc: '2.0', id: 1, method: 'ping' }); assert.equal(challenge.status, 401);
     const metadata = await request(server, null, { path: '/.well-known/oauth-protected-resource/mcp', method: 'GET' }); assert.equal(metadata.status, 200);
     const init = await rpc({ jsonrpc: '2.0', id: ++id, method: 'initialize', params: { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'production-fixture-smoke', version: '1' } } });
-    await rpc({ jsonrpc: '2.0', method: 'notifications/initialized' }); const listed = await rpc({ jsonrpc: '2.0', id: ++id, method: 'tools/list' }); assert.equal(listed.result.tools.length, 6);
+    await rpc({ jsonrpc: '2.0', method: 'notifications/initialized' }); const listed = await rpc({ jsonrpc: '2.0', id: ++id, method: 'tools/list' }); assert.equal(listed.result.tools.length, 7);
     await tool('discover_sources', { session: SESSION });
     const overview = await tool('market_overview', { symbols: ['AAPL'], limit: 1 });
     assert.equal(overview.rows[0].id, 'AAPL');
@@ -21,6 +21,17 @@ async function run() {
     assert.equal(overviewDetail.producer_times.observation, null);
     assert.equal(overviewDetail.producer_times.collector_receipt, overview.rows[0].collector_received_at);
     for (const [name, args] of [['market_context', { limit: 1 }], ['squeeze_results', { limit: 1 }], ['return_rankings', { session: SESSION, view: 'clean', limit: 1 }]]) { const r = await tool(name, args); await tool('result_detail', { reference: r.rows[0].detail_reference, limit: 1 }); }
+    const active=await tool('active_rankings',{session:SESSION,sweep:6,view:'clean',limit:1});
+    assert.equal(active.actual.sweep,6);assert.equal(active.rows.length,1);
+    const activeDetail=await tool('result_detail',{reference:active.rows[0].detail_reference,limit:1});
+    assert.equal(activeDetail.actual.archive,active.actual.archive);assert.equal(activeDetail.quote_path.length,1);
+    const invalid=await rpc({jsonrpc:'2.0',id:++id,method:'tools/call',params:{name:'active_rankings',arguments:{session:SESSION,url:'https://example.com'}}});
+    assert.equal(invalid.result.isError,true);assert.equal(invalid.result.structuredContent.errors[0].code,'invalid_filter');
+    transcript.push({tool:'active_rankings',arguments:{invalid_filter:true},response:invalid.result.structuredContent});
+    files[prefix+'leaderboard.csv']+='\n';
+    const corrupt=await rpc({jsonrpc:'2.0',id:++id,method:'tools/call',params:{name:'active_rankings',arguments:{session:SESSION,sweep:6}}});
+    assert.equal(corrupt.result.isError,true);assert.equal(corrupt.result.structuredContent.errors[0].code,'source_changed');
+    transcript.push({tool:'active_rankings',arguments:{corrupt_member:true},response:corrupt.result.structuredContent});
     return { kind: 'synthetic_local_authenticated_http', transport: 'loopback TCP with explicit production Host/auth policy and local test keys', node: process.version,
       unauthorized_status: challenge.status, resource_metadata: metadata.body, protocol_version: init.result.protocolVersion,
       tools: listed.result.tools.map(t => t.name), transcript, limitations: ['No live OAuth registration/grant, deployed endpoint or actual Chej connection is asserted.'] };
