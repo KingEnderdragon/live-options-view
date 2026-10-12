@@ -1056,7 +1056,7 @@ def _build_active_snapshot(archive: DayArchive, cfg: Config, sweep: int,
         tmp.mkdir(parents=True)
         try:
             damaged: list[dict[str, Any]] = []
-            rows = build_contract_rows(archive.dir, cfg.policy, open_ms, cutoff_ms, damaged,
+            rows = build_contract_rows(archive.dir, cfg.policy, open_ms, min(cutoff_ms, close_ms), damaged,
                                        cfg.qualified_policy, cutoff_sweep=sweep)
             if damaged:
                 raise ValueError("damaged cutoff source; snapshot skipped")

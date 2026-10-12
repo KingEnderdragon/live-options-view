@@ -1,5 +1,6 @@
 """Cutoff and publication invariants for provisional OA-203 rankings."""
 import gzip
+import csv
 import json
 import sys
 import tempfile
@@ -118,6 +119,16 @@ class ActiveCutoff(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "already running"):
                 scanner.build_active_snapshot(self.archive, self.cfg, 1, OPEN, CLOSE)
         self.assertFalse(self.archive.path("inprogress/sweep_0001").exists())
+
+    def test_snapshot_excludes_quote_after_early_close(self):
+        for i in range(1, 7):
+            self.add_sweep(i)
+        early_close = OPEN + 6 * 300000 - 1000
+        pointer = scanner.build_active_snapshot(self.archive, self.cfg, 6, OPEN, early_close)
+        self.assertGreater(pointer["cutoff_ms"], early_close)
+        with self.archive.path("inprogress/sweep_0006/leaderboard.csv").open(newline="") as source:
+            row = next(csv.DictReader(source))
+        self.assertEqual(int(row["mid_first_to_max_exit_ms"]), OPEN + 5 * 300000)
 
 
 if __name__ == "__main__":

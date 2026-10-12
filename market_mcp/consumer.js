@@ -510,7 +510,8 @@ class Consumer {
           check(q.evidence.at(-1).retrieved_sha256===m.sha256,'Pinned source sweep digest changed.','source_changed');
           q.evidence.at(-1).checksum_verification='matches_pinned_manifest_sweep_sha256';
           check(rows.every(r=>r.underlying===v.row.underlying&&r.sweep===m.sweep&&
-            Number.isSafeInteger(r.t)&&r.t>=summary.session_open_ms&&r.t<summary.cutoff_ms&&
+            Number.isSafeInteger(r.t)&&r.t>=summary.session_open_ms&&
+            r.t<Math.min(summary.cutoff_ms,summary.session_close_ms)&&
             ['call','put'].includes(r.type)&&[r.bid,r.ask].every(n=>n===null||
               typeof n==='number'&&Number.isFinite(n)&&n>=0)), 'Active quote row violates cutoff/session contract.');
           path.push(...rows);
