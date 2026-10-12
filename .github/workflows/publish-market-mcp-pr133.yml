@@ -1,6 +1,11 @@
 name: Publish approved market MCP image (PR 133)
 
 on:
+  pull_request:
+    paths:
+      - .github/workflows/publish-market-mcp-pr133.yml
+      - .github/scripts/market_mcp_tag_guard.py
+      - .github/scripts/test_market_mcp_tag_guard.py
   workflow_dispatch:
 
 permissions: {}
@@ -10,8 +15,21 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  guard-tests:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out publisher for read-only tests
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Test fail-closed registry decisions and unique tags
+        run: python3 -m unittest discover -s .github/scripts -p 'test_market_mcp_tag_guard.py' -v
+
   publish:
-    if: github.repository == 'OwenTanzer/live-options-view' && github.ref == 'refs/heads/master'
+    if: github.event_name == 'workflow_dispatch' && github.repository == 'OwenTanzer/live-options-view' && github.ref == 'refs/heads/master'
+    needs: guard-tests
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -19,25 +37,33 @@ jobs:
     env:
       SOURCE_SHA: 1dde53f78709a41c41e17af37c1f9e422626f5af
       IMAGE: ghcr.io/owentanzer/market-mcp-read-only
+      RELEASE_TAG: 1dde53f78709a41c41e17af37c1f9e422626f5af-run-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
+      - name: Check out reviewed publisher from master
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: publisher
+          persist-credentials: false
       - name: Check out approved merge commit
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: 1dde53f78709a41c41e17af37c1f9e422626f5af
+          path: source
           fetch-depth: 0
           persist-credentials: false
       - name: Confirm source is the approved commit on master
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
-          git fetch --no-tags origin master
-          git merge-base --is-ancestor "$SOURCE_SHA" FETCH_HEAD
+          test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"
+          git -C source fetch --no-tags origin master
+          git -C source merge-base --is-ancestor "$SOURCE_SHA" FETCH_HEAD
       - name: Use Node 22
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22'
       - name: Check approved source
+        working-directory: source
         run: |
           node --test market_mcp/*.test.js
           node tests/squeeze_scanner_display.test.js
@@ -46,31 +72,31 @@ jobs:
           node --max-old-space-size=256 market_mcp/load.js --out market-mcp-production-load.json
       - name: Build commit-tagged image
         shell: bash
+        working-directory: source
         run: |
           set -euo pipefail
           docker build -f market_mcp/Dockerfile \
             --label "org.opencontainers.image.revision=$SOURCE_SHA" \
             --label "org.opencontainers.image.source=https://github.com/OwenTanzer/live-options-view" \
-            -t "$IMAGE:$SOURCE_SHA" .
-          test "$(docker image inspect "$IMAGE:$SOURCE_SHA" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" = "$SOURCE_SHA"
+            -t "$IMAGE:$RELEASE_TAG" .
+          test "$(docker image inspect "$IMAGE:$RELEASE_TAG" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" = "$SOURCE_SHA"
       - name: Verify exact image without network access
         shell: bash
-        run: bash market_mcp/verify-image.sh "$IMAGE:$SOURCE_SHA"
+        working-directory: source
+        run: bash market_mcp/verify-image.sh "$IMAGE:$RELEASE_TAG"
       - name: Log in to existing GitHub container package
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Publish once and verify registry digest
+      - name: Require explicit registry absence for this run's unique tag
+        run: python3 publisher/.github/scripts/market_mcp_tag_guard.py
+      - name: Publish run-tagged image and verify immutable digest
         shell: bash
         run: |
           set -euo pipefail
-          image="$IMAGE:$SOURCE_SHA"
-          if docker buildx imagetools inspect "$image" >/dev/null 2>&1; then
-            echo 'The commit tag is already published; refusing to overwrite it.' >&2
-            exit 1
-          fi
+          image="$IMAGE:$RELEASE_TAG"
           push_output="$(docker push "$image")"
           digest="$(printf '%s\n' "$push_output" | sed -nE 's/.*digest: (sha256:[0-9a-f]{64}).*/\1/p' | tail -n 1)"
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
@@ -79,5 +105,5 @@ jobs:
           test "$tag_digest" = "$digest"
           test "$pinned_digest" = "$digest"
           printf 'Published %s@%s from %s\n' "$IMAGE" "$digest" "$SOURCE_SHA"
-          printf 'Image: `%s@%s`\nSource commit: `%s`\n' "$IMAGE" "$digest" "$SOURCE_SHA" >> "$GITHUB_STEP_SUMMARY"
+          printf 'Image: `%s@%s`\nRun-specific tag: `%s`\nSource commit: `%s`\nTags are not registry-enforced immutable; deploy by digest.\n' "$IMAGE" "$digest" "$RELEASE_TAG" "$SOURCE_SHA" >> "$GITHUB_STEP_SUMMARY"
 
