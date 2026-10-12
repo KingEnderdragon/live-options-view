@@ -47,7 +47,13 @@ masquerade as final.
 to trigger builds, and is unset by default. The code caps generation triggers
 at 16 per session. The approved intent to retain snapshots still needs a
 specific remote retention duration, eviction job/lifecycle rule and cost
-estimate. Nothing here automatically purges remote snapshots. Do not enable
+estimate. The publication guard bounds the four immutable members to at most
+256 MiB per session in aggregate (16 generations × four 4 MiB members),
+although normal members should be smaller. A successful generation has four
+member uploads, one pointer upload and two attempt-status uploads: up to
+112 such writes per session at the 16-generation cap, before retries.
+Failed attempts can leave orphaned immutable members, so cleanup must account
+for those as well. Nothing here automatically purges remote snapshots. Do not enable
 publication until that bounded policy, scanner memory/CPU sizing for a second
 process, and the 240-second budget have passed engineering review. The
 current 27–75-second / 430–585-MB desktop measurements do not establish
