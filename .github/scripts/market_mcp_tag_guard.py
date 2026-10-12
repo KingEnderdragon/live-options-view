@@ -10,7 +10,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 
-SOURCE_SHA = "1dde53f78709a41c41e17af37c1f9e422626f5af"
+SOURCE_SHA = "1eec17c1b1ae20d3f45a058074198e20349eb7c5"
 PACKAGE = "owentanzer/market-mcp-read-only"
 ACCEPT = ", ".join(
     (
