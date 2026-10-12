@@ -394,6 +394,101 @@ def breadth(members: Iterable[Mapping], changes: Mapping[str, Mapping],
     }
 
 
+def _iso(t: Optional[datetime]) -> Optional[str]:
+    return t.isoformat() if t is not None else None
+
+
+# -- published artifact (intraday/overview.json, schema 1) ----------------
+#
+# The producer computes change and publication-time freshness with the rules
+# above; the market MCP consumer (market_mcp/consumer.js) preserves those
+# values, recomputes only query-time age, and never re-derives a change.
+
+OVERVIEW_KEY = "intraday/overview.json"
+OVERVIEW_SCHEMA_VERSION = 1
+ROW_STATUSES = ("ok", "partial", "unavailable")
+CYCLE_STATUSES = ("complete", "partial", "failed")
+
+
+def overview_row(instrument: Mapping, *, group: Optional[str], origin: str,
+                 current: Observation, reference: Observation, basis: str,
+                 now: datetime, market_open: bool, max_age: timedelta,
+                 provider_symbol: Optional[str] = None,
+                 newer_failed_attempt_at: Optional[datetime] = None) -> dict:
+    """One published row: identity, both observations, change and freshness."""
+    if origin not in ("baseline", "watchlist", "macro"):
+        raise ValueError(f"unknown origin: {origin}")
+    change = compute_change(instrument, current, reference, basis)
+    return {
+        "id": instrument["id"],
+        "symbol": instrument.get("symbol", instrument["id"]),
+        "label": instrument.get("label", instrument["id"]),
+        "asset_class": instrument["asset_class"],
+        "instrument_type": instrument["instrument_type"],
+        "group": group,
+        "origin": origin,
+        "unit": instrument["unit"],
+        "provider": {"source": current.source, "symbol": provider_symbol,
+                     "contract": current.contract},
+        "current": {"value": change["current"], "observed_at": _iso(current.observed_at),
+                    "session": current.session},
+        "reference": {"value": change["reference"], "observed_at": _iso(reference.observed_at),
+                      "basis": basis, "session": reference.session},
+        "change": {k: change[k] for k in ("status", "reasons", "absolute", "absolute_unit",
+                                          "percent", "bps")},
+        "freshness": {**freshness(current.observed_at, now, market_open, max_age,
+                                  newer_failed_attempt_at),
+                      "market_open": market_open,
+                      "max_age_seconds": max_age.total_seconds(),
+                      "evaluated_at": _iso(now)},
+    }
+
+
+def stock_instrument(symbol: str) -> dict:
+    return {"id": symbol, "symbol": symbol, "label": symbol, "asset_class": "equity",
+            "instrument_type": "stock", "unit": "USD"}
+
+
+def build_overview(config: Mapping, rows: Sequence[Mapping], *, generated_at: datetime,
+                   cycle_started_at: datetime, cycle_status: str,
+                   newer_failed_attempt_at: Optional[datetime] = None) -> dict:
+    """Assemble the schema-1 overview payload.
+
+    Every configured instrument appears exactly once: a row the cycle did not
+    produce is listed under `gaps` with reason 'not_collected', so missing
+    coverage is never silent. Rows for unknown ids are rejected.
+    """
+    if cycle_status not in CYCLE_STATUSES:
+        raise ValueError(f"unknown cycle status: {cycle_status}")
+    expected = {m["symbol"] for m in baseline_members(config)} | {m["id"] for m in config["macro"]}
+    seen: set[str] = set()
+    for r in rows:
+        if r["id"] in seen:
+            raise ValueError(f"duplicate row: {r['id']}")
+        if r["origin"] != "watchlist" and r["id"] not in expected:
+            raise ValueError(f"row is not in the universe: {r['id']}")
+        seen.add(r["id"])
+    gaps = [{"id": i, "reason": "not_collected"} for i in sorted(expected - seen)]
+    return {
+        "schema_version": OVERVIEW_SCHEMA_VERSION,
+        "dataset": "cross_market_overview",
+        "universe_version": config["universe_version"],
+        "universe_status": config["status"],
+        "generated_at": _iso(generated_at),
+        "cycle": {"status": cycle_status, "started_at": _iso(cycle_started_at),
+                  "finished_at": _iso(generated_at),
+                  "newer_failed_attempt_at": _iso(newer_failed_attempt_at)},
+        "groups": [{"id": g["id"], "label": g["label"]} for g in config["groups"]],
+        "instruments": list(rows),
+        "gaps": gaps,
+        "notes": [
+            "An as-of collection of asynchronous observations, not a simultaneous snapshot.",
+            "Breadth over this artifact describes the curated sample, not the whole market.",
+            "Price moves do not establish a news cause.",
+        ],
+    }
+
+
 def top_movers(members: Iterable[Mapping], changes: Mapping[str, Mapping],
                direction: str, limit: int, offset: int = 0,
                include_watchlist: bool = False) -> dict:

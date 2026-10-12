@@ -1,9 +1,13 @@
 # Cross-market overview (#132): coverage matrix and first slice
 
 Issue: [#132](https://github.com/OwenTanzer/live-options-view/issues/132).
-Status: **first slice only**. It adds a versioned candidate universe, pure
-calculation rules and fixture tests. It adds no collection, provider calls,
-artifacts, MCP tools or deployments.
+Status: **slices 1-2**. Slice 1 adds a versioned candidate universe, pure
+calculation rules and fixture tests. Slice 2 adds the `intraday/overview.json`
+schema-1 contract and builder (`build_overview`) plus the read-only
+`market_overview` MCP tool, which is tested against synthetic fixtures. Neither
+slice adds collection, provider calls, publication or deployments. The
+collector does not yet call `build_overview`; that is the producer slice
+waiting on the decisions below.
 
 ## What this slice adds
 
@@ -13,8 +17,8 @@ artifacts, MCP tools or deployments.
 | `market_overview.py` | Pure functions for change arithmetic, scale normalization, FX inversion, identity/contract/adjustment checks, US equity session classification, freshness, universe validation, watchlist merging, sample breadth and top movers. |
 | `tests/test_market_overview.py` | Fixture tests for the arithmetic, session, breadth and watchlist checklist items in #132. They are wired into the Collector suite. |
 
-Nothing imports `market_overview.py` yet. Producer and MCP slices come after
-the decisions below.
+Only tests import `market_overview.py`. The MCP tool reads the artifact
+contract that `build_overview` defines.
 
 ## Verified coverage baseline
 

@@ -13,7 +13,7 @@ async function run() {
     const challenge = await request(server, { jsonrpc: '2.0', id: 1, method: 'ping' }); assert.equal(challenge.status, 401);
     const metadata = await request(server, null, { path: '/.well-known/oauth-protected-resource/mcp', method: 'GET' }); assert.equal(metadata.status, 200);
     const init = await rpc({ jsonrpc: '2.0', id: ++id, method: 'initialize', params: { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'production-fixture-smoke', version: '1' } } });
-    await rpc({ jsonrpc: '2.0', method: 'notifications/initialized' }); const listed = await rpc({ jsonrpc: '2.0', id: ++id, method: 'tools/list' }); assert.equal(listed.result.tools.length, 5);
+    await rpc({ jsonrpc: '2.0', method: 'notifications/initialized' }); const listed = await rpc({ jsonrpc: '2.0', id: ++id, method: 'tools/list' }); assert.equal(listed.result.tools.length, 6);
     await tool('discover_sources', { session: SESSION });
     for (const [name, args] of [['market_context', { limit: 1 }], ['squeeze_results', { limit: 1 }], ['return_rankings', { session: SESSION, view: 'clean', limit: 1 }]]) { const r = await tool(name, args); await tool('result_detail', { reference: r.rows[0].detail_reference, limit: 1 }); }
     return { kind: 'synthetic_local_authenticated_http', transport: 'loopback TCP with explicit production Host/auth policy and local test keys', node: process.version,

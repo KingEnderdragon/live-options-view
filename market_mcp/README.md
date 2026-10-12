@@ -2,7 +2,7 @@
 
 Production follow-up status and Linux image evidence: [ROLLOUT.md](ROLLOUT.md).
 
-Five read-only tools expose existing producer artifacts. Node 22+; no package
+Six read-only tools expose existing producer artifacts. Node 22+; no package
 install, provider token, R2 credentials, scanner invocation or trading imports.
 The module remains in this repository because it consumes the existing calendar,
 schedule semantics and producer contracts. Its transports and tests are separate
@@ -72,6 +72,7 @@ Its Linux image checks pass; live client/grant gates remain pending. See
 | `market_context` | Optional `underlying` (`QQQ` default, or `SPY`; #121). QQQ reads `intraday/latest.json` (dataset `qqq_snapshot`), SPY reads `intraday/spy/latest.json` (dataset `spy_snapshot`). Returns `requested_underlying` and `actual.underlying`, the underlying block and a chain page filtered by expiry/type/strike/OCC contract. The payload's symbol, `underlying_market.symbol` and every contract root must match the request or it fails as `symbol_mismatch`; an archive locator outside the requested underlying's layout fails as `incompatible_schema`. Unsupported symbols, a contract for the other underlying, or a missing SPY publication return explicit errors; QQQ is never substituted. Detail references keep the originating underlying and snapshot. |
 | `squeeze_results` | Scheduled `latest.json`, `latest-attempt.json`, `latest-schedule.json`; uses the existing exported XNYS calendar and `formatSqueezeScheduleStatus`. |
 | `return_rankings` | One exact date's `summary.json` and bounded shortlist: legacy `leaderboard.csv` for all/clean, or `qualified_ask_bid_v1.csv` for `view: "qualified_ask_bid_v1"`. Preserves producer ranks, policy, reasons, underlying/type filters, and pagination. Older sessions report the qualified view as unavailable. |
+| `market_overview` | `intraday/overview.json` (dataset `cross_market_overview`, #132; schema 1 from `market_overview.py`). Curated stocks plus benchmarks, ETF proxies, oil, silver, BTC, Treasury yields and FX. Filters `asset_class`, `group`, `symbols` (1..50), `include_watchlist`, `sort` (`universe`/`percent_desc`/`percent_asc`). Producer change values are preserved; only query-time row age is recomputed. Breadth is computed over the full eligible curated sample before paging. Uncollected instruments are listed as `gaps`. **The collector does not publish this artifact yet**, so production discovery reports `missing_publication` until the producer slice is approved. |
 | `result_detail` | Retained snapshot JSON row; exact squeeze run's manifest/results/normalized inputs; selected return contract from bounded sweep pages with producer calculation cells/flags. |
 
 The qualified return view's provisional thresholds and evidence rules are in

@@ -14,6 +14,7 @@ const tools = [
   ['market_context','Read the latest QQQ or SPY underlying context and a bounded chain page (underlying defaults to QQQ; no other symbol is substituted). Field timestamps and unknown Greeks/quote times remain explicit.',schema({...paging,underlying:{type:'string',enum:['QQQ','SPY'],default:'QQQ'},expiry:date,type,strike:{type:'number',exclusiveMinimum:0,maximum:100000},contract:str('^[A-Z0-9.]{1,10}\\d{6}[CP]\\d{8}$')})],
   ['squeeze_results','Read producer-ranked scheduled shortlist alongside latest attempt, schedule and exchange-calendar freshness.',schema(paging)],
   ['return_rankings','Read one explicit session published all/clean midpoint or separately ranked qualified ask-to-later-bid shortlist, preserving producer ranks and CSV values.',schema({...paging,session:date,underlying:str('^[A-Z][A-Z0-9.-]{0,9}$'),type,view:{type:'string',enum:['all','clean','qualified_ask_bid_v1'],default:'all'}},['session'])],
+  ['market_overview','Read the latest cross-market overview: curated stocks plus benchmarks, ETF proxies, oil, silver, Bitcoin, Treasury yields and FX, with producer-computed price/level, dollar or unit change, percent change (bps for yields) and per-row observation freshness. Rows the producer could not collect are listed as gaps, never zero-filled. Breadth covers the full eligible curated sample before paging; it is not whole-market breadth and implies no news cause.',schema({...paging,asset_class:{type:'string',enum:['equity','etf','index','commodity','crypto','rates','fx']},group:str('^[A-Za-z0-9][A-Za-z0-9._/-]{0,31}$'),symbols:{type:'array',minItems:1,maxItems:50,items:str('^[A-Za-z0-9][A-Za-z0-9._/-]{0,31}$')},include_watchlist:{type:'boolean',default:false},sort:{type:'string',enum:['universe','percent_desc','percent_asc'],default:'universe'}})],
   ['result_detail','Follow a server-issued reference for up to 15 minutes; the 64-reference/16 MiB cache may evict it sooner. Repeat the originating query after expiry, eviction or restart. Snapshot uses retained JSON; squeeze reads three exact run members; return path pages at most six sweeps, with change detection and byte limits.',schema({...paging,reference:str('^[0-9a-f-]{36}$')},['reference'])],
 ].map(([name,description,inputSchema])=>({name,description,inputSchema,annotations:{readOnlyHint:true,destructiveHint:false,idempotentHint:true,openWorldHint:true}}));
 
@@ -33,7 +34,7 @@ class Protocol {
     if(message.method==='ping')return {jsonrpc:'2.0',id,result:{}};
     if(!this.ready)return error(-32000,'Initialize and send notifications/initialized first.');
     if(message.method==='tools/list') {
-      if(message.params && (!object(message.params)||Object.keys(message.params).some(k=>k!=='_meta')))return error(-32602,'No tool-list cursor is needed; all five tools fit in one page.');
+      if(message.params && (!object(message.params)||Object.keys(message.params).some(k=>k!=='_meta')))return error(-32602,'No tool-list cursor is needed; all six tools fit in one page.');
       return {jsonrpc:'2.0',id,result:{tools}};
     }
     if(message.method==='tools/call') {
