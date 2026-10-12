@@ -117,7 +117,7 @@ function row(label, r, generatedAt, now) {
     const age = Math.max(0, (now - Date.parse(observed)) / 1000);
     freshness = { status: lastKnown || age > STALE_SECONDS ? 'stale' : 'fresh', age_seconds: age };
   }
-  Object.assign(freshness, { stale_after_seconds: STALE_SECONDS, basis: 'quote_ts (provider event time); retrieval and artifact times are never used as observation time',
+  Object.assign(freshness, { stale_after_seconds: STALE_SECONDS, basis: 'quote_ts = collector receipt time of the latest DXLink Quote/Trade event (the collector does not request provider event times); MCP retrieval and artifact write times are never used',
     live: freshness.status === 'fresh' && source === 'dxlink' && !lastKnown });
 
   const warnings = [];
