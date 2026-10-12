@@ -3,8 +3,9 @@ const { randomUUID } = require('node:crypto');
 const calendar = require('../docs/squeeze-calendar.json');
 const { formatSqueezeScheduleStatus } = require('../docs/shared.js');
 const { DataError, LIMITS, UUID, errorRecord } = require('./source');
+const overview = require('./overview');
 
-const DATASETS = ['qqq_snapshot', 'spy_snapshot', 'scheduled_squeeze', 'options_returns'];
+const DATASETS = ['qqq_snapshot', 'spy_snapshot', 'scheduled_squeeze', 'options_returns', 'cross_market_overview'];
 // Chain underlyings (#121). QQQ keeps its original artifact and dataset id, so
 // an omitted selector behaves exactly as before; SPY has its own tree.
 const UNDERLYINGS = Object.freeze({
@@ -109,7 +110,9 @@ const units = {
   options_returns: { '*_pct': 'fractional return (1 = 100%)', '*_entry, *_exit': 'USD/share', '*_ms, t, bid_ms, ask_ms': 'UTC epoch milliseconds', '*_abs_change_per_contract': 'USD/contract', '*_relative_spread': 'spread / midpoint', '*_size': 'contracts at quoted side', '*_entry_delay_s': 'seconds from first archived sample', rank: 'producer ordinal rank' },
 };
 units.spy_snapshot = units.qqq_snapshot;
+units.cross_market_overview = overview.units;
 const warnings = {
+  cross_market_overview: overview.warnings,
   qqq_snapshot: ['Snapshot timestamp is collection time; retrieval is not observation. Publication time is unavailable.', 'VWAP is approximate; historical VWAP/RVOL are unavailable from snapshot CSVs.', 'OI is lagged and zero versus missing is conflated; Greeks and option quotes have no supplied observation timestamps.', 'Archive locator does not establish checksum verification. Shared PCR/max-pain/reference-skew publication remains owned by #107; merged #116 preserves Crassus lineage but does not publish these readings.'],
   scheduled_squeeze: ['Scores are experimental screens, not squeeze probabilities.', 'first_seen_at/is_new describe producer shortlist publication history; unknown values remain unknown.', 'Provider source times can be absent; acquisition and publication times are distinct.'],
   options_returns: ['Sampled returns miss between-sample extremes. Trade-bar backfill covers only already-ranked contracts.', 'Midpoint and ask-entry/bid-exit comparisons describe observations, not achievable fills.', 'Qualified ask-to-later-bid is a hindsight quote comparison; sizes and spreads do not establish obtainable fills.', 'All/clean coverage is the old top 200 all OR clean; qualified coverage is its separate full-universe top 200.', 'Session artifacts may be rebuilt in place; detail detects summary/shortlist changes and asks for a new query.'],
@@ -135,13 +138,14 @@ class Consumer {
   async call(name, a = {}) {
     const q = this.source.query();
     const marketDataset = supportedUnderlying(underlyingOf(a)) ? UNDERLYINGS[underlyingOf(a)].dataset : 'unsupported_underlying';
-    const dataset = ({market_context:marketDataset, squeeze_results:'scheduled_squeeze', return_rankings:'options_returns'})[name] || (name === 'discover_sources' ? 'source_catalog' : 'detail');
+    const dataset = ({market_context:marketDataset, squeeze_results:'scheduled_squeeze', return_rankings:'options_returns', market_overview:'cross_market_overview'})[name] || (name === 'discover_sources' ? 'source_catalog' : 'detail');
     let out = this.envelope(dataset, a, q);
     try {
       if (name === 'discover_sources') out = await this.discover(a, q, out);
       else if (name === 'market_context') out = await this.market(a, q, out);
       else if (name === 'squeeze_results') out = await this.squeeze(a, q, out);
       else if (name === 'return_rankings') out = await this.returns(a, q, out);
+      else if (name === 'market_overview') out = await this.overview(a, q, out);
       else if (name === 'result_detail') out = await this.detail(a, q, out);
       else throw new DataError('invalid_filter', 'Unknown tool.');
     } catch (e) { out.errors.push(errorRecord(e)); out.status = e.code === 'missing_artifact' ? 'missing' : 'failed'; }
@@ -156,13 +160,31 @@ class Consumer {
     args(a, ['session']); if (a.session !== undefined) check(dates(a.session), 'Select a real YYYY-MM-DD session (2020..2100).', 'invalid_filter');
     // spy_snapshot is appended so existing clients' capability positions stay put.
     const probes = [['qqq_snapshot', 'intraday/latest.json'], ['scheduled_squeeze', 'squeeze-scanner/v1/scheduled/latest.json'],
-      ['options_returns', a.session ? `oa203/scanner/${a.session}/summary.json` : null], ['spy_snapshot', UNDERLYINGS.SPY.key]];
+      ['options_returns', a.session ? `oa203/scanner/${a.session}/summary.json` : null], ['spy_snapshot', UNDERLYINGS.SPY.key],
+      ['cross_market_overview', overview.KEY]];
     const chainSymbol = id => id === 'qqq_snapshot' ? 'QQQ' : id === 'spy_snapshot' ? 'SPY' : null;
     out.capabilities = [];
     for (const [id, key] of probes) {
       const probe = key ? await q.optionalJson(key) : {value:null,error:null};
-      if (key && !probe.error) try { if (chainSymbol(id)) snapshot(probe.value, chainSymbol(id)); else if (id === 'scheduled_squeeze') squeeze(probe.value, true); else returnSummary(probe.value, a.session); }
+      if (key && !probe.error) try { if (chainSymbol(id)) snapshot(probe.value, chainSymbol(id)); else if (id === 'cross_market_overview') overview.validate(probe.value); else if (id === 'scheduled_squeeze') squeeze(probe.value, true); else returnSummary(probe.value, a.session); }
       catch (e) { probe.error = errorRecord(e, key); probe.value = null; }
+      if (id === 'cross_market_overview') {
+        const p = probe.value;
+        const listed = p ? overview.rows(p, this.now()) : null;
+        out.capabilities.push({ dataset: id, producer_schema: 'unversioned collector price strip (intraday/prices.json)',
+          availability: probe.error ? (probe.error.code === 'missing_artifact' ? 'missing_publication' : 'failed') : 'available',
+          actual: p ? { collector_cycle_at: p.timestamp, feed_stale: p.feed_stale } : null,
+          freshness: p ? {...(Date.parse(p.timestamp) > this.now() ? {status:'invalid_time',observed_at:p.timestamp,age_seconds:null,stale_after_seconds:overview.STALE_SECONDS} : age(p.timestamp, this.now(), overview.STALE_SECONDS)),basis:'collector cycle time, not publication or quote observation'} : { status: 'unknown' },
+          source_locator: key, error: probe.error, units: units[id], warnings: warnings[id],
+          fields: ['label','id','asset_class','instrument_type','unit','source','source_symbol','price','price_basis','collector_received_at','observed_at','previous_close','change','freshness','gaps'],
+          filters: ['asset_class', 'symbols', 'sort', 'limit', 'offset'], asset_classes: overview.ASSET_CLASSES,
+          instruments: listed ? listed.known.map(r => ({ label:r.label, id:r.id, asset_class:r.asset_class, instrument_type:r.instrument_type, unit:r.unit, source:r.source, available:r.price !== null })) : [],
+          configured_labels: Object.keys(overview.INSTRUMENTS),
+          source_dependent_identities: [{label:'JPY/USD',source:'yfinance',id:'fx.jpyusd',instrument_type:'spot_fx'},{label:'JPY/USD',source:'last-known without retained origin',id:'unknown.jpyusd',instrument_type:'unknown'}],
+          gaps: overview.GAPS, cadence: 'collector price loop about every 10 s during collector sessions; yfinance fills cached 60 s',
+          coverage: p ? { strip_labels: Object.keys(p.prices).length, identified:listed.known.length, unmapped:listed.unmapped.length } : null, historical_index: 'not_supported' });
+        continue;
+      }
       const chain = chainSymbol(id);
       out.capabilities.push({ dataset: id, ...(chain ? {underlying: chain} : {}), producer_schema: chain ? 'unversioned collector snapshot (symbol-labeled since #121)' : id === 'scheduled_squeeze' ? 'schema_version=1/display_schema_version=1' : 'oa203-returns-v1',
         availability: probe.error ? (probe.error.code === 'missing_artifact' ? 'missing_publication' : 'failed') : key ? 'available' : 'explicit_session_required',
@@ -203,6 +225,36 @@ class Consumer {
     const incomplete = !object(m) || m.spot == null || m.vwap == null || m.vwap_partial_session || m.rvol?.status !== 'ok' || m.momentum?.status !== 'ok';
     if(incomplete && object(m)) out.warnings.push(`Partial readings: VWAP ${m.vwap==null?'missing':m.vwap_partial_session?'partial_session':'available'}; RVOL ${m.rvol?.status??'missing'}; reference momentum ${m.momentum?.status??'missing'}.`);
     out.status = incomplete ? 'partial' : p.rows.length ? 'available' : 'empty';
+    return out;
+  }
+  async overview(a, q, out) {
+    args(a, ['asset_class','symbols','sort','limit','offset']); const {limit,offset} = page(a);
+    if (a.asset_class !== undefined) check(overview.ASSET_CLASSES.includes(a.asset_class), `asset_class must be one of ${overview.ASSET_CLASSES.join(', ')}.`, 'invalid_filter');
+    if (a.symbols !== undefined) check(Array.isArray(a.symbols) && a.symbols.length >= 1 && a.symbols.length <= LIMITS.rows && a.symbols.every(s => typeof s === 'string' && overview.SELECTOR.test(s)), `symbols must be 1..${LIMITS.rows} strip labels or instrument ids.`, 'invalid_filter');
+    const sort = a.sort ?? 'strip'; check(overview.SORTS.includes(sort), `sort must be one of ${overview.SORTS.join(', ')}.`, 'invalid_filter');
+    const p = await q.json(overview.KEY); overview.validate(p);
+    const now = this.now();
+    out.actual = { collector_cycle_at: p.timestamp, snapshot_time: p.snapshot_time ?? null, feed_stale: p.feed_stale, payload_sha256: q.evidence.at(-1).retrieved_sha256 };
+    out.producer_times = { observation: null, acquisition_start: p.timestamp, acquisition_end: null, publication: null };
+    out.freshness = { ...(Date.parse(p.timestamp) > now ? {status:'invalid_time',observed_at:p.timestamp,age_seconds:null,stale_after_seconds:overview.STALE_SECONDS} : age(p.timestamp, now, overview.STALE_SECONDS)), basis: 'collector cycle start, before fallbacks and artifact upload; each row carries its own collector receipt age' };
+    const { known, unmapped } = overview.rows(p, now);
+    const wanted = a.symbols ? new Set(a.symbols) : null;
+    const filtered = known.filter(r => (!a.asset_class || r.asset_class === a.asset_class) && (!wanted || wanted.has(r.label) || wanted.has(r.id)));
+    if (sort !== 'strip') {
+      const sign = sort === 'percent_desc' ? -1 : 1;
+      filtered.sort((x, y) => (x.change.percent === null) - (y.change.percent === null) || sign * ((x.change.percent ?? 0) - (y.change.percent ?? 0)) || x.label.localeCompare(y.label));
+    }
+    const paged = slice(filtered, limit, offset); out.pagination = { ...paged.pagination, sort, ranked_over: sort === 'strip' ? null : 'all matching rows; rows without a percent change sort last' };
+    out.rows = paged.rows.map(row => ({ ...row, detail_reference: this.reference({ dataset: 'cross_market_overview', row, actual: out.actual, evidence: [...q.evidence] }) }));
+    const gapIds = new Set(overview.GAPS.map(g => g.id));
+    out.gaps = overview.GAPS.filter(g => (!a.asset_class || g.asset_class === a.asset_class) && (!wanted || wanted.has(g.id)));
+    out.unmatched_symbols = wanted ? [...wanted].filter(s => !known.some(r => r.label === s || r.id === s) && !gapIds.has(s)).map(s => ({ symbol: s, status: 'not_in_price_strip' })) : [];
+    out.unmapped_labels = unmapped;
+    out.coverage = { strip_labels: Object.keys(p.prices).length, identified: known.length, matched_rows: filtered.length, named_gaps: overview.GAPS.length, matching_gaps: out.gaps.length,
+      live_rows: filtered.filter(r => r.freshness.live).length, unavailable_changes: filtered.filter(r => r.change.status !== 'ok').length };
+    if (p.feed_stale) out.warnings.push('Producer marked the DXLink feed stale when this strip was written.');
+    if (unmapped.length) out.warnings.push(`Strip labels without a reviewed identity are withheld: ${unmapped.join(', ')}.`);
+    out.status = out.coverage.unavailable_changes || out.coverage.live_rows < filtered.length || out.gaps.length || unmapped.length ? 'partial' : filtered.length ? 'available' : 'empty';
     return out;
   }
   async squeeze(a, q, out) {
@@ -279,6 +331,12 @@ class Consumer {
       out.requested_underlying=v.underlying;
       out.producer_times.acquisition_end=v.p.timestamp;out.freshness={...age(v.p.timestamp,this.now()),basis:'collection_timestamp'};out.readings=v.p.underlying_market ?? null;
       out.coverage={scope:'one cached row from the exact queried payload'};out.warnings.push('Detail uses retained queried JSON. The archived CSV has not been read or verified.');return out;
+    }
+    if(v.dataset==='cross_market_overview') {
+      out.producer_times={observation:null,collector_receipt:v.row.collector_received_at,acquisition_start:v.actual.collector_cycle_at,acquisition_end:null,publication:null};
+      out.freshness={...v.row.freshness,note:'freshness as of the originating query; repeat market_overview for current age'};
+      out.coverage={scope:'one retained row from the exact queried price strip'};
+      out.warnings.push('Detail uses the retained queried row; a newer strip publication does not change it.');return out;
     }
     if(v.dataset==='scheduled_squeeze') {
       out.producer_times={observation:null,acquisition_start:v.p.started_at??null,acquisition_end:v.p.finished_at??null,publication:v.p.published_at??null};

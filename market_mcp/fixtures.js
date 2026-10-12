@@ -40,7 +40,21 @@ function fixtures(){
     files[prefix+'sweeps/'+name]=gzipSync(JSON.stringify({symbol:CONTRACT,underlying:'QQQ',type:'call',t,sweep,bid:0.01*sweep,ask:0.03*sweep,bid_ms:t,ask_ms:t,oi:0,spot:600})+'\n'+JSON.stringify({symbol:PUT,underlying:'QQQ',type:'put',t,sweep,bid:1+0.1*sweep,ask:1.2+0.1*sweep})+'\n');
   }
   files[prefix+'sweeps/manifest.jsonl']=manifests.map(m=>JSON.stringify(m)).join('\n')+'\n';
+  json('intraday/prices.json',pricesFixture());
   return files;
+}
+// Synthetic intraday/prices.json in collector.py push_prices' shape (#132 market_overview).
+// Mirrors the real strip's mix: DXLink rows with quote_ts/prev_close, undated yfinance
+// fills (quote_ts/prev_close null) and a last-known carry-forward. Values are invented.
+function pricesFixture(){
+  const t='2026-10-02T16:09:55Z';
+  const dx=(price,prev,extra={})=>({price,bid:null,ask:null,prev_close:prev,chg_pct:Math.round((price-prev)/prev*10000)/100,volume:1000,source:'dxlink',price_basis:'last_trade',quote_ts:t,...extra});
+  const yf=price=>({price,bid:null,ask:null,prev_close:null,chg_pct:null,volume:null,source:'yfinance',price_basis:'undated_last_price',quote_ts:null});
+  return {timestamp:'2026-10-02T16:09:58Z',snapshot_time:'12:09 ET',feed_stale:false,prices:{
+    QQQ:dx(600,597),USO:dx(75,76),VIX:yf(14.8),OVX:yf(48.9),SMH:dx(300,303),IGV:dx(110,107.8),
+    '10Y':dx(40.5,40,{chg_pct:1.25}),'JPY/USD':dx(0.0066,0.0067,{chg_pct:-1.49}),KOSPI:yf(2600),'BTC/USD':yf(82000),
+    META:dx(700,690),GOOGL:dx(180,182),AMZN:{price:250,bid:null,ask:null,prev_close:null,chg_pct:null,volume:null,source:'last-known',quote_ts:'2026-10-02T14:00:00Z',stale:true},
+    TSLA:dx(380,375),MU:dx(100,101),SPCX:dx(160,158),AAPL:dx(202,200),SPY:dx(668,670)}};
 }
 async function writeFixtures(root){for(const [key,value] of Object.entries(fixtures())){const target=path.join(root,key);await fs.mkdir(path.dirname(target),{recursive:true});await fs.writeFile(target,value);}}
 module.exports={fixtures,writeFixtures,SESSION,NOW,RUN,ARCHIVE,CONTRACT,PUT,SPY_CONTRACT};
