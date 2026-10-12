@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
+from datetime import datetime, timezone
 import gzip
 import io
 import json
@@ -28,11 +30,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import oa203_windows as w  # noqa: E402
+import oa203_windows_outputs as outputs  # noqa: E402
 from oa203_returns import ContractInfo, Observation  # noqa: E402
 
 ORIGIN = "https://pub-4d5c916b8cb74ffb8c0abd7dfadb02cf.r2.dev"
 MAX_UNDERLYINGS = 50
 MAX_SESSIONS = 10
+SOURCES: list[dict] = []  # every fetched public artifact with its SHA-256
 
 
 def fetch(key: str, attempts: int = 4) -> bytes:
@@ -41,7 +45,9 @@ def fetch(key: str, attempts: int = 4) -> bytes:
     for attempt in range(attempts):
         try:
             with urllib.request.urlopen(req, timeout=60) as resp:
-                return resp.read()
+                body = resp.read()
+            SOURCES.append({"key": key, "sha256": hashlib.sha256(body).hexdigest(), "bytes": len(body)})
+            return body
         except (urllib.error.URLError, ConnectionError, TimeoutError):
             if attempt == attempts - 1:
                 raise
@@ -70,8 +76,8 @@ def load_session(day: str, underlyings: set[str], rows_by_symbol: dict, sampled:
                 rows_by_symbol[r["symbol"]].append(r)
                 kept += 1
     return {"day": day, "session": w.Session(day, summary["session_open_ms"], summary["session_close_ms"]),
-            "sweeps": len(manifest), "rows_kept": kept, "assessment": summary["assessment"]["status"],
-            "universe_digest": None}
+            "sweeps": len(manifest), "rows_kept": kept, "final": bool(summary.get("final")),
+            "assessment": summary["assessment"]["status"]}
 
 
 def main() -> int:
@@ -80,6 +86,7 @@ def main() -> int:
     ap.add_argument("--underlyings", nargs="+", required=True)
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--top", type=int, default=15)
+    ap.add_argument("--emit-root", type=Path, help="also write oa203/windows/ outputs under this local directory")
     a = ap.parse_args()
     if len(a.underlyings) > MAX_UNDERLYINGS or len(a.days) > MAX_SESSIONS:
         ap.error("bounded replay: at most 50 underlyings and 10 sessions")
@@ -120,8 +127,16 @@ def main() -> int:
         seen = {s.day for s in sessions for o in path if s.open_ms <= o.t < s.close_ms}
         return seen & sampled[info.underlying]
     days_by_symbol = {info.symbol: contract_days(info, path) for info, path in contracts}
+    status = {m["day"]: {"final": m["final"], "assessment": m["assessment"], "sweeps": m["sweeps"]} for m in sessions_meta}
+    generated = datetime.now(timezone.utc).isoformat()
     for win in windows:
         rows = [w.evaluate(win, info, path, days_by_symbol[info.symbol], policy) for info, path in contracts]
+        if a.emit_root:
+            days = {s.day for s in win.sessions}
+            srcs = [x for x in SOURCES if x["key"].split("/")[2] in days]
+            outputs.write_window(a.emit_root, win, rows, policy, {d: status[d] for d in days}, srcs, generated,
+                                 {"mode": "offline_replay", "underlyings": sorted(unders),
+                                  "note": "bounded subset of the daily universe; not the full producer run"})
         summary = {**win.as_dict(), "evaluated": len(rows)}
         for basis in w.BASES:
             ranked = w.rank_window(rows, basis)

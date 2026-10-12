@@ -32,6 +32,8 @@ on:
       - "scripts/oa203_windows.py"
       - "scripts/oa203_windows_replay.py"
       - "tests/test_oa203_windows.py"
+      - "scripts/oa203_windows_outputs.py"
+      - "tests/test_oa203_windows_outputs.py"
       - "tests/stage2_verification.py"
       - "tests/verify_collector_vwap_rvol.py"
       - "tests/verify_collector_spy.py"
@@ -66,6 +68,8 @@ on:
       - "scripts/oa203_windows.py"
       - "scripts/oa203_windows_replay.py"
       - "tests/test_oa203_windows.py"
+      - "scripts/oa203_windows_outputs.py"
+      - "tests/test_oa203_windows_outputs.py"
       - "tests/stage2_verification.py"
       - "tests/verify_collector_vwap_rvol.py"
       - "tests/verify_collector_spy.py"
@@ -99,7 +103,7 @@ jobs:
       - name: Run cross-market symbol probe safety suite (#132)
         run: python -m unittest discover -s tests -p test_probe_cross_market_symbols.py -v
       - name: Run OA-203 multi-session window suite (#130)
-        run: python -m unittest discover -s tests -p test_oa203_windows.py -v
+        run: python -m unittest discover -s tests -p "test_oa203_windows*.py" -v
       - name: Run capture diagnostics suite
         run: python -m unittest discover -s tests -p test_capture_diagnostics.py -v
       - name: Run VWAP/RVOL collector suite
