@@ -1,13 +1,17 @@
 # Cross-market overview (#132): coverage matrix and first slice
 
 Issue: [#132](https://github.com/OwenTanzer/live-options-view/issues/132).
-Status: **slices 1-2**. Slice 1 adds a versioned candidate universe, pure
-calculation rules and fixture tests. Slice 2 adds the `intraday/overview.json`
-schema-1 contract and builder (`build_overview`) plus the read-only
-`market_overview` MCP tool, which is tested against synthetic fixtures. Neither
-slice adds collection, provider calls, publication or deployments. The
-collector does not yet call `build_overview`; that is the producer slice
-waiting on the decisions below.
+Status: **first usable slice**. Per Owen's Oct 12 direction, the callable
+`market_overview` MCP tool reads the existing dashboard price strip
+(`intraday/prices.json`). Its unsupported assets stay as named gaps, and undated
+delayed fills are never presented as live. The broader curated-stock and
+cross-asset coverage is follow-on work. The 60-second overview artifact,
+expanded DXLink subscriptions and the watchlist proposal still need separate
+decisions. A one-off, read-only, market-hours coverage/entitlement probe is
+approved if needed.
+
+The universe file and `market_overview.py` rules below are groundwork for that
+follow-on. The first-slice tool doesn't use them.
 
 ## What this slice adds
 
@@ -17,8 +21,7 @@ waiting on the decisions below.
 | `market_overview.py` | Pure functions for change arithmetic, scale normalization, FX inversion, identity/contract/adjustment checks, US equity session classification, freshness, universe validation, watchlist merging, sample breadth and top movers. |
 | `tests/test_market_overview.py` | Fixture tests for the arithmetic, session, breadth and watchlist checklist items in #132. They are wired into the Collector suite. |
 
-Only tests import `market_overview.py`. The MCP tool reads the artifact
-contract that `build_overview` defines.
+Only tests import `market_overview.py` today.
 
 ## Verified coverage baseline
 

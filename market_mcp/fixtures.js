@@ -40,37 +40,21 @@ function fixtures(){
     files[prefix+'sweeps/'+name]=gzipSync(JSON.stringify({symbol:CONTRACT,underlying:'QQQ',type:'call',t,sweep,bid:0.01*sweep,ask:0.03*sweep,bid_ms:t,ask_ms:t,oi:0,spot:600})+'\n'+JSON.stringify({symbol:PUT,underlying:'QQQ',type:'put',t,sweep,bid:1+0.1*sweep,ask:1.2+0.1*sweep})+'\n');
   }
   files[prefix+'sweeps/manifest.jsonl']=manifests.map(m=>JSON.stringify(m)).join('\n')+'\n';
-  json('intraday/overview.json',overviewFixture());
+  json('intraday/prices.json',pricesFixture());
   return files;
 }
-// Synthetic intraday/overview.json (schema 1, #132) in the shape market_overview.py's
-// build_overview publishes. Values are invented; changes are precomputed by "the producer".
-function overviewFixture(){
-  const obs='2026-10-02T16:09:30Z',prev='2026-10-01T20:00:00Z';
-  const f=(status,max=120,open=true)=>({status,age_seconds:30,warnings:[],market_open:open,max_age_seconds:max,evaluated_at:'2026-10-02T16:09:45Z'});
-  const row=(id,o)=>({id,symbol:o.symbol??id,label:o.label??id,asset_class:o.asset_class??'equity',instrument_type:o.instrument_type??'stock',group:o.group??null,origin:o.origin??'baseline',unit:o.unit??'USD',
-    provider:{source:o.source??'dxlink',symbol:o.provider_symbol??id,contract:o.contract??null},
-    current:{value:o.cur,observed_at:o.observed_at===undefined?obs:o.observed_at,session:o.session??'regular'},
-    reference:{value:o.ref,observed_at:o.ref_at??prev,basis:o.basis??'previous_regular_close',session:'regular'},
-    change:o.change,freshness:o.freshness??f('fresh')});
-  const ok=(abs,pct,unit='USD',bps=null)=>({status:'ok',reasons:[],absolute:abs,absolute_unit:unit,percent:pct,bps});
-  return {schema_version:1,dataset:'cross_market_overview',universe_version:'2026-10-12.candidate-1',universe_status:'candidate',generated_at:'2026-10-02T16:09:45Z',
-    cycle:{status:'complete',started_at:'2026-10-02T16:09:40Z',finished_at:'2026-10-02T16:09:45Z',newer_failed_attempt_at:null},
-    groups:[{id:'technology',label:'Technology'},{id:'financials',label:'Financials'}],
-    instruments:[
-      row('AAPL',{group:'technology',cur:202,ref:200,change:ok(2,1)}),
-      row('MSFT',{group:'technology',cur:398,ref:400,change:ok(-2,-0.5)}),
-      row('NVDA',{group:'technology',cur:130,ref:null,change:{status:'unavailable',reasons:['missing_reference'],absolute:null,absolute_unit:null,percent:null,bps:null}}),
-      row('JPM',{group:'financials',cur:257.5,ref:250,change:ok(7.5,3)}),
-      row('PLTR',{group:'watchlist',origin:'watchlist',cur:120,ref:100,change:ok(20,20)}),
-      row('etf.spy',{symbol:'SPY',label:'SPDR S&P 500 ETF (proxy, not the index)',asset_class:'etf',instrument_type:'etf',origin:'macro',provider_symbol:'SPY',cur:668,ref:670,change:ok(-2,-0.2985)}),
-      row('idx.spx',{symbol:'SPX',label:'S&P 500',asset_class:'index',instrument_type:'cash_index',origin:'macro',unit:'index_points',source:'yfinance',provider_symbol:'^GSPC',observed_at:null,cur:6650,ref:6680,change:ok(-30,-0.4491,'index_points'),freshness:{...f('unknown_time'),age_seconds:null}}),
-      row('yld.us10y',{symbol:'US10Y',asset_class:'rates',instrument_type:'yield',origin:'macro',unit:'percent',basis:'previous_observation',cur:4.05,ref:4,change:ok(0.05,null,'percent',5)}),
-      row('fx.usdjpy',{symbol:'USD/JPY',asset_class:'fx',instrument_type:'fx_spot',origin:'macro',unit:'JPY_per_USD',basis:'previous_observation',cur:151.5,ref:150,change:ok(1.5,1,'JPY_per_USD')}),
-      row('crypto.btcusd',{symbol:'BTC/USD',asset_class:'crypto',instrument_type:'crypto_spot',origin:'macro',unit:'USD_per_BTC',basis:'utc_day_open',session:'continuous',cur:82000,ref:80000,change:ok(2000,2.5)}),
-    ],
-    gaps:[{id:'yld.us02y',reason:'not_collected'},{id:'fut.si.front',reason:'not_collected'}],
-    notes:['An as-of collection of asynchronous observations, not a simultaneous snapshot.']};
+// Synthetic intraday/prices.json in collector.py push_prices' shape (#132 market_overview).
+// Mirrors the real strip's mix: DXLink rows with quote_ts/prev_close, undated yfinance
+// fills (quote_ts/prev_close null) and a last-known carry-forward. Values are invented.
+function pricesFixture(){
+  const t='2026-10-02T16:09:55Z';
+  const dx=(price,prev,extra={})=>({price,bid:null,ask:null,prev_close:prev,chg_pct:Math.round((price-prev)/prev*10000)/100,volume:1000,source:'dxlink',quote_ts:t,...extra});
+  const yf=price=>({price,bid:null,ask:null,prev_close:null,chg_pct:null,volume:null,source:'yfinance',quote_ts:null});
+  return {timestamp:'2026-10-02T16:09:58Z',snapshot_time:'12:09 ET',feed_stale:false,prices:{
+    QQQ:dx(600,597),USO:dx(75,76),VIX:yf(14.8),OVX:yf(48.9),SMH:dx(300,303),IGV:dx(110,107.8),
+    '10Y':dx(40.5,40,{chg_pct:1.25}),'JPY/USD':dx(0.0066,0.0067,{chg_pct:-1.49}),KOSPI:yf(2600),'BTC/USD':yf(82000),
+    META:dx(700,690),GOOGL:dx(180,182),AMZN:{price:250,bid:null,ask:null,prev_close:null,chg_pct:null,volume:null,source:'last-known',quote_ts:'2026-10-02T14:00:00Z',stale:true},
+    TSLA:dx(380,375),MU:dx(100,101),SPCX:dx(160,158),AAPL:dx(202,200),SPY:dx(668,670)}};
 }
 async function writeFixtures(root){for(const [key,value] of Object.entries(fixtures())){const target=path.join(root,key);await fs.mkdir(path.dirname(target),{recursive:true});await fs.writeFile(target,value);}}
 module.exports={fixtures,writeFixtures,SESSION,NOW,RUN,ARCHIVE,CONTRACT,PUT,SPY_CONTRACT};

@@ -170,16 +170,16 @@ class Consumer {
       catch (e) { probe.error = errorRecord(e, key); probe.value = null; }
       if (id === 'cross_market_overview') {
         const p = probe.value;
-        out.capabilities.push({ dataset: id, producer_schema: 'schema_version=1 (market_overview.py)',
+        out.capabilities.push({ dataset: id, producer_schema: 'unversioned collector price strip (intraday/prices.json)',
           availability: probe.error ? (probe.error.code === 'missing_artifact' ? 'missing_publication' : 'failed') : 'available',
-          actual: p ? { universe_version: p.universe_version, generated_at: p.generated_at, cycle_status: p.cycle.status } : null,
-          freshness: p ? age(p.generated_at, this.now(), 180) : { status: 'unknown' },
+          actual: p ? { generated_at: p.timestamp, feed_stale: p.feed_stale } : null,
+          freshness: p ? age(p.timestamp, this.now(), overview.STALE_SECONDS) : { status: 'unknown' },
           source_locator: key, error: probe.error, units: units[id], warnings: warnings[id],
-          fields: ['instruments', 'gaps', 'groups', 'breadth (computed over the full eligible sample)'],
-          filters: ['asset_class', 'group', 'symbols', 'include_watchlist', 'sort', 'limit', 'offset'],
-          asset_classes: overview.ASSET_CLASSES, groups: p ? p.groups : null,
-          cadence: 'producer cycle (proposed 60 s); per-row observation times govern age',
-          coverage: p ? { instruments: p.instruments.length, gaps: p.gaps.length } : null, historical_index: 'not_supported' });
+          fields: ['label','id','asset_class','instrument_type','unit','source','price','previous_close','change','freshness','gaps'],
+          filters: ['asset_class', 'symbols', 'sort', 'limit', 'offset'], asset_classes: overview.ASSET_CLASSES,
+          instruments: Object.entries(overview.INSTRUMENTS).map(([label, i]) => ({ label, id: i.id, asset_class: i.asset_class, unit: i.unit })),
+          gaps: overview.GAPS, cadence: 'collector price loop about every 10 s during collector sessions; yfinance fills cached 60 s',
+          coverage: p ? { strip_labels: Object.keys(p.prices).length } : null, historical_index: 'not_supported' });
         continue;
       }
       const chain = chainSymbol(id);
@@ -225,40 +225,33 @@ class Consumer {
     return out;
   }
   async overview(a, q, out) {
-    args(a, ['asset_class','group','symbols','include_watchlist','sort','limit','offset']); const {limit,offset} = page(a);
+    args(a, ['asset_class','symbols','sort','limit','offset']); const {limit,offset} = page(a);
     if (a.asset_class !== undefined) check(overview.ASSET_CLASSES.includes(a.asset_class), `asset_class must be one of ${overview.ASSET_CLASSES.join(', ')}.`, 'invalid_filter');
-    if (a.group !== undefined) check(typeof a.group === 'string' && overview.ID.test(a.group), 'Invalid group.', 'invalid_filter');
-    if (a.symbols !== undefined) check(Array.isArray(a.symbols) && a.symbols.length >= 1 && a.symbols.length <= LIMITS.rows && a.symbols.every(s => typeof s === 'string' && overview.ID.test(s)), `symbols must be 1..${LIMITS.rows} instrument ids or tickers.`, 'invalid_filter');
-    if (a.include_watchlist !== undefined) check(typeof a.include_watchlist === 'boolean', 'include_watchlist must be boolean.', 'invalid_filter');
-    const sort = a.sort ?? 'universe'; check(overview.SORTS.includes(sort), `sort must be one of ${overview.SORTS.join(', ')}.`, 'invalid_filter');
-    const includeWatchlist = a.include_watchlist ?? false;
+    if (a.symbols !== undefined) check(Array.isArray(a.symbols) && a.symbols.length >= 1 && a.symbols.length <= LIMITS.rows && a.symbols.every(s => typeof s === 'string' && overview.LABEL.test(s)), `symbols must be 1..${LIMITS.rows} strip labels or instrument ids.`, 'invalid_filter');
+    const sort = a.sort ?? 'strip'; check(overview.SORTS.includes(sort), `sort must be one of ${overview.SORTS.join(', ')}.`, 'invalid_filter');
     const p = await q.json(overview.KEY); overview.validate(p);
-    if (a.group !== undefined) check(a.group === 'watchlist' || p.groups.some(g => g.id === a.group), 'Unknown group for this universe version.', 'invalid_filter');
     const now = this.now();
-    out.actual = { universe_version: p.universe_version, universe_status: p.universe_status ?? null, generated_at: p.generated_at, cycle: p.cycle, payload_sha256: q.evidence.at(-1).retrieved_sha256 };
-    out.producer_times = { observation: null, acquisition_start: p.cycle.started_at ?? null, acquisition_end: p.cycle.finished_at ?? null, publication: p.generated_at };
-    out.freshness = { ...age(p.generated_at, now, 180), basis: 'artifact generation time; each row carries its own observation age' };
-    const rows = p.instruments.map(r => ({ ...r, query_freshness: overview.rowFreshness(r, now) }));
+    out.actual = { generated_at: p.timestamp, snapshot_time: p.snapshot_time ?? null, feed_stale: p.feed_stale, payload_sha256: q.evidence.at(-1).retrieved_sha256 };
+    out.producer_times = { observation: null, acquisition_start: null, acquisition_end: null, publication: p.timestamp };
+    out.freshness = { ...age(p.timestamp, now, overview.STALE_SECONDS), basis: 'artifact write time; each row carries its own quote_ts age' };
+    const { known, unmapped } = overview.rows(p, now);
     const wanted = a.symbols ? new Set(a.symbols) : null;
-    const filtered = rows.filter(r => (includeWatchlist || r.origin !== 'watchlist' || a.group === 'watchlist' || (wanted && wanted.has(r.id)))
-      && (!a.asset_class || r.asset_class === a.asset_class) && (!a.group || r.group === a.group) && (!wanted || wanted.has(r.id) || wanted.has(r.symbol)));
-    if (sort !== 'universe') {
+    const filtered = known.filter(r => (!a.asset_class || r.asset_class === a.asset_class) && (!wanted || wanted.has(r.label) || wanted.has(r.id)));
+    if (sort !== 'strip') {
       const sign = sort === 'percent_desc' ? -1 : 1;
-      filtered.sort((x, y) => (x.change.percent === null) - (y.change.percent === null) || sign * ((x.change.percent ?? 0) - (y.change.percent ?? 0)) || x.id.localeCompare(y.id));
+      filtered.sort((x, y) => (x.change.percent === null) - (y.change.percent === null) || sign * ((x.change.percent ?? 0) - (y.change.percent ?? 0)) || x.label.localeCompare(y.label));
     }
-    // Breadth is computed over the full eligible stock sample, before paging/top-N.
-    out.breadth = overview.breadth(rows, { group: a.group && a.group !== 'watchlist' ? a.group : undefined, includeWatchlist: includeWatchlist || a.group === 'watchlist' });
-    const paged = slice(filtered, limit, offset); out.pagination = { ...paged.pagination, sort, ranked_over: sort === 'universe' ? null : 'all matching rows; rows without a percent change sort last' };
+    const paged = slice(filtered, limit, offset); out.pagination = { ...paged.pagination, sort, ranked_over: sort === 'strip' ? null : 'all matching rows; rows without a percent change sort last' };
     out.rows = paged.rows.map(row => ({ ...row, detail_reference: this.reference({ dataset: 'cross_market_overview', row, actual: out.actual, evidence: [...q.evidence] }) }));
-    const unknownSymbols = wanted ? [...wanted].filter(s => !rows.some(r => r.id === s || r.symbol === s)) : [];
-    const gapIds = new Set(p.gaps.map(g => g.id));
-    out.unmatched_symbols = unknownSymbols.map(s => ({ symbol: s, status: gapIds.has(s) ? 'not_collected' : 'not_in_universe' }));
-    out.gaps = p.gaps.filter(g => !a.symbols || wanted.has(g.id));
-    out.coverage = { instruments: p.instruments.length, gaps: p.gaps.length, matched_rows: filtered.length,
-      unavailable_changes: filtered.filter(r => r.change.status === 'unavailable').length, cycle_status: p.cycle.status };
-    if (p.cycle.status !== 'complete') out.warnings.push(`Producer cycle ${p.cycle.status}; some rows may be missing or older.`);
-    if (p.cycle.newer_failed_attempt_at) out.warnings.push(`A newer collection attempt failed at ${p.cycle.newer_failed_attempt_at}; these values are from the last success.`);
-    out.status = p.cycle.status !== 'complete' || p.gaps.length || out.coverage.unavailable_changes ? 'partial' : filtered.length ? 'available' : 'empty';
+    const gapIds = new Set(overview.GAPS.map(g => g.id));
+    out.gaps = wanted ? overview.GAPS.filter(g => wanted.has(g.id)) : a.asset_class ? [] : [...overview.GAPS];
+    out.unmatched_symbols = wanted ? [...wanted].filter(s => !known.some(r => r.label === s || r.id === s) && !gapIds.has(s)).map(s => ({ symbol: s, status: 'not_in_price_strip' })) : [];
+    out.unmapped_labels = unmapped;
+    out.coverage = { strip_labels: Object.keys(p.prices).length, identified: known.length, matched_rows: filtered.length, named_gaps: overview.GAPS.length,
+      live_rows: filtered.filter(r => r.freshness.live).length, unavailable_changes: filtered.filter(r => r.change.status !== 'ok').length };
+    if (p.feed_stale) out.warnings.push('Producer marked the DXLink feed stale when this strip was written.');
+    if (unmapped.length) out.warnings.push(`Strip labels without a reviewed identity are withheld: ${unmapped.join(', ')}.`);
+    out.status = out.coverage.unavailable_changes || out.coverage.live_rows < filtered.length || out.gaps.length || unmapped.length ? 'partial' : filtered.length ? 'available' : 'empty';
     return out;
   }
   async squeeze(a, q, out) {
@@ -337,10 +330,10 @@ class Consumer {
       out.coverage={scope:'one cached row from the exact queried payload'};out.warnings.push('Detail uses retained queried JSON. The archived CSV has not been read or verified.');return out;
     }
     if(v.dataset==='cross_market_overview') {
-      out.producer_times={observation:v.row.current.observed_at,acquisition_start:v.actual.cycle.started_at??null,acquisition_end:v.actual.cycle.finished_at??null,publication:v.actual.generated_at};
-      out.freshness=overview.rowFreshness(v.row,this.now());
-      out.coverage={scope:'one retained row from the exact queried overview payload'};
-      out.warnings.push('Detail uses the retained queried row; a newer overview publication does not change it.');return out;
+      out.producer_times={observation:v.row.observed_at,acquisition_start:null,acquisition_end:null,publication:v.actual.generated_at};
+      out.freshness={...v.row.freshness,note:'freshness as of the originating query; repeat market_overview for current age'};
+      out.coverage={scope:'one retained row from the exact queried price strip'};
+      out.warnings.push('Detail uses the retained queried row; a newer strip publication does not change it.');return out;
     }
     if(v.dataset==='scheduled_squeeze') {
       out.producer_times={observation:null,acquisition_start:v.p.started_at??null,acquisition_end:v.p.finished_at??null,publication:v.p.published_at??null};

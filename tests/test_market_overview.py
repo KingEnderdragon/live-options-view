@@ -270,47 +270,5 @@ class BreadthAndMovers(unittest.TestCase):
         self.assertEqual(withw["rows"][0]["symbol"], "PLTR")
 
 
-class Artifact(unittest.TestCase):
-    NOW = datetime(2026, 10, 9, 19, 0, 30, tzinfo=UTC)
-
-    def setUp(self):
-        self.cfg = mo.load_universe()
-
-    def row(self, symbol, cur, ref, **kw):
-        inst = mo.stock_instrument(symbol)
-        return mo.overview_row(inst, group="technology", origin="baseline",
-                               current=Obs(symbol, cur, T, "dxlink", session="regular"),
-                               reference=Obs(symbol, ref, PREV, "dxlink", session="regular"),
-                               basis="previous_regular_close", now=self.NOW, market_open=True,
-                               max_age=timedelta(minutes=2), provider_symbol=symbol, **kw)
-
-    def test_row_shape_and_values(self):
-        r = self.row("AAPL", 110.0, 100.0)
-        self.assertEqual(r["change"]["status"], "ok")
-        self.assertAlmostEqual(r["change"]["percent"], 10.0)
-        self.assertEqual(r["current"]["observed_at"], T.isoformat())
-        self.assertEqual(r["freshness"]["status"], "fresh")
-        self.assertEqual(r["provider"], {"source": "dxlink", "symbol": "AAPL", "contract": None})
-        import json
-        json.dumps(r)  # serializable
-
-    def test_uncollected_instruments_become_gaps(self):
-        p = mo.build_overview(self.cfg, [self.row("AAPL", 1.0, 1.0)], generated_at=self.NOW,
-                              cycle_started_at=self.NOW - timedelta(seconds=5), cycle_status="partial")
-        self.assertEqual(p["schema_version"], 1)
-        self.assertEqual(len(p["instruments"]), 1)
-        expected = 132 + len(self.cfg["macro"])
-        self.assertEqual(len(p["gaps"]), expected - 1)
-        self.assertNotIn("AAPL", {g["id"] for g in p["gaps"]})
-
-    def test_unknown_and_duplicate_rows_rejected(self):
-        with self.assertRaises(ValueError):
-            mo.build_overview(self.cfg, [self.row("ZZZZ", 1.0, 1.0)], generated_at=self.NOW,
-                              cycle_started_at=self.NOW, cycle_status="complete")
-        with self.assertRaises(ValueError):
-            mo.build_overview(self.cfg, [self.row("AAPL", 1.0, 1.0)] * 2, generated_at=self.NOW,
-                              cycle_started_at=self.NOW, cycle_status="complete")
-
-
 if __name__ == "__main__":
     unittest.main()

@@ -2,119 +2,127 @@
 const test = require('node:test'); const assert = require('node:assert/strict');
 const { Consumer } = require('./consumer'); const { Source, DataError, permitted } = require('./source');
 const { Protocol, tools } = require('./server'); const { fixtures, NOW } = require('./fixtures');
-const KEY = 'intraday/overview.json';
+const KEY = 'intraday/prices.json';
 
 function setup({ files = fixtures(), now = () => NOW } = {}) {
   const source = new Source({ read: async key => { if (!Object.hasOwn(files, key)) throw new DataError('missing_artifact', 'Fixture is absent.', key); return files[key]; } });
   return { consumer: new Consumer(source, { now }), files };
 }
 function edit(files, fn) { const v = JSON.parse(files[KEY]); fn(v); files[KEY] = JSON.stringify(v); }
-const ids = out => out.rows.map(r => r.id);
+const by = out => Object.fromEntries(out.rows.map(r => [r.label, r]));
 
-test('overview is allowlisted and registered as a read-only tool', () => {
+test('price strip is allowlisted and market_overview is a read-only tool', () => {
   assert.doesNotThrow(() => permitted(KEY));
-  assert.throws(() => permitted('intraday/overview.json?x=1'));
+  assert.throws(() => permitted('intraday/prices.json.bak'));
+  assert.throws(() => permitted('intraday/overview.json'));
   const tool = tools.find(t => t.name === 'market_overview');
   assert.ok(tool.annotations.readOnlyHint && tool.inputSchema.additionalProperties === false);
 });
 
-test('default query preserves producer values and excludes watchlist additions', async () => {
+test('DXLink rows keep producer percent, gain identity, unit and consumer-derived dollar change', async () => {
+  const { consumer } = setup(); const r = by(await consumer.call('market_overview', { limit: 50 }));
+  assert.equal(r.AAPL.id, 'AAPL'); assert.equal(r.AAPL.change.status, 'ok');
+  assert.equal(r.AAPL.change.percent, 1); assert.equal(r.AAPL.change.absolute, 2); assert.equal(r.AAPL.change.absolute_unit, 'USD');
+  assert.equal(r.AAPL.freshness.status, 'fresh'); assert.equal(r.AAPL.freshness.live, true);
+  assert.equal(r.QQQ.id, 'etf.qqq'); assert.match(r.QQQ.name, /not the index/);
+  assert.equal(r.USO.asset_class, 'etf'); assert.match(r.USO.name, /not crude oil/);
+});
+
+test('10Y is normalized from the CBOE x10 scale and moves in bps, not percent', async () => {
+  const { consumer } = setup(); const y = by(await consumer.call('market_overview', { asset_class: 'rates' }))['10Y'];
+  assert.equal(y.price, 4.05); assert.equal(y.previous_close, 4); assert.equal(y.raw_price, 40.5);
+  assert.equal(y.change.bps, 5); assert.equal(y.change.percent, null); assert.equal(y.unit, 'percent');
+});
+
+test('a yfinance 10Y fill is taken at scale 1 but has no change and no live label', async () => {
+  const { consumer, files } = setup();
+  edit(files, p => { p.prices['10Y'] = { price: 4.1, bid: null, ask: null, prev_close: null, chg_pct: null, volume: null, source: 'yfinance', quote_ts: null }; });
+  const y = by(await consumer.call('market_overview', { asset_class: 'rates' }))['10Y'];
+  assert.equal(y.price, 4.1); assert.equal(y.change.status, 'unavailable'); assert.equal(y.freshness.status, 'unknown_time'); assert.equal(y.freshness.live, false);
+});
+
+test('yen futures keep USD-per-JPY units and are not presented as spot USD/JPY', async () => {
+  const { consumer } = setup(); const out = await consumer.call('market_overview', { asset_class: 'fx' });
+  const j = by(out)['JPY/USD'];
+  assert.equal(j.id, 'fut.6j'); assert.equal(j.unit, 'USD_per_JPY'); assert.equal(j.change.absolute_unit, 'USD_per_JPY');
+  const spot = await consumer.call('market_overview', { symbols: ['fx.usdjpy'] });
+  assert.equal(spot.rows.length, 0); assert.match(spot.gaps[0].reason, /yen futures/);
+});
+
+test('undated yfinance fills are never live and never get a synthesized change', async () => {
+  const { consumer } = setup(); const r = by(await consumer.call('market_overview', { limit: 50 }));
+  for (const label of ['VIX', 'OVX', 'KOSPI', 'BTC/USD']) {
+    assert.equal(r[label].source, 'yfinance'); assert.equal(r[label].observed_at, null);
+    assert.equal(r[label].freshness.status, 'unknown_time'); assert.equal(r[label].freshness.live, false);
+    assert.equal(r[label].change.status, 'unavailable'); assert.equal(r[label].change.percent, null);
+    assert.ok(r[label].change.reasons.includes('undated_fallback'));
+    assert.ok(r[label].warnings.some(w => /Not a live observation/.test(w)));
+  }
+});
+
+test('last-known carry-forward is stale with no change', async () => {
+  const { consumer } = setup(); const a = by(await consumer.call('market_overview', { symbols: ['AMZN'] })).AMZN;
+  assert.equal(a.freshness.status, 'stale'); assert.equal(a.freshness.live, false);
+  assert.equal(a.change.status, 'unavailable'); assert.ok(a.change.reasons.includes('last_known_price'));
+  assert.equal(a.observed_at, '2026-10-02T14:00:00Z');
+});
+
+test('requested assets missing from the strip are named gaps, never zero rows', async () => {
   const { consumer } = setup(); const out = await consumer.call('market_overview', { limit: 50 });
-  assert.ok(!ids(out).includes('PLTR'));
-  const aapl = out.rows.find(r => r.id === 'AAPL');
-  assert.equal(aapl.change.percent, 1); assert.equal(aapl.change.absolute_unit, 'USD');
-  const tnx = out.rows.find(r => r.id === 'yld.us10y');
-  assert.equal(tnx.change.bps, 5); assert.equal(tnx.change.percent, null);
-  assert.equal(out.rows.find(r => r.id === 'idx.spx').change.absolute_unit, 'index_points');
-  assert.equal(out.status, 'partial'); // gaps + an unavailable change are not hidden
-  assert.deepEqual(out.gaps.map(g => g.id), ['yld.us02y', 'fut.si.front']);
-  assert.equal(out.actual.universe_version, '2026-10-12.candidate-1');
-  assert.ok(out.warnings.some(w => /not a simultaneous/.test(w)));
+  const ids = out.gaps.map(g => g.id);
+  for (const id of ['idx.spx', 'idx.ndx', 'fut.cl', 'silver', 'yld.us02y', 'fx.eurusd', 'universe.curated_stocks']) assert.ok(ids.includes(id), id);
+  assert.equal(out.status, 'partial');
+  assert.ok(!out.rows.some(r => ids.includes(r.id)));
 });
 
-test('unavailable change stays null, never zero', async () => {
-  const { consumer } = setup(); const out = await consumer.call('market_overview', { symbols: ['NVDA'] });
-  assert.equal(out.rows[0].change.status, 'unavailable'); assert.equal(out.rows[0].change.percent, null);
-  assert.deepEqual(out.rows[0].change.reasons, ['missing_reference']);
-});
-
-test('filters by asset class, group and explicit symbols; unknown symbols are reported', async () => {
+test('filters, sorting over all matching rows and unknown symbols', async () => {
   const { consumer } = setup();
-  assert.deepEqual(ids(await consumer.call('market_overview', { asset_class: 'rates' })), ['yld.us10y']);
-  assert.deepEqual(ids(await consumer.call('market_overview', { group: 'technology' })), ['AAPL', 'MSFT', 'NVDA']);
-  const out = await consumer.call('market_overview', { symbols: ['SPY', 'PLTR', 'yld.us02y', 'ZZZZ'] });
-  assert.deepEqual(ids(out), ['PLTR', 'etf.spy']);
-  assert.deepEqual(out.unmatched_symbols, [{ symbol: 'yld.us02y', status: 'not_collected' }, { symbol: 'ZZZZ', status: 'not_in_universe' }]);
-  assert.equal((await consumer.call('market_overview', { group: 'nope' })).errors[0].code, 'invalid_filter');
-  for (const bad of [{ asset_class: 'bonds' }, { symbols: [] }, { symbols: ['../x'] }, { sort: 'random' }, { include_watchlist: 'yes' }, { url: 'https://x' }])
+  const eq = await consumer.call('market_overview', { asset_class: 'equity', sort: 'percent_desc', limit: 2 });
+  assert.deepEqual(eq.rows.map(r => r.label), ['META', 'TSLA']); assert.equal(eq.pagination.total, 7);
+  const asc = await consumer.call('market_overview', { asset_class: 'equity', sort: 'percent_asc', limit: 50 });
+  assert.equal(asc.rows.at(-1).label, 'AMZN'); // no percent sorts last
+  const out = await consumer.call('market_overview', { symbols: ['SPY', 'etf.qqq', 'idx.spx', 'ZZZZ'] });
+  assert.deepEqual(out.rows.map(r => r.label), ['QQQ', 'SPY']);
+  assert.deepEqual(out.gaps.map(g => g.id), ['idx.spx']);
+  assert.deepEqual(out.unmatched_symbols, [{ symbol: 'ZZZZ', status: 'not_in_price_strip' }]);
+  for (const bad of [{ asset_class: 'bonds' }, { symbols: [] }, { symbols: ['../x'] }, { sort: 'random' }, { url: 'https://x' }, { group: 'technology' }])
     assert.equal((await consumer.call('market_overview', bad)).errors[0].code, 'invalid_filter', JSON.stringify(bad));
 });
 
-test('movers rank over all matching rows before paging, missing percents last', async () => {
-  const { consumer } = setup();
-  const first = await consumer.call('market_overview', { asset_class: 'equity', sort: 'percent_desc', limit: 1 });
-  assert.deepEqual(ids(first), ['JPM']); assert.equal(first.pagination.total, 4); assert.equal(first.pagination.next_offset, 1);
-  const down = await consumer.call('market_overview', { asset_class: 'equity', sort: 'percent_asc', limit: 50 });
-  assert.deepEqual(ids(down), ['MSFT', 'AAPL', 'JPM', 'NVDA']);
-  const withWatch = await consumer.call('market_overview', { asset_class: 'equity', sort: 'percent_desc', include_watchlist: true, limit: 1 });
-  assert.deepEqual(ids(withWatch), ['PLTR']);
-});
-
-test('breadth uses the full eligible sample before paging and keeps the denominator', async () => {
-  const { consumer } = setup();
-  const out = await consumer.call('market_overview', { group: 'technology', limit: 1 });
-  assert.equal(out.rows.length, 1);
-  assert.deepEqual([out.breadth.denominator, out.breadth.advancing, out.breadth.declining, out.breadth.missing], [3, 1, 1, 1]);
-  assert.equal(out.breadth.label, 'breadth within the curated sample');
-  const all = await consumer.call('market_overview', { limit: 1 });
-  assert.equal(all.breadth.denominator, 4); // baseline stocks only; ETF/macro rows are not stocks
-  const watch = await consumer.call('market_overview', { include_watchlist: true, limit: 1 });
-  assert.equal(watch.breadth.denominator, 5); assert.notEqual(watch.breadth.mean_percent, all.breadth.mean_percent);
-});
-
-test('query-time age makes old rows stale; closed and unknown times are preserved', async () => {
+test('query-time age turns old DXLink rows stale; feed_stale and unmapped labels are surfaced', async () => {
   const { consumer } = setup({ now: () => NOW + 600000 });
-  const out = await consumer.call('market_overview', { limit: 50 });
-  const by = Object.fromEntries(out.rows.map(r => [r.id, r.query_freshness.status]));
-  assert.equal(by.AAPL, 'stale'); assert.equal(by['idx.spx'], 'unknown_time');
-  assert.equal(out.freshness.status, 'stale');
-  const { consumer: c2, files } = setup();
-  edit(files, p => { p.instruments[0].freshness.status = 'closed'; p.instruments[0].freshness.market_open = false; });
-  assert.equal((await c2.call('market_overview', { symbols: ['AAPL'] })).rows[0].query_freshness.status, 'closed');
+  const out = await consumer.call('market_overview', { symbols: ['AAPL'] });
+  assert.equal(out.rows[0].freshness.status, 'stale'); assert.equal(out.freshness.status, 'stale'); assert.equal(out.status, 'partial');
+  const s = setup(); edit(s.files, p => { p.feed_stale = true; p.prices.NEWT = { price: 1, source: 'dxlink', quote_ts: null }; });
+  const o2 = await s.consumer.call('market_overview');
+  assert.ok(o2.warnings.some(w => /feed stale/.test(w))); assert.deepEqual(o2.unmapped_labels, ['NEWT']);
+  assert.ok(!o2.rows.some(r => r.label === 'NEWT'));
 });
 
-test('partial cycle and newer failed attempt are surfaced with the last success', async () => {
-  const { consumer, files } = setup();
-  edit(files, p => { p.cycle.status = 'partial'; p.cycle.newer_failed_attempt_at = '2026-10-02T16:10:30Z'; });
-  const out = await consumer.call('market_overview');
-  assert.equal(out.status, 'partial'); assert.ok(out.warnings.some(w => /newer collection attempt failed/.test(w)));
-  assert.ok(out.rows.length > 0);
-});
-
-test('missing publication and malformed contracts fail explicitly', async () => {
+test('missing publication and malformed strips fail explicitly', async () => {
   const { consumer, files } = setup(); delete files[KEY];
   let out = await consumer.call('market_overview'); assert.equal(out.status, 'missing'); assert.equal(out.errors[0].code, 'missing_artifact');
-  for (const mutate of [p => { p.schema_version = 2; }, p => { p.instruments[1].id = 'AAPL'; }, p => { p.instruments[0].change.percent = 'NaN'; },
-    p => { p.instruments[2].change.percent = 0; }, p => { p.gaps.push({ id: 'AAPL', reason: 'x' }); }, p => { p.instruments[0].asset_class = 'stock'; }]) {
+  for (const mutate of [p => { delete p.prices; }, p => { p.prices.AAPL.price = 'NaN'; }, p => { p.prices.AAPL.quote_ts = 'yesterday'; }, p => { p.prices.AAPL.source = 'scraped'; }, p => { p.feed_stale = 'no'; }]) {
     const s = setup(); edit(s.files, mutate); out = await s.consumer.call('market_overview');
     assert.equal(out.status, 'failed'); assert.equal(out.errors[0].code, 'incompatible_schema');
   }
 });
 
-test('detail stays bound to the queried row after the overview advances', async () => {
+test('detail stays bound to the queried row after the strip advances', async () => {
   const { consumer, files } = setup();
   const first = await consumer.call('market_overview', { symbols: ['AAPL'] });
-  edit(files, p => { p.generated_at = '2026-10-02T16:11:00Z'; p.instruments[0].current.value = 999; });
+  edit(files, p => { p.timestamp = '2026-10-02T16:11:00Z'; p.prices.AAPL.price = 999; });
   const out = await consumer.call('result_detail', { reference: first.rows[0].detail_reference });
-  assert.equal(out.status, 'available'); assert.equal(out.row.current.value, 202);
+  assert.equal(out.status, 'available'); assert.equal(out.row.price, 202);
   assert.equal(out.actual.payload_sha256, first.actual.payload_sha256);
-  assert.equal(out.producer_times.observation, '2026-10-02T16:09:30Z');
+  assert.equal(out.producer_times.observation, '2026-10-02T16:09:55Z');
 });
 
 test('discovery appends the overview capability without moving existing positions', async () => {
   const { consumer, files } = setup(); let out = await consumer.call('discover_sources');
   assert.deepEqual(out.capabilities.map(c => c.dataset), ['qqq_snapshot', 'scheduled_squeeze', 'options_returns', 'spy_snapshot', 'cross_market_overview']);
-  assert.equal(out.capabilities[4].availability, 'available'); assert.equal(out.capabilities[4].coverage.gaps, 2);
+  assert.equal(out.capabilities[4].availability, 'available'); assert.equal(out.capabilities[4].source_locator, KEY);
+  assert.ok(out.capabilities[4].gaps.length > 0);
   delete files[KEY]; out = await consumer.call('discover_sources');
   assert.equal(out.capabilities[4].availability, 'missing_publication');
 });
@@ -123,7 +131,7 @@ test('MCP tools/call returns matching text and structured overview', async () =>
   const { consumer } = setup(); const p = new Protocol(consumer);
   await p.handle({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 't', version: '1' } } });
   await p.handle({ jsonrpc: '2.0', method: 'notifications/initialized' });
-  const out = await p.handle({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'market_overview', arguments: { asset_class: 'fx' } } });
+  const out = await p.handle({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'market_overview', arguments: { asset_class: 'crypto' } } });
   assert.deepEqual(JSON.parse(out.result.content[0].text), out.result.structuredContent);
-  assert.equal(out.result.structuredContent.rows[0].unit, 'JPY_per_USD');
+  assert.equal(out.result.structuredContent.rows[0].unit, 'USD_per_BTC');
 });
