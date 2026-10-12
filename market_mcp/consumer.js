@@ -172,12 +172,13 @@ class Consumer {
         const p = probe.value;
         out.capabilities.push({ dataset: id, producer_schema: 'unversioned collector price strip (intraday/prices.json)',
           availability: probe.error ? (probe.error.code === 'missing_artifact' ? 'missing_publication' : 'failed') : 'available',
-          actual: p ? { generated_at: p.timestamp, feed_stale: p.feed_stale } : null,
-          freshness: p ? age(p.timestamp, this.now(), overview.STALE_SECONDS) : { status: 'unknown' },
+          actual: p ? { collector_cycle_at: p.timestamp, feed_stale: p.feed_stale } : null,
+          freshness: p ? {...age(p.timestamp, this.now(), overview.STALE_SECONDS),basis:'collector cycle time, not publication or quote observation'} : { status: 'unknown' },
           source_locator: key, error: probe.error, units: units[id], warnings: warnings[id],
           fields: ['label','id','asset_class','instrument_type','unit','source','price','previous_close','change','freshness','gaps'],
           filters: ['asset_class', 'symbols', 'sort', 'limit', 'offset'], asset_classes: overview.ASSET_CLASSES,
           instruments: Object.entries(overview.INSTRUMENTS).map(([label, i]) => ({ label, id: i.id, asset_class: i.asset_class, unit: i.unit })),
+          source_dependent_identities: [{label:'JPY/USD',source:'yfinance',id:'fx.jpyusd',instrument_type:'spot_fx'},{label:'JPY/USD',source:'last-known without retained origin',id:'unknown.jpyusd',instrument_type:'unknown'}],
           gaps: overview.GAPS, cadence: 'collector price loop about every 10 s during collector sessions; yfinance fills cached 60 s',
           coverage: p ? { strip_labels: Object.keys(p.prices).length } : null, historical_index: 'not_supported' });
         continue;
@@ -227,13 +228,13 @@ class Consumer {
   async overview(a, q, out) {
     args(a, ['asset_class','symbols','sort','limit','offset']); const {limit,offset} = page(a);
     if (a.asset_class !== undefined) check(overview.ASSET_CLASSES.includes(a.asset_class), `asset_class must be one of ${overview.ASSET_CLASSES.join(', ')}.`, 'invalid_filter');
-    if (a.symbols !== undefined) check(Array.isArray(a.symbols) && a.symbols.length >= 1 && a.symbols.length <= LIMITS.rows && a.symbols.every(s => typeof s === 'string' && overview.LABEL.test(s)), `symbols must be 1..${LIMITS.rows} strip labels or instrument ids.`, 'invalid_filter');
+    if (a.symbols !== undefined) check(Array.isArray(a.symbols) && a.symbols.length >= 1 && a.symbols.length <= LIMITS.rows && a.symbols.every(s => typeof s === 'string' && overview.SELECTOR.test(s)), `symbols must be 1..${LIMITS.rows} strip labels or instrument ids.`, 'invalid_filter');
     const sort = a.sort ?? 'strip'; check(overview.SORTS.includes(sort), `sort must be one of ${overview.SORTS.join(', ')}.`, 'invalid_filter');
     const p = await q.json(overview.KEY); overview.validate(p);
     const now = this.now();
-    out.actual = { generated_at: p.timestamp, snapshot_time: p.snapshot_time ?? null, feed_stale: p.feed_stale, payload_sha256: q.evidence.at(-1).retrieved_sha256 };
-    out.producer_times = { observation: null, acquisition_start: null, acquisition_end: null, publication: p.timestamp };
-    out.freshness = { ...age(p.timestamp, now, overview.STALE_SECONDS), basis: 'artifact write time; each row carries its own quote_ts age' };
+    out.actual = { collector_cycle_at: p.timestamp, snapshot_time: p.snapshot_time ?? null, feed_stale: p.feed_stale, payload_sha256: q.evidence.at(-1).retrieved_sha256 };
+    out.producer_times = { observation: null, acquisition_start: p.timestamp, acquisition_end: null, publication: null };
+    out.freshness = { ...age(p.timestamp, now, overview.STALE_SECONDS), basis: 'collector cycle start, before fallbacks and artifact upload; each row carries its own collector receipt age' };
     const { known, unmapped } = overview.rows(p, now);
     const wanted = a.symbols ? new Set(a.symbols) : null;
     const filtered = known.filter(r => (!a.asset_class || r.asset_class === a.asset_class) && (!wanted || wanted.has(r.label) || wanted.has(r.id)));
@@ -244,10 +245,10 @@ class Consumer {
     const paged = slice(filtered, limit, offset); out.pagination = { ...paged.pagination, sort, ranked_over: sort === 'strip' ? null : 'all matching rows; rows without a percent change sort last' };
     out.rows = paged.rows.map(row => ({ ...row, detail_reference: this.reference({ dataset: 'cross_market_overview', row, actual: out.actual, evidence: [...q.evidence] }) }));
     const gapIds = new Set(overview.GAPS.map(g => g.id));
-    out.gaps = wanted ? overview.GAPS.filter(g => wanted.has(g.id)) : a.asset_class ? [] : [...overview.GAPS];
+    out.gaps = overview.GAPS.filter(g => (!a.asset_class || g.asset_class === a.asset_class) && (!wanted || wanted.has(g.id)));
     out.unmatched_symbols = wanted ? [...wanted].filter(s => !known.some(r => r.label === s || r.id === s) && !gapIds.has(s)).map(s => ({ symbol: s, status: 'not_in_price_strip' })) : [];
     out.unmapped_labels = unmapped;
-    out.coverage = { strip_labels: Object.keys(p.prices).length, identified: known.length, matched_rows: filtered.length, named_gaps: overview.GAPS.length,
+    out.coverage = { strip_labels: Object.keys(p.prices).length, identified: known.length, matched_rows: filtered.length, named_gaps: overview.GAPS.length, matching_gaps: out.gaps.length,
       live_rows: filtered.filter(r => r.freshness.live).length, unavailable_changes: filtered.filter(r => r.change.status !== 'ok').length };
     if (p.feed_stale) out.warnings.push('Producer marked the DXLink feed stale when this strip was written.');
     if (unmapped.length) out.warnings.push(`Strip labels without a reviewed identity are withheld: ${unmapped.join(', ')}.`);
@@ -330,7 +331,7 @@ class Consumer {
       out.coverage={scope:'one cached row from the exact queried payload'};out.warnings.push('Detail uses retained queried JSON. The archived CSV has not been read or verified.');return out;
     }
     if(v.dataset==='cross_market_overview') {
-      out.producer_times={observation:v.row.observed_at,acquisition_start:null,acquisition_end:null,publication:v.actual.generated_at};
+      out.producer_times={observation:null,collector_receipt:v.row.collector_received_at,acquisition_start:v.actual.collector_cycle_at,acquisition_end:null,publication:null};
       out.freshness={...v.row.freshness,note:'freshness as of the originating query; repeat market_overview for current age'};
       out.coverage={scope:'one retained row from the exact queried price strip'};
       out.warnings.push('Detail uses the retained queried row; a newer strip publication does not change it.');return out;

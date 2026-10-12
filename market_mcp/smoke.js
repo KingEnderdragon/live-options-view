@@ -27,9 +27,11 @@ async function smoke({publicAccess=false,session=SESSION}={}){
     if(spy.rows?.[0])await call('result_detail',{reference:spy.rows[0].detail_reference});
     const squeeze=await call('squeeze_results',{limit:1});
     if(squeeze.rows?.[0])await call('result_detail',{reference:squeeze.rows[0].detail_reference});
+    const overview=await call('market_overview',{symbols:['AAPL'],limit:1});
+    if(overview.rows?.[0])await call('result_detail',{reference:overview.rows[0].detail_reference});
     const returns=await call('return_rankings',{session,view:'clean',limit:1});
     if(returns.rows?.[0])await call('result_detail',{reference:returns.rows[0].detail_reference,limit:1});
-    if(!publicAccess){assert.equal(market.status,'available');assert.equal(spy.dataset,'spy_snapshot');assert.equal(spy.actual.underlying,'SPY');assert.ok(spy.rows[0].OptionSymbol.startsWith('SPY'));assert.equal(squeeze.status,'available');assert.equal(returns.status,'available');assert.ok(transcript.at(-1).response.quote_path.length);}
+    if(!publicAccess){assert.equal(market.status,'available');assert.equal(spy.dataset,'spy_snapshot');assert.equal(spy.actual.underlying,'SPY');assert.ok(spy.rows[0].OptionSymbol.startsWith('SPY'));assert.equal(squeeze.status,'available');assert.equal(overview.rows[0].id,'AAPL');assert.equal(returns.status,'available');assert.ok(transcript.at(-1).response.quote_path.length);}
     return {kind:publicAccess?'public_anonymous_local_stdio':'synthetic_fixtures_local_stdio',session,tools:listed.result.tools.map(t=>t.name),transcript};
   }finally{
     child.stdin.end();child.kill();lines.close();for(const w of waiters.values())clearTimeout(w.timer);

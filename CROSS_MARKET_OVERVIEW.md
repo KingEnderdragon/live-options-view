@@ -4,33 +4,43 @@ Issue: [#132](https://github.com/OwenTanzer/live-options-view/issues/132).
 Status: **first usable slice**. Per Owen's Oct 12 direction, the callable
 `market_overview` MCP tool reads the existing dashboard price strip
 (`intraday/prices.json`). Its unsupported assets stay as named gaps, and undated
-delayed fills are never presented as live. The broader curated-stock and
-cross-asset coverage is follow-on work. The 60-second overview artifact,
+fills are never presented as live. The collector now adds source identity and
+selected-price basis to that same artifact and ties `quote_ts` to the selected
+price input. It does not change the strip's subscriptions or cadence. Older
+published strips lack that basis and cannot be asserted live. The broader
+curated-stock and cross-asset coverage is follow-on work. The 60-second overview artifact,
 expanded DXLink subscriptions and the watchlist proposal still need separate
 decisions. A one-off, read-only, market-hours coverage/entitlement probe is
-approved if needed.
+approved in principle, but its separate DXLink connection on the production
+grant may disrupt the collector. Do not run it or pause the collector without
+an operational decision; a route using data already received by the collector
+is being discussed.
 
 The universe file and `market_overview.py` rules below are groundwork for that
-follow-on. The first-slice tool doesn't use them.
+follow-on. The first-slice tool does not use them or offer a watchlist.
 
 ## What this slice adds
 
 | File | Purpose |
 | --- | --- |
+| `collector.py` | Add source symbol, original source for carry-forwards, selected-price basis and a receipt time tied to the selected price in the existing `prices.json` payload. No new symbols or schedule. |
+| `market_mcp/overview.js`, `consumer.js`, `server.js` | Add the bounded, read-only `market_overview` tool over the existing strip, with source-dependent identities, units, per-row receipt age and named gaps. |
 | `market_overview_universe.json` | Versioned candidate universe: 132 stocks in 11 groups of 12 with a rationale for each group, a share-class alias table, a proposed watchlist cap, and a macro instrument registry with exact instrument types, units and candidate sources. |
 | `market_overview.py` | Pure functions for change arithmetic, scale normalization, FX inversion, identity/contract/adjustment checks, US equity session classification, freshness, universe validation, watchlist merging, sample breadth and top movers. |
 | `tests/test_market_overview.py` | Fixture tests for the arithmetic, session, breadth and watchlist checklist items in #132. They are wired into the Collector suite. |
 
-Only tests import `market_overview.py` today.
+Only tests import `market_overview.py` today; it is follow-on groundwork, not
+the tool implementation.
 
 ## Verified coverage baseline
 
 The baseline comes from source on `master` at `450b5b7` plus the last
-public `intraday/prices.json`, published `2026-10-09T20:14:55Z` (Friday close).
-That file is one observed publication. It does not establish entitlement,
+public `intraday/prices.json`, with collector cycle timestamp
+`2026-10-09T20:14:55Z` (Friday close). That file is one observed artifact;
+the exact upload completion time is unavailable. It does not establish entitlement,
 symbology or live health.
 
-| Ticker strip label | Configured DXLink symbol | Observed source | Previous close | Quote timestamp |
+| Ticker strip label | Configured DXLink symbol | Observed source | Previous close | Collector receipt time |
 | --- | --- | --- | --- | --- |
 | QQQ, SPY, USO, SMH, IGV, META, GOOGL, AMZN, TSLA, MU, SPCX, AAPL | same as label | dxlink | yes | yes |
 | JPY/USD | `/6J:XCME` (yen futures, USD per JPY) | dxlink | yes | yes |
@@ -42,10 +52,13 @@ symbology or live health.
 
 What this shows:
 
-- **US equities/ETFs over DXLink** work, with event timestamps and previous
-  close. These are the natural source for the 132-stock universe, but only 12
+- **US equities/ETFs over DXLink** work, with collector receipt times and previous
+  close. `quote_ts` is collector receipt time, not provider event time. These are
+  the natural candidate source for the 132-stock universe, but only 12
   equity symbols are subscribed today.
-- **CME futures over DXLink** work for at least `/6J`. That suggests `/CL`,
+- **CME futures over DXLink** work for at least `/6J`, though the artifact lacks
+  resolved contract and expiry, so this tool withholds its change. Other symbols
+  such as `/CL`,
   `/BZ`, `/SI`, `/6E`, `/6B`, `/6C`, `/6A`, `/6S` and Treasury futures may
   work too. This is unverified.
 - **Cash indices, CBOE yield indices and BTC** return nothing over DXLink
@@ -99,9 +112,10 @@ What this shows:
    DXLink connection, and publish a separate `intraday/overview.json` at a
    slower cadence (proposed 60s). `prices.json` and its 10s cadence stay
    unchanged.
-2. Run a one-off, read-only, market-hours DXLink probe of the candidate macro
-   symbols. This separates wrong symbology from missing entitlement, the same
-   way the MOO-144 Tradier probe did.
+2. Decide whether and how to run a one-off, read-only, market-hours DXLink
+   coverage probe. The current script would open a second connection on the
+   production OAuth grant and could disrupt the collector. A safer route using
+   data already received by the collector is under discussion.
 3. For instruments with no DXLink source, choose between yfinance daily bars
    (labeled delayed, no observation time) and leaving them as named gaps.
 4. Watchlist cap: 25 additions are proposed. Storage would be a versioned
@@ -110,5 +124,5 @@ What this shows:
 
 ## Not in this slice
 
-Collection changes, new artifacts, MCP tools, news, sentiment, causal
-explanations, alerts and any new paid service or credential.
+New subscriptions, new artifacts, new collection cadence, watchlist persistence,
+news, sentiment, causal explanations, alerts and any new paid service or credential.

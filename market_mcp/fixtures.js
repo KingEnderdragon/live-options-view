@@ -48,8 +48,8 @@ function fixtures(){
 // fills (quote_ts/prev_close null) and a last-known carry-forward. Values are invented.
 function pricesFixture(){
   const t='2026-10-02T16:09:55Z';
-  const dx=(price,prev,extra={})=>({price,bid:null,ask:null,prev_close:prev,chg_pct:Math.round((price-prev)/prev*10000)/100,volume:1000,source:'dxlink',quote_ts:t,...extra});
-  const yf=price=>({price,bid:null,ask:null,prev_close:null,chg_pct:null,volume:null,source:'yfinance',quote_ts:null});
+  const dx=(price,prev,extra={})=>({price,bid:null,ask:null,prev_close:prev,chg_pct:Math.round((price-prev)/prev*10000)/100,volume:1000,source:'dxlink',price_basis:'last_trade',quote_ts:t,...extra});
+  const yf=price=>({price,bid:null,ask:null,prev_close:null,chg_pct:null,volume:null,source:'yfinance',price_basis:'undated_last_price',quote_ts:null});
   return {timestamp:'2026-10-02T16:09:58Z',snapshot_time:'12:09 ET',feed_stale:false,prices:{
     QQQ:dx(600,597),USO:dx(75,76),VIX:yf(14.8),OVX:yf(48.9),SMH:dx(300,303),IGV:dx(110,107.8),
     '10Y':dx(40.5,40,{chg_pct:1.25}),'JPY/USD':dx(0.0066,0.0067,{chg_pct:-1.49}),KOSPI:yf(2600),'BTC/USD':yf(82000),

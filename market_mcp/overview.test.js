@@ -44,9 +44,29 @@ test('a yfinance 10Y fill is taken at scale 1 but has no change and no live labe
 test('yen futures keep USD-per-JPY units and are not presented as spot USD/JPY', async () => {
   const { consumer } = setup(); const out = await consumer.call('market_overview', { asset_class: 'fx' });
   const j = by(out)['JPY/USD'];
-  assert.equal(j.id, 'fut.6j'); assert.equal(j.unit, 'USD_per_JPY'); assert.equal(j.change.absolute_unit, 'USD_per_JPY');
+  assert.equal(j.id, 'fut.6j'); assert.equal(j.unit, 'USD_per_JPY');
+  assert.equal(j.change.status, 'unavailable'); assert.ok(j.change.reasons.includes('contract_unresolved'));
   const spot = await consumer.call('market_overview', { symbols: ['fx.usdjpy'] });
   assert.equal(spot.rows.length, 0); assert.match(spot.gaps[0].reason, /yen futures/);
+});
+
+test('Yahoo yen spot and originless carried yen are never labeled CME futures', async () => {
+  const s = setup();
+  edit(s.files, p => { p.prices['JPY/USD'] = {price:0.0067,bid:0.0065,prev_close:0.0066,chg_pct:null,source:'yfinance',source_symbol:'JPYUSD=X',price_basis:'undated_last_price',quote_ts:null}; });
+  const spot = by(await s.consumer.call('market_overview', {symbols:['fx.jpyusd']}))['JPY/USD'];
+  assert.equal(spot.id, 'fx.jpyusd'); assert.equal(spot.instrument_type, 'spot_fx'); assert.equal(spot.unit, 'USD_per_JPY');
+  assert.equal(spot.previous_close, null); assert.equal(spot.bid, null);
+  assert.equal(spot.change.status, 'unavailable'); assert.equal(spot.freshness.live, false);
+  edit(s.files, p => { p.prices['JPY/USD'] = {price:0.0067,source:'last-known',stale:true,quote_ts:'2026-10-02T15:00:00Z'}; });
+  const carried = by(await s.consumer.call('market_overview', {symbols:['unknown.jpyusd']}))['JPY/USD'];
+  assert.equal(carried.id, 'unknown.jpyusd'); assert.equal(carried.price, null);
+  assert.ok(carried.change.reasons.includes('unknown_instrument_identity'));
+});
+
+test('source identity conflicts fail instead of substituting a different instrument', async () => {
+  const s = setup(); edit(s.files, p => { p.prices['JPY/USD'].source_symbol = 'JPYUSD=X'; });
+  const out = await s.consumer.call('market_overview');
+  assert.equal(out.status, 'failed'); assert.equal(out.errors[0].code, 'incompatible_schema');
 });
 
 test('undated yfinance fills are never live and never get a synthesized change', async () => {
@@ -64,7 +84,7 @@ test('last-known carry-forward is stale with no change', async () => {
   const { consumer } = setup(); const a = by(await consumer.call('market_overview', { symbols: ['AMZN'] })).AMZN;
   assert.equal(a.freshness.status, 'stale'); assert.equal(a.freshness.live, false);
   assert.equal(a.change.status, 'unavailable'); assert.ok(a.change.reasons.includes('last_known_price'));
-  assert.equal(a.observed_at, '2026-10-02T14:00:00Z');
+  assert.equal(a.observed_at, null); assert.equal(a.collector_received_at, '2026-10-02T14:00:00Z');
 });
 
 test('requested assets missing from the strip are named gaps, never zero rows', async () => {
@@ -87,6 +107,78 @@ test('filters, sorting over all matching rows and unknown symbols', async () => 
   assert.deepEqual(out.unmatched_symbols, [{ symbol: 'ZZZZ', status: 'not_in_price_strip' }]);
   for (const bad of [{ asset_class: 'bonds' }, { symbols: [] }, { symbols: ['../x'] }, { sort: 'random' }, { url: 'https://x' }, { group: 'technology' }])
     assert.equal((await consumer.call('market_overview', bad)).errors[0].code, 'invalid_filter', JSON.stringify(bad));
+});
+
+test('discovered instrument ids and asset-class gaps are selectable', async () => {
+  const {consumer} = setup();
+  const yieldRow = await consumer.call('market_overview', {symbols:['yld.us10y.cboe_tnx']});
+  assert.deepEqual(yieldRow.rows.map(r => r.label), ['10Y']);
+  const universeGap = await consumer.call('market_overview', {symbols:['universe.curated_stocks']});
+  assert.deepEqual(universeGap.gaps.map(g => g.id), ['universe.curated_stocks']);
+  const rates = await consumer.call('market_overview', {asset_class:'rates'});
+  assert.deepEqual(rates.gaps.map(g => g.id), ['yld.us02y','yld.us05y','yld.us30y']);
+  const fx = await consumer.call('market_overview', {asset_class:'fx'});
+  assert.ok(fx.gaps.some(g => g.id === 'fx.usdjpy'));
+  const commodities = await consumer.call('market_overview', {asset_class:'commodity'});
+  assert.ok(commodities.gaps.some(g => g.id === 'fut.cl'));
+});
+
+test('collector receipt is separate from provider observation; old, future and closed readings are not live', async () => {
+  const s = setup();
+  let a = by(await s.consumer.call('market_overview', {symbols:['AAPL']})).AAPL;
+  assert.equal(a.observed_at, null); assert.equal(a.collector_received_at, '2026-10-02T16:09:55Z');
+  assert.equal(a.freshness.market_state, 'regular'); assert.equal(a.freshness.live, true);
+  edit(s.files, p => { delete p.prices.AAPL.price_basis; });
+  a = by(await s.consumer.call('market_overview', {symbols:['AAPL']})).AAPL;
+  assert.equal(a.freshness.live, false); assert.ok(a.warnings.some(w => /Legacy strip/.test(w)));
+  edit(s.files, p => { p.prices.AAPL.price_basis = 'last_trade'; p.prices.AAPL.quote_ts = '2026-10-02T16:12:00Z'; });
+  a = by(await s.consumer.call('market_overview', {symbols:['AAPL']})).AAPL;
+  assert.equal(a.freshness.status, 'invalid_time'); assert.equal(a.freshness.age_seconds, null);
+  assert.equal(a.freshness.live, false); assert.equal(a.change.status, 'unavailable');
+  const sunday = setup({now:() => Date.parse('2026-10-04T16:10:00Z')});
+  edit(sunday.files, p => { p.prices.AAPL.quote_ts = '2026-10-04T16:09:55Z'; });
+  a = by(await sunday.consumer.call('market_overview', {symbols:['AAPL']})).AAPL;
+  assert.equal(a.freshness.market_state, 'closed'); assert.equal(a.freshness.status, 'closed'); assert.equal(a.freshness.live, false);
+  edit(sunday.files, p => { p.feed_stale = true; });
+  a = by(await sunday.consumer.call('market_overview', {symbols:['AAPL']})).AAPL;
+  assert.equal(a.freshness.live, false);
+});
+
+test('equity session labels cover premarket, postmarket, holiday, early close and DST', async () => {
+  for (const [stamp, expected] of [
+    ['2026-10-02T13:00:00Z','premarket'],
+    ['2026-10-02T20:01:00Z','postmarket'],
+    ['2026-11-26T16:00:00Z','closed'],
+    ['2026-11-27T19:00:00Z','closed'],
+    ['2026-11-02T14:31:00Z','regular'],
+  ]) {
+    const s = setup({now:() => Date.parse(stamp)});
+    edit(s.files, p => { p.prices.AAPL.quote_ts = stamp; });
+    const a = by(await s.consumer.call('market_overview', {symbols:['AAPL']})).AAPL;
+    assert.equal(a.freshness.market_state, expected, stamp);
+    assert.equal(a.freshness.live, expected !== 'closed', stamp);
+    if (expected === 'premarket' || expected === 'postmarket') {
+      assert.equal(a.change.status, 'partial', stamp);
+      assert.equal(a.change.current_session, expected);
+      assert.ok(a.change.reasons.includes('extended_hours_reference_session_unverified'));
+    }
+  }
+});
+
+test('a zero previous close keeps absolute change but has no percent change', async () => {
+  const s = setup(); edit(s.files, p => { p.prices.AAPL.prev_close = 0; p.prices.AAPL.chg_pct = null; });
+  const a = by(await s.consumer.call('market_overview', {symbols:['AAPL']})).AAPL;
+  assert.equal(a.change.status, 'partial'); assert.equal(a.change.absolute, 202);
+  assert.equal(a.change.percent, null); assert.ok(a.change.reasons.includes('zero_reference'));
+});
+
+test('inconsistent producer percent and invalid prices cannot become a market move', async () => {
+  const s = setup(); edit(s.files, p => { p.prices.AAPL.chg_pct = 40; p.prices.QQQ.price = -1; });
+  const out = by(await s.consumer.call('market_overview', {symbols:['AAPL','QQQ']}));
+  assert.equal(out.AAPL.change.absolute, 2); assert.equal(out.AAPL.change.percent, null);
+  assert.ok(out.AAPL.change.reasons.includes('producer_percent_mismatch'));
+  assert.equal(out.QQQ.price, null); assert.equal(out.QQQ.change.status, 'unavailable');
+  assert.equal(out.QQQ.freshness.live, false);
 });
 
 test('query-time age turns old DXLink rows stale; feed_stale and unmapped labels are surfaced', async () => {
@@ -115,7 +207,9 @@ test('detail stays bound to the queried row after the strip advances', async () 
   const out = await consumer.call('result_detail', { reference: first.rows[0].detail_reference });
   assert.equal(out.status, 'available'); assert.equal(out.row.price, 202);
   assert.equal(out.actual.payload_sha256, first.actual.payload_sha256);
-  assert.equal(out.producer_times.observation, '2026-10-02T16:09:55Z');
+  assert.equal(out.producer_times.observation, null);
+  assert.equal(out.producer_times.collector_receipt, '2026-10-02T16:09:55Z');
+  assert.equal(out.producer_times.publication, null);
 });
 
 test('discovery appends the overview capability without moving existing positions', async () => {
