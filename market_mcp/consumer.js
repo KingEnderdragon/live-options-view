@@ -22,6 +22,7 @@ const QUALIFIED_RANK = 'qualified_first_ask_to_later_bid_rank';
 // A real expanded sweep is about 20 MiB. Two leave room for the pinned
 // summary/board/manifest inside the existing 64 MiB per-query ceiling.
 const ACTIVE_PATH_SWEEPS = 2;
+const OPTIONAL_STAMP_VALUE = Object.freeze({bid_ms:'bid',ask_ms:'ask',trade_ms:'last'});
 const dates = value => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) &&
   Number.isFinite(Date.parse(value)) && new Date(value).toISOString().slice(0, 10) === value && value >= '2020-01-01' && value <= '2100-12-31';
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -444,6 +445,7 @@ class Consumer {
     filtered.sort((x,y)=>Number(x[field])-Number(y[field]));
     const paged=slice(filtered,limit,offset);
     out.pagination=paged.pagination;out.actual={session:selected,selector:session,sweep,cutoff_ms:p.cutoff_ms,archive:prefix.slice(0,-1),
+      built_at:pointer.built_at??null,
       final:false,return_policy:p.return_policy,qualified_policy:p.qualified_policy};
     const endpointField=qualified?'qualified_first_ask_to_later_bid_exit_ms':'mid_first_to_max_exit_ms';
     const evidenceAge=row=>{
@@ -469,7 +471,7 @@ class Consumer {
       observed_seconds:pointer?.observed_cadence_s??null,previous_publication:pointer?.previous_published_at??null};
     out.session_window={open_ms:p.session_open_ms,close_ms:p.session_close_ms,meaning:'exchange boundaries; not acquisition timestamps'};
     out.producer_times={observation:null,acquisition_start:null,acquisition_end:new Date(p.cutoff_ms).toISOString(),
-      publication:pointer?.published_at??null,built_at:p.built_at??null};
+      publication:pointer?.published_at??null,built_at:pointer?.built_at??p.built_at??null};
     const cutoffAge=age(new Date(p.cutoff_ms).toISOString(),this.now(),3600);
     const rowAges=out.rows.map(row=>row.ranked_evidence_freshness);
     const knownAges=rowAges.map(x=>x.age_seconds).filter(Number.isFinite);
@@ -542,7 +544,7 @@ class Consumer {
       const path=[];const sweeps=[];const retryOffsets=[];
       out.coverage=summary.assessment;out.summary=summary;out.active_state='in_progress';
       out.producer_times={observation:null,acquisition_start:null,acquisition_end:new Date(summary.cutoff_ms).toISOString(),
-        publication:null,built_at:summary.built_at??null};
+        publication:null,built_at:v.actual.built_at??summary.built_at??null};
       out.freshness={status:'historical',basis:'exact pinned active cutoff'};
       out.session_window={open_ms:summary.session_open_ms,close_ms:summary.session_close_ms};
       for(const [index,m] of paged.rows.entries()) {
@@ -557,10 +559,13 @@ class Consumer {
             r.t>=m.started_ms&&r.t<=m.ended_ms&&r.t>=summary.session_open_ms&&
             r.t<Math.min(summary.cutoff_ms,summary.session_close_ms)&&
             ['bid_ms','ask_ms','spot_ms','trade_ms'].every(field=>r[field]==null||
+              r[field]===0&&OPTIONAL_STAMP_VALUE[field]&&r[OPTIONAL_STAMP_VALUE[field]]==null||
               Number.isSafeInteger(r[field])&&r[field]>=946684800000&&r[field]<=r.t)&&
             ['call','put'].includes(r.type)&&[r.bid,r.ask].every(n=>n===null||
               typeof n==='number'&&Number.isFinite(n)&&n>=0)), 'Active quote row violates cutoff/session contract.');
-          path.push(...rows);
+          path.push(...rows.map(r=>({ ...r,
+            ...Object.fromEntries(Object.entries(OPTIONAL_STAMP_VALUE)
+              .filter(([stamp,value])=>r[stamp]===0&&r[value]==null).map(([stamp])=>[stamp,null])) })));
           if(!rows.length||m.truncated||m.chains[v.row.underlying].status!=='ok') {
             out.status='partial';out.warnings.push(`Sweep ${m.sweep} has incomplete selected-contract coverage.`);
           }

@@ -43,13 +43,15 @@ The response names the selected exchange session and provisional cutoff.
 Follow a returned `detail_reference` through `result_detail` for its pinned
 quote path. Use `view:"all"` or `view:"qualified_ask_bid_v1"` to change the
 producer ranking; use `sweep:<number>` to revisit one retained generation.
-Each sweep pointer selects a digest-named immutable revision. Rebuilding after
-local loss creates a new revision instead of overwriting a published member.
+Each sweep pointer selects a digest-named immutable revision. Rebuilding the
+same source and policy after local loss yields identical revision bytes.
 `freshness.cutoff` reports the completed sweep age; each displayed row also
 reports the age of its ranked quote endpoint. An old endpoint makes the active
-view stale or partial even when the cutoff itself is recent. Active source rows
+view stale or partial even when the cutoff itself is recent. The 600-second
+ranked-quote threshold is proposed and awaits Owen's decision. Active source rows
 must match their manifest sweep interval and cannot use future or seconds-unit
-bid, ask, trade or spot timestamps.
+bid, ask, trade or spot timestamps. Published zero timestamps are accepted only
+beside a missing bid, ask or last price, and are returned as null evidence.
 When the final daily summary exists, the active tool returns the final
 producer product. A missing current-day snapshot never selects yesterday.
 This tool is an undeployed review candidate: the producer publication gate,

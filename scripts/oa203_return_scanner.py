@@ -511,16 +511,18 @@ def chain_rows(sweep: int, fetched_ms: int, underlying: str, contracts: list[dic
     spot, spot_source, spot_ms = _spot(quote)
     rows = []
     for c in contracts:
+        bid, ask, last = (_num(c.get(field)) for field in ("bid", "ask", "last"))
         rows.append({
             "sweep": sweep, "t": fetched_ms, "underlying": underlying,
             "spot": spot, "spot_source": spot_source, "spot_ms": spot_ms,
             "symbol": c.get("symbol"), "root": c.get("root_symbol"),
             "type": c.get("option_type"), "strike": _num(c.get("strike")),
             "expiration": c.get("expiration_date"),
-            "bid": _num(c.get("bid")), "ask": _num(c.get("ask")),
-            "bid_ms": c.get("bid_date"), "ask_ms": c.get("ask_date"),
+            "bid": bid, "ask": ask,
+            "bid_ms": None if bid is None and c.get("bid_date") == 0 else c.get("bid_date"),
+            "ask_ms": None if ask is None and c.get("ask_date") == 0 else c.get("ask_date"),
             "bid_size": c.get("bidsize"), "ask_size": c.get("asksize"),
-            "last": _num(c.get("last")), "trade_ms": c.get("trade_date"),
+            "last": last, "trade_ms": None if last is None and c.get("trade_date") == 0 else c.get("trade_date"),
             "volume": c.get("volume"), "oi": c.get("open_interest"),
             "contract_size": c.get("contract_size") or 100,
         })
@@ -809,6 +811,10 @@ def iter_rows(day_dir: Path, damaged: list[dict[str, Any]] | None = None,
                 raise ValueError("cutoff row outside matching sweep interval")
             for field in ("bid_ms", "ask_ms", "spot_ms", "trade_ms"):
                 stamp = row.get(field)
+                related = {"bid_ms": "bid", "ask_ms": "ask", "trade_ms": "last"}.get(field)
+                if type(stamp) is int and stamp == 0 and related and row.get(related) is None:
+                    row[field] = None  # Published missing-price rows carry a zero timestamp sentinel.
+                    continue
                 if stamp is not None and (type(stamp) is not int or not 946684800000 <= stamp <= t):
                     raise ValueError("cutoff row has future or non-millisecond evidence")
             underlying = row.get("underlying")
@@ -1031,8 +1037,37 @@ ACTIVE_MEMBERS = ("summary.json", "leaderboard.csv", "qualified_ask_bid_v1.csv",
 ACTIVE_BUILD_SECONDS = 240
 ACTIVE_EVERY_SWEEPS = 6
 ACTIVE_MAX_SNAPSHOTS_PER_DAY = 16
+ACTIVE_MAX_UPLOAD_ATTEMPTS_PER_SWEEP = 3
 ACTIVE_MAX_MEMBER_BYTES = 4 * 1024 * 1024  # market MCP Source.LIMITS.artifact_bytes
 ACTIVE_MAX_MANIFEST_LINE_BYTES = 256 * 1024  # market MCP Source.LIMITS.jsonl_line_bytes
+
+
+def reserve_active_upload_attempt(archive: DayArchive, sweep: int) -> None:
+    """Bound retries while the local spool survives; reserve before the first PUT."""
+    name = "inprogress/upload-attempts.json"
+    path = archive.path(name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        budget = json.loads(path.read_text(encoding="utf-8"))
+        if (not isinstance(budget, dict) or budget.get("schema_version") != 1 or
+                budget.get("trade_date") != archive.day.isoformat() or
+                not isinstance(budget.get("attempts"), dict)):
+            raise ValueError("invalid active upload attempt ledger")
+    else:
+        budget = {"schema_version": 1, "trade_date": archive.day.isoformat(), "attempts": {}}
+    attempts = budget["attempts"]
+    if len(attempts) > ACTIVE_MAX_SNAPSHOTS_PER_DAY or any(
+           not re.fullmatch(r"[1-9][0-9]{0,3}", key) or
+           int(key) > ACTIVE_EVERY_SWEEPS * ACTIVE_MAX_SNAPSHOTS_PER_DAY or type(value) is not int or
+           not 1 <= value <= ACTIVE_MAX_UPLOAD_ATTEMPTS_PER_SWEEP
+           for key, value in attempts.items()):
+        raise ValueError("invalid active upload attempt ledger")
+    key = str(sweep)
+    if (attempts.get(key, 0) >= ACTIVE_MAX_UPLOAD_ATTEMPTS_PER_SWEEP or
+            key not in attempts and len(attempts) >= ACTIVE_MAX_SNAPSHOTS_PER_DAY):
+        raise ValueError("active upload retry budget exhausted")
+    attempts[key] = attempts.get(key, 0) + 1
+    archive.write_json(name, budget)
 
 
 def write_active_attempt(archive: DayArchive, sweep: int, status: str,
@@ -1170,8 +1205,7 @@ def _build_active_snapshot(archive: DayArchive, cfg: Config, sweep: int,
                                                                                 for state in expiries.values()])))},
                        "contracts": len(rows), "outputs": outputs, "return_policy": cfg.policy.as_dict(),
                        "qualified_policy": cfg.qualified_policy.as_dict(),
-                       "measurement": MEASUREMENT_NOTE, "member_sha256": digests,
-                       "built_at": datetime.now(timezone.utc).isoformat()}
+                       "measurement": MEASUREMENT_NOTE, "member_sha256": digests}
             with published(tmp / "summary.json") as staged:
                 staged.write_text(json.dumps(summary, sort_keys=True) + "\n", encoding="utf-8")
             if any((tmp / member).stat().st_size > ACTIVE_MAX_MEMBER_BYTES for member in ACTIVE_MEMBERS):
@@ -1193,13 +1227,14 @@ def _build_active_snapshot(archive: DayArchive, cfg: Config, sweep: int,
                         if previous_at else None)
     pointer = {"schema_version": 1, "trade_date": archive.day.isoformat(), "state": "in_progress",
                "sweep": sweep, "cutoff_ms": cutoff_ms, "archive": f"{archive.prefix}/{target.relative_to(archive.dir).as_posix()}",
-               "members": hashes, "built_at": summary["built_at"],
+               "members": hashes, "built_at": published_at,
                "published_at": published_at, "previous_published_at": previous_at,
                "observed_cadence_s": observed_cadence,
                "expected_cadence_s": ACTIVE_EVERY_SWEEPS * 300}
     if existing and existing.get("sweep", 0) > sweep:
         return existing  # retries may never move the pointer backwards
     if archive.upload:
+        reserve_active_upload_attempt(archive, sweep)
         send = uploader or _r2_uploader()
         for member in ACTIVE_MEMBERS:
             result = send(target / member, f"{pointer['archive']}/{member}", _content_type(member))

@@ -138,7 +138,8 @@ test('explicit sweep follows its pinned revision pointer',async()=>{
   assert.equal((await f.consumer.call('active_rankings',{session:SESSION,sweep:6})).status,'missing');
 });
 test('pinned detail rejects out-of-sweep and future-timestamp quote evidence',async()=>{
-  for(const change of [r=>{r.t-=1;},r=>{r.bid_ms=r.t+1;},r=>{r.ask_ms=Math.floor(r.t/1000);}]){
+  for(const change of [r=>{r.t-=1;},r=>{r.bid_ms=r.t+1;},r=>{r.ask_ms=Math.floor(r.t/1000);},
+    r=>{r.bid_ms=0;},r=>{r.trade_ms=0;r.last=1;}]){
     const f=setup(),key=BASE+'sweeps/sweep_0001.jsonl.gz';
     const rows=gunzipSync(f.files[key]).toString().trim().split('\n').map(JSON.parse);
     change(rows[0]);f.files[key]=gzipSync(rows.map(r=>JSON.stringify(r)).join('\n')+'\n');
@@ -156,6 +157,28 @@ test('pinned detail rejects out-of-sweep and future-timestamp quote evidence',as
     assert.equal(detail.status,'partial');assert.equal(detail.quote_path.length,0);
     assert.equal(detail.errors[0].code,'incompatible_schema');
   }
+});
+test('pinned detail treats published trade_ms zero as missing, not epoch evidence',async()=>{
+  const f=setup(),key=BASE+'sweeps/sweep_0001.jsonl.gz';
+  const rows=gunzipSync(f.files[key]).toString().trim().split('\n').map(JSON.parse);
+  Object.assign(rows[0],{trade_ms:0,last:null});
+  Object.assign(rows[1],{symbol:CONTRACT,type:'call',trade_ms:0,last:null,
+    bid_ms:0,ask_ms:0,bid:null,ask:null});
+  f.files[key]=gzipSync(rows.map(r=>JSON.stringify(r)).join('\n')+'\n');
+  f.manifest[0].sha256=hash(f.files[key]);
+  const manifest=f.manifest.map(m=>JSON.stringify(m)).join('\n')+'\n';
+  f.summary.member_sha256['manifest.jsonl']=hash(manifest);
+  const revised=JSON.stringify(f.summary),revisedPrefix=ACTIVE+'sweep_0006/rev_'+hash(revised)+'/';
+  for(const name of ['leaderboard.csv','qualified_ask_bid_v1.csv'])f.files[revisedPrefix+name]=f.files[f.prefix+name];
+  f.files[revisedPrefix+'manifest.jsonl']=manifest;f.files[revisedPrefix+'summary.json']=revised;
+  f.pointer.archive=revisedPrefix.slice(0,-1);f.pointer.members['summary.json']=hash(revised);
+  f.pointer.members['manifest.jsonl']=hash(manifest);f.files[ACTIVE+'latest.json']=JSON.stringify(f.pointer);
+  const ranking=await f.consumer.call('active_rankings',{session:SESSION,limit:1});
+  const detail=await f.consumer.call('result_detail',{reference:ranking.rows[0].detail_reference,limit:1});
+  assert.equal(detail.status,'in_progress');
+  assert.equal(detail.quote_path[0].trade_ms,null);
+  assert.ok(detail.quote_path[0].bid_ms>0);
+  for(const field of ['bid_ms','ask_ms','trade_ms'])assert.equal(detail.quote_path[1][field],null);
 });
 test('MCP discovery, active query and pinned detail use read-only bounded schemas',async()=>{
   const f=setup(),p=new Protocol(f.consumer);

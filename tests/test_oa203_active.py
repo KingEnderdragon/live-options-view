@@ -160,6 +160,10 @@ class ActiveCutoff(unittest.TestCase):
             scanner.build_active_snapshot(self.archive, self.cfg, 1, OPEN, CLOSE)
 
     def test_matching_sweep_interval_and_quote_timestamp_units_for_all_bases(self):
+        produced = scanner.chain_rows(1, OPEN, "QQQ", [{"symbol": SYMBOL, "trade_date": 0,
+            "bid_date": 0, "ask_date": 0}], None)
+        for field in ("bid_ms", "ask_ms", "trade_ms"):
+            self.assertIsNone(produced[0][field])
         self.add_sweep(1)
         path = self.archive.path("sweeps/sweep_0001.jsonl.gz")
         with gzip.open(path, "rt") as source:
@@ -172,10 +176,15 @@ class ActiveCutoff(unittest.TestCase):
         self.assertEqual(len(check_row(t=OPEN + 300000)), 1)  # inclusive start
         self.assertEqual(len(check_row(t=OPEN + 300100, bid_ms=OPEN + 300100,
                                        ask_ms=OPEN + 300100)), 1)  # inclusive sweep end
+        self.assertEqual(len(check_row(trade_ms=0)), 1)  # published missing-trade sentinel
+        self.assertEqual(len(check_row(bid=None, ask=None, bid_ms=0, ask_ms=0,
+                                       last=None, trade_ms=0)), 1)
+        self.assertIsNone(next(scanner.iter_rows(self.archive.dir, sweep_files=[path],
+                            strict_manifest=[json.loads(self.archive.path("sweeps/manifest.jsonl").read_text())]))["trade_ms"])
         for bad in ({"t": OPEN + 299999}, {"t": OPEN + 300101},
                     {"bid_ms": original["t"] + 1}, {"ask_ms": original["t"] + 1},
                     {"spot_ms": original["t"] + 1}, {"trade_ms": original["t"] + 1},
-                    {"bid_ms": original["t"] // 1000}):
+                    {"bid_ms": original["t"] // 1000}, {"bid_ms": 0}, {"ask_ms": 0}):
             with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, "interval|future|millisecond"):
                 check_row(**bad)
 
@@ -207,7 +216,7 @@ class ActiveCutoff(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "source lineage changed"):
             scanner.build_active_snapshot(self.archive, self.cfg, 1, OPEN, CLOSE)
 
-    def test_retry_after_local_loss_never_overwrites_immutable_remote_key(self):
+    def test_retry_after_local_loss_reuses_identical_immutable_remote_bytes(self):
         for i in range(1, 4):
             self.add_sweep(i)
         self.archive.upload = True
@@ -227,9 +236,37 @@ class ActiveCutoff(unittest.TestCase):
         self.archive.path("inprogress/sweep_0003.json").unlink()
         self.archive.path("inprogress/latest.json").unlink()
         second = scanner.build_active_snapshot(self.archive, self.cfg, 3, OPEN, CLOSE, uploader=upload)
-        self.assertNotEqual(first["archive"], second["archive"])
+        self.assertEqual(first["archive"], second["archive"])
         self.assertIn(first["archive"] + "/summary.json", remote)
         self.assertIn(second["archive"] + "/summary.json", remote)
+
+    def test_local_upload_retry_ledger_caps_attempts_and_distinct_cutoffs(self):
+        self.archive.upload = True
+        for _ in range(scanner.ACTIVE_MAX_UPLOAD_ATTEMPTS_PER_SWEEP):
+            scanner.reserve_active_upload_attempt(self.archive, 6)
+        with self.assertRaisesRegex(ValueError, "retry budget"):
+            scanner.reserve_active_upload_attempt(self.archive, 6)
+        for i in range(1, scanner.ACTIVE_MAX_SNAPSHOTS_PER_DAY):
+            scanner.reserve_active_upload_attempt(self.archive, i * 6 + 1)
+        with self.assertRaisesRegex(ValueError, "retry budget"):
+            scanner.reserve_active_upload_attempt(self.archive, 96)
+        self.archive.path("inprogress/upload-attempts.json").write_text("{}")
+        with self.assertRaisesRegex(ValueError, "ledger"):
+            scanner.reserve_active_upload_attempt(self.archive, 6)
+
+    def test_exhausted_local_retry_budget_sends_no_snapshot_objects(self):
+        self.add_sweep(1)
+        self.archive.upload = True
+        self.archive.write_json("uploads.json", {"sweeps/sweep_0001.jsonl.gz": {
+            "sha256": scanner._sha256_file(self.archive.path("sweeps/sweep_0001.jsonl.gz"))}})
+        for _ in range(scanner.ACTIVE_MAX_UPLOAD_ATTEMPTS_PER_SWEEP):
+            scanner.reserve_active_upload_attempt(self.archive, 1)
+        sent = []
+        with self.assertRaisesRegex(ValueError, "retry budget"):
+            scanner.build_active_snapshot(self.archive, self.cfg, 1, OPEN, CLOSE,
+                uploader=lambda *args: sent.append(args))
+        self.assertEqual(sent, [])
+        self.assertFalse(self.archive.path("inprogress/latest.json").exists())
 
     def test_interrupted_pointer_upload_reuses_revision_on_restart(self):
         for i in range(1, 4):

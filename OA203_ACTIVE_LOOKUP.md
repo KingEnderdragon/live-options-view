@@ -20,10 +20,14 @@ again. The scanner's existing five-minute collection target is unchanged.
 
 The child publishes `summary.json`, `leaderboard.csv`,
 `qualified_ask_bid_v1.csv` and a cutoff `manifest.jsonl` under the immutable
-`inprogress/sweep_NNNN/` path. The manifest records SHA-256 for each original
-sweep. The upload checks the scanner's verified sweep-upload journal first,
-uploads and verifies every immutable member, then uploads `latest.json` last.
-The pointer carries member digests, cutoff, publication time and observed
+`inprogress/sweep_NNNN/rev_<summary_sha256>/` path. The manifest records
+SHA-256 for each original sweep. The upload checks the scanner's verified
+sweep-upload journal first,
+uploads and verifies every immutable member, then uploads a per-sweep pointer
+and `latest.json` last. The summary omits wall-clock build time, so rebuilding
+unchanged source and policy after local loss produces the same revision bytes
+and key. The mutable pointer records the actual build attempt time. It also
+carries member digests, cutoff, publication time and observed
 cadence. A retry may republish the same generation but never move the pointer
 backwards. Local snapshots are not part of the scanner's mutable daily upload
 journal. `latest-attempt.json` records building, complete or failed attempts.
@@ -44,26 +48,41 @@ summary route to the existing final-return path; active snapshots never
 masquerade as final.
 
 **Activation remains gated.** `OA203_ACTIVE_SNAPSHOTS_ENABLED=1` is required
-to trigger builds, and is unset by default. The code caps generation triggers
-at 16 per session. The approved intent to retain snapshots still needs a
-specific remote retention duration, eviction job/lifecycle rule and cost
-estimate. The publication guard bounds the four immutable members to at most
-256 MiB per session in aggregate (16 generations × four 4 MiB members),
-although normal members should be smaller. A successful generation has four
-member uploads, one pointer upload and two attempt-status uploads: up to
-112 such writes per session at the 16-generation cap, before retries.
-Failed attempts can leave orphaned immutable members, so cleanup must account
-for those as well. Nothing here automatically purges remote snapshots. Do not enable
+to trigger builds, and is unset by default. The automatic cadence has at most
+16 six-sweep triggers per session. Each immutable revision has four members,
+each capped at 4 MiB: at most 16 MiB of member bytes per build. A local
+`inprogress/upload-attempts.json` ledger reserves an attempt before any member
+upload call, permits at most 16 distinct cutoff sweeps and three upload
+attempts per sweep, and fails closed if corrupt. Each attempt makes at most
+four member and two pointer uploader calls. With the same surviving spool,
+that is at most 48 attempts and 288 application-level uploader calls for
+these six objects; an underlying storage client may retry a network PUT.
+Automatic supervision can also emit two attempt-status uploads per trigger. These are
+technical limits for a surviving local spool, **not remote storage, retention
+or spending guarantees**. Loss of the entire spool also loses the ledger;
+source amendments could then create new digest revisions. Failed attempts
+can leave orphaned immutable members. The approved intent to retain snapshots
+still needs a specific remote retention duration, lifecycle rule, durable
+cost limit and estimate. Nothing here purges remote snapshots. Do not enable
 publication until that bounded policy, scanner memory/CPU sizing for a second
 process, and the 240-second budget have passed engineering review. The
 current 27–75-second / 430–585-MB desktop measurements do not establish
-Railway behavior. The separate #134 window producer contract is still in
-repair; this candidate exposes only the existing daily session product and
-does not claim weekly or multi-session support. No live Chej/client check
-has occurred.
+Railway behavior. The separate #134 window candidate is not yet published;
+integration remains unverified. This candidate exposes only the existing
+daily session product and does not claim weekly or multi-session support.
+No live Chej/client check has occurred.
 
-Offline acceptance: `python -m unittest tests.test_oa203_active
-tests.test_oa203_return_scanner` and `node --test market_mcp/*.test.js`.
+The active response reports cutoff age separately from ranked quote age. The
+600-second quote-age threshold is a **proposed display policy awaiting Owen's
+decision**; it does not expand quote eligibility. Published 2026-10-09 sweep 1
+has 52,832 rows, including 8,938 `trade_ms: 0` rows and eight rows with both
+`bid_ms` and `ask_ms` zero beside missing prices. The active parser and detail
+reader normalize those exact missing-value sentinels to `null`, while rejecting
+zero timestamps beside priced quotes and future positive stamps.
+
+Offline acceptance: run `python -m unittest discover -s tests -p
+test_oa203_active.py`, the same command with `test_oa203_return_scanner.py`,
+and `node --test market_mcp/*.test.js`.
 The cutoff fixture rebuilds the same early ranking after six later sweeps
 and a partial later manifest write, then confirms the uncut daily result has
 different low-coverage/clean classification. MCP fixtures cover pointer
