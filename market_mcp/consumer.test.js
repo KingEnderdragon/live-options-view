@@ -221,3 +221,18 @@ test('same-run attempt reports same_run and run=latest_attempt reads the success
   const att=await consumer.call('squeeze_results',{run:'latest_attempt'});assert.equal(att.status,'available');assert.equal(att.freshness.status,'fresh');assert.deepEqual(att.rows.map(r=>r.ticker),['QQQ','ABC']);
   assert.equal(att.reconciliation.matches,true);
 });
+// Review of e666cb22: latest_attempt freshness must never be falsely fresh.
+test('run=latest_attempt freshness is stale or unconfirmed unless the due slot is confirmed today',async()=>{
+  const ATT='squeeze-scanner/v1/scheduled/latest-attempt.json',SCHED='squeeze-scanner/v1/scheduled/latest-schedule.json';
+  const confirmed=setup({now:()=>Date.parse('2026-10-05T13:05:00Z')});partialAttempt(confirmed.files);
+  const ok=await confirmed.consumer.call('squeeze_results',{run:'latest_attempt'});assert.equal(ok.freshness.status,'fresh');assert.equal(ok.freshness.reason,null);
+  const sunday=await setup({now:()=>Date.parse('2026-10-04T14:00:00Z')}).consumer.call('squeeze_results',{run:'latest_attempt'});
+  assert.equal(sunday.freshness.status,'stale');assert.match(sunday.freshness.reason,/previous session/);
+  for(const [name,mutate] of [['finished_at removed',f=>edit(f,ATT,p=>delete p.finished_at)],['finished_at after retrieval',f=>edit(f,ATT,p=>p.finished_at='2026-10-02T16:30:00Z')],
+    ['schedule claimed',f=>edit(f,SCHED,p=>p.status='claimed')],['schedule outcome differs',f=>edit(f,SCHED,p=>p.acquisition_status='partial')],['schedule names another run',f=>edit(f,SCHED,p=>p.run_id=ATTEMPT_RUN)]]){
+    const {consumer,files}=setup();mutate(files);const out=await consumer.call('squeeze_results',{run:'latest_attempt'});
+    assert.equal(out.freshness.status,'unknown',name);assert.ok(out.freshness.reason,name);
+  }
+  const {consumer,files}=setup({now:()=>Date.parse('2026-10-05T13:05:00Z')});partialAttempt(files);edit(files,ATT,p=>p.scheduled_for='2026-10-02T16:00:00Z');
+  assert.equal((await consumer.call('squeeze_results',{run:'latest_attempt'})).freshness.status,'stale','older slot');
+});

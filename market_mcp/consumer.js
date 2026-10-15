@@ -358,10 +358,21 @@ class Consumer {
     out.actual = {run_id:attempt.run_id,session:attempt.session_date ?? attempt.valuation_date ?? null,archive:attempt.archive,scoring_version:attempt.scoring_version ?? null,manifest_sha256:attempt.manifest_sha256 ?? null};
     out.producer_times = {observation:null,acquisition_start:attempt.started_at ?? null,acquisition_end:attempt.finished_at ?? null,publication:attempt.published_at ?? null};
     const slots = Array.isArray(this.calendar?.slots) ? this.calendar.slots.map(Date.parse).filter(Number.isFinite) : [];
-    const due = slots.filter(v => v <= this.now()).at(-1);
-    const current = due != null && Date.parse(attempt.scheduled_for || '') === due && schedule?.run_id === attempt.run_id;
-    out.freshness = {...age(attempt.finished_at,this.now()),basis:'latest_attempt',
-      status:state.warning?.includes('calendar') ? 'unknown' : current ? 'fresh' : 'stale',schedule_status:state};
+    const now = this.now(), due = slots.filter(v => v <= now).at(-1);
+    // Fresh only when the attempt is the due slot of today's session, its
+    // acquisition times are coherent, and the schedule confirms it finished
+    // with the same outcome; otherwise stale or unconfirmed, never fresh.
+    const started = Date.parse(attempt.started_at || ''), finished = Date.parse(attempt.finished_at || '');
+    const timesKnown = Number.isFinite(started) && Number.isFinite(finished) && started <= finished && finished <= now;
+    const dueSlot = due != null && Date.parse(attempt.scheduled_for || '') === due;
+    const confirmed = dueSlot && schedule?.status === 'finished' && schedule.run_id === attempt.run_id &&
+      Date.parse(schedule.scheduled_for || '') === due && schedule.acquisition_status === attempt.status;
+    const freshness = state.warning?.includes('calendar') ? ['unknown','schedule calendar unavailable'] :
+      !timesKnown ? ['unknown','attempt acquisition times missing or inconsistent'] :
+      !dueSlot ? ['stale','attempt is not the latest due scheduled slot'] :
+      exchangeDate(due) !== exchangeDate(now) ? ['stale','attempt belongs to a previous session'] :
+      !confirmed ? ['unknown',`schedule does not confirm this attempt finished (${schedule?.status ?? 'no schedule'})`] : ['fresh',null];
+    out.freshness = {...age(attempt.finished_at,now),basis:'latest_attempt',status:freshness[0],reason:freshness[1],schedule_status:state};
     let manifest, results;
     try {
       manifest = await q.json(attempt.archive+'/manifest.json');
