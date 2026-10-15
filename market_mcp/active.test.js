@@ -218,3 +218,26 @@ test('MCP discovery, active query and pinned detail use read-only bounded schema
   assert.equal(detail.actual.archive,ranking.actual.archive);
   assert.equal(detail.quote_path[0].sweep,1);
 });
+// Review of 07d61d0 (P2): a pinned old sweep must not claim nothing newer exists.
+test('pinned old sweep reports its own age separately from a newer latest snapshot',async()=>{
+  const f=setup();const published=Date.parse(f.pointer.published_at);
+  f.consumer.now=()=>published+2701000;
+  const latest={...f.pointer,sweep:12,published_at:new Date(published+2600000).toISOString()};
+  f.files[ACTIVE+'latest.json']=JSON.stringify(latest);
+  const pinned=await f.consumer.call('active_rankings',{session:SESSION,sweep:6,limit:1});
+  assert.equal(pinned.actual.sweep,6);assert.equal(pinned.freshness.status,'stale');
+  assert.deepEqual(pinned.newer_snapshot,{available:true,sweep:12,published_at:latest.published_at});
+  assert.notEqual(pinned.cadence.status,'overdue');assert.equal(pinned.cadence.seconds_since_publication,101);assert.equal(pinned.cadence.since_publication_of.sweep,12);
+  assert.ok(!pinned.warnings.some(w=>w.includes('No newer snapshot')));
+  assert.ok(pinned.warnings.some(w=>w.includes('Pinned sweep 6 is not the newest snapshot; sweep 12')));
+  // Pinned to the latest sweep with nothing newer: overdue still reported.
+  f.files[ACTIVE+'latest.json']=JSON.stringify(f.pointer);
+  const current=await f.consumer.call('active_rankings',{session:SESSION,sweep:6,limit:1});
+  assert.equal(current.newer_snapshot.available,false);assert.equal(current.cadence.status,'overdue');
+  assert.ok(current.warnings.some(w=>w.includes('No newer snapshot')));
+  // Latest pointer unreadable: availability is unknown, never "none newer".
+  delete f.files[ACTIVE+'latest.json'];
+  const unknown=await f.consumer.call('active_rankings',{session:SESSION,sweep:6,limit:1});
+  assert.equal(unknown.newer_snapshot.available,null);assert.notEqual(unknown.cadence.status,'overdue');
+  assert.ok(!unknown.warnings.some(w=>w.includes('No newer snapshot')));
+});

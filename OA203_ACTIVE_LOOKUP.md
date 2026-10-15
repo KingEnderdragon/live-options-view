@@ -227,7 +227,11 @@ due once 30 minutes have passed since the previous cutoff, to the nearest
 sweep end (half a nominal sweep of tolerance keeps the healthy cadence at six
 sweeps). Each pointer carries a `cadence` report (status `first`/`on_time`/`late`,
 sweeps covered, longest sweep, budget-cut sweeps, server and transport errors), and
-`active_rankings` reports `late` or `overdue` from elapsed time. Activation
+`active_rankings` reports `late` or `overdue` from elapsed time; for a pinned
+sweep, `overdue` is judged from the current latest pointer and `newer_snapshot`
+says whether a newer sweep exists. The sweep budget is enforced at request
+dispatch: no first attempt or retry starts after it, and rate-limit and backoff
+waits are capped at it. Activation
 remains gated by `OA203_ACTIVE_SNAPSHOTS_ENABLED`.
 
 ## Required tests (beyond the issue's checklist)

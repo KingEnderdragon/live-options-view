@@ -542,7 +542,7 @@ class RetryBackoff(unittest.TestCase):
                 session.request.side_effect = request
                 client = scanner.Tradier("test", session=session, clock=lambda: clock["t"],
                                          sleep=lambda s: clock.__setitem__("t", clock["t"] + s))
-                client.retry_deadline = 1010.0
+                client.budget_deadline = 1010.0
                 with mock.patch.object(scanner, "log"), self.assertRaises(Exception):
                     client.request("GET", "/test")
                 self.assertEqual(session.request.call_count, 1)
@@ -729,6 +729,97 @@ class SlowProviderSweep(unittest.TestCase):
         entry = self.sweep(client, 600)
         self.assertFalse(entry["budget_exhausted"])
         self.assertEqual(entry["status_counts"], {"ok": 10})
+
+
+class ScriptedProvider:
+    """Tradier HTTP stand-in on a fake clock: each chain call runs a script step
+    (advance the clock to an absolute time, then answer), and every dispatch
+    time is recorded so tests can assert nothing starts after the budget."""
+
+    def __init__(self, steps):
+        self.clock = {"t": 0.0}
+        self.steps = {k: list(v) for k, v in steps.items()}
+        self.dispatched = []
+        self.headers = {}
+
+    def now(self):
+        return self.clock["t"]
+
+    def sleep(self, seconds):
+        self.clock["t"] += seconds
+
+    def request(self, method, url, params=None, data=None, timeout=None):
+        self.dispatched.append((self.clock["t"], url.rsplit("/", 1)[-1], (params or {}).get("symbol")))
+        if url.endswith("/markets/quotes"):
+            return ScriptedResponse(200, {"quotes": {"quote": []}})
+        at, status, headers = self.steps[params["symbol"]].pop(0)
+        self.clock["t"] = max(self.clock["t"], at)
+        body = {"options": {"option": [{"symbol": params["symbol"] + "260928C00001000", "option_type": "call",
+                                        "strike": 1.0, "bid": 1.0, "ask": 1.1, "expiration_date": "2026-09-28"}]}}
+        return ScriptedResponse(status, body, headers)
+
+
+class ScriptedResponse:
+    def __init__(self, status, body, headers=None):
+        self.status_code, self.body, self.headers = status, body, dict(headers or {})
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(self.status_code)
+
+    def json(self):
+        return self.body
+
+
+class BudgetAtDispatch(unittest.TestCase):
+    """Review of 07d61d0 (P1): the sweep budget holds through the real
+    Tradier limiter/backoff path, not only at the sweep's own checks."""
+
+    def sweep(self, steps, names=("S0", "S1")):
+        provider = ScriptedProvider(steps)
+        client = scanner.Tradier("tok", session=provider, clock=provider.now, sleep=provider.sleep)
+        universe = [{"underlying": n, "expiration": "2026-09-28"} for n in names]
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(scanner, "log"):
+            (Path(tmp) / "sweeps").mkdir()
+            entry = scanner.run_sweep(client, universe, 1, Path(tmp) / "sweeps" / "sweep_0001.jsonl.gz",
+                                      block_size=len(names), workers=1, budget_s=600, clock=provider.now)
+        self.assertTrue(all(t < 600 for t, _, _ in provider.dispatched), provider.dispatched)
+        self.assertLessEqual(provider.now(), 600)
+        self.assertIsNone(client.budget_deadline)
+        return entry, client, provider
+
+    def test_429_retry_after_past_budget_is_not_dispatched(self):
+        # Before: 429 at t=599 with Retry-After=120 retried at t=719.
+        entry, client, provider = self.sweep({"S0": [(599, 429, {"Retry-After": "120"})]})
+        self.assertEqual([s for _, _, s in provider.dispatched], [None, "S0"])
+        self.assertEqual(entry["chains"]["S0"]["status"], "error")  # requested once, retry cut
+        self.assertEqual(entry["chains"]["S1"]["status"], "skipped_budget")
+        self.assertIsNone(entry["chains"]["S1"]["fetched_ms"])
+        self.assertTrue(entry["budget_exhausted"])
+        self.assertEqual(client.stats["retries_skipped_budget"], 1)
+
+    def test_queued_first_request_past_budget_is_skipped(self):
+        # Before: a provider budget reset at t=720 let a queued first request dispatch then.
+        low = {"X-Ratelimit-Available": "5", "X-Ratelimit-Expiry": str(720 * 1000)}
+        entry, client, provider = self.sweep({"S0": [(590, 200, low)], "S1": [(700, 200, {})]})
+        self.assertEqual(entry["chains"]["S0"]["status"], "ok")
+        self.assertEqual(entry["chains"]["S1"]["status"], "skipped_budget")
+        self.assertEqual(entry["status_counts"], {"ok": 1, "skipped_budget": 1})
+        self.assertEqual(client.stats["dispatch_skipped_budget"], 1)
+        self.assertEqual(provider.steps["S1"], [(700, 200, {})])  # never requested
+
+    def test_5xx_backoff_past_budget_is_not_dispatched(self):
+        # Before: a 504 at t=599.5 retried at t=600.5.
+        entry, client, provider = self.sweep({"S0": [(599.5, 504, {})]}, names=("S0",))
+        self.assertEqual(entry["chains"]["S0"]["status"], "error")
+        self.assertEqual(len(provider.dispatched), 2)  # quotes + one chain attempt
+        self.assertEqual(client.stats["retries_skipped_budget"], 1)
+        self.assertEqual(provider.now(), 600)  # backoff capped at the budget
+
+    def test_retry_inside_budget_still_recovers(self):
+        entry, client, provider = self.sweep({"S0": [(100, 504, {}), (101.5, 200, {})]}, names=("S0",))
+        self.assertEqual(entry["chains"]["S0"]["status"], "ok")
+        self.assertFalse(entry["budget_exhausted"])
 
 
 class ActiveCadence(unittest.TestCase):

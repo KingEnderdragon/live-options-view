@@ -271,6 +271,10 @@ class SamplingDeadline(RuntimeError):
     pass
 
 
+class BudgetExhausted(RuntimeError):
+    """The sweep budget ended before this request could be dispatched."""
+
+
 def _as_list(value: Any) -> list[Any]:
     if value is None:
         return []
@@ -286,8 +290,9 @@ class Tradier:
                  timeout: tuple[float, float] = (5.0, 20.0)) -> None:
         self.session = session or requests.Session()
         self.timeout = timeout
-        # Set per sweep: once passed, a failed attempt is not retried.
-        self.retry_deadline: float | None = None
+        # Set per sweep: once passed, no request is dispatched (first attempt
+        # or retry), and rate-limit/backoff waits never sleep past it.
+        self.budget_deadline: float | None = None
         self.session.headers.update({"Authorization": f"Bearer {token}", "Accept": "application/json"})
         self.max_rpm, self.reserve = max_rpm, reserve
         if not 0 <= reserve < 120 or not 1 <= max_rpm <= 120 - reserve:
@@ -311,6 +316,9 @@ class Tradier:
                 now = self.clock()
                 if self.deadline is not None and now >= self.deadline:
                     raise SamplingDeadline("session closed before request dispatch")
+                if self.budget_deadline is not None and now >= self.budget_deadline:
+                    self.stats["dispatch_skipped_budget"] += 1
+                    raise BudgetExhausted("sweep budget spent before request dispatch")
                 while self.sent and now - self.sent[0] >= 60:
                     self.sent.popleft()
                 wait = max(self.blocked_until - now, self.next_request_at - now,
@@ -325,7 +333,8 @@ class Tradier:
                     self.inflight += 1
                     return
                 self.stats["rate_waits"] += 1
-                sleep_seconds = min(wait, 61, max(0, self.deadline - now) if self.deadline is not None else 61)
+                sleep_seconds = min([wait, 61] + [max(0, limit - now) for limit in (self.deadline, self.budget_deadline)
+                                                  if limit is not None])
                 self.stats["rate_wait_seconds"] += sleep_seconds
             # Header observers and other workers must be able to take the lock.
             self.sleep(sleep_seconds)
@@ -356,10 +365,18 @@ class Tradier:
             if expiry >= self.budget_expiry and self.available <= self.reserve:
                 self.blocked_until = max(self.blocked_until, expiry + 0.25)
 
+    def _backoff(self, seconds: float) -> None:
+        # A retry backoff never sleeps past the sweep budget; the next
+        # dispatch then stops at the budget check in _acquire.
+        if self.budget_deadline is not None:
+            seconds = min(seconds, max(0, self.budget_deadline - self.clock()))
+        if seconds > 0:
+            self.sleep(seconds)
+
     def _may_retry(self, attempt: int, attempts: int) -> bool:
         if attempt + 1 >= attempts:
             return False
-        if self.retry_deadline is not None and self.clock() >= self.retry_deadline:
+        if self.budget_deadline is not None and self.clock() >= self.budget_deadline:
             self.stats["retries_skipped_budget"] += 1
             return False
         return True
@@ -368,7 +385,13 @@ class Tradier:
                 data: dict | None = None, attempts: int = 3) -> Any:
         last_exc: Exception | None = None
         for attempt in range(attempts):
-            self._acquire()
+            try:
+                self._acquire()
+            except BudgetExhausted:
+                if last_exc is None:
+                    raise  # nothing was requested: the caller records skipped_budget
+                self.stats["retries_skipped_budget"] += 1
+                break
             self.stats["requests"] += 1
             started = self.clock()
             try:
@@ -388,7 +411,7 @@ class Tradier:
                     error=exception_details(exc, (self.token,)))
                 if not self._may_retry(attempt, attempts):
                     break
-                self.sleep(2 ** attempt)
+                self._backoff(2 ** attempt)
                 continue
             elapsed = max(0, self.clock() - started)
             with self.lock:
@@ -422,7 +445,7 @@ class Tradier:
                     attempt=attempt + 1, delay_seconds=2 ** attempt, elapsed_seconds=elapsed)
                 if not self._may_retry(attempt, attempts):
                     break
-                self.sleep(2 ** attempt)
+                self._backoff(2 ** attempt)
                 continue
             response.raise_for_status()
             return response.json()
@@ -601,7 +624,7 @@ def run_sweep(client: Tradier, universe: list[dict[str, Any]], sweep: int, out_p
     additional_chains: dict[str, dict[str, dict[str, Any]]] = {}
     truncated = budget_exhausted = False
     if isinstance(client, Tradier):
-        client.retry_deadline = budget_end
+        client.budget_deadline = budget_end
     with published(out_path) as tmp, gzip.open(tmp, "wt", encoding="utf-8") as out,             ThreadPoolExecutor(max_workers=workers) as pool:
         for start in range(0, len(universe), block_size):
             if STOP or (deadline and datetime.now(ET) >= deadline):
@@ -633,6 +656,8 @@ def run_sweep(client: Tradier, universe: list[dict[str, Any]], sweep: int, out_p
                 try:
                     contracts = client.chain(u["underlying"], u["expiration"])
                     return u, contracts, now_ms(), None
+                except BudgetExhausted:
+                    return u, None, now_ms(), BUDGET_SKIP
                 except Exception as exc:
                     return u, None, now_ms(), safe_error(exc)
 
@@ -678,11 +703,14 @@ def run_sweep(client: Tradier, universe: list[dict[str, Any]], sweep: int, out_p
                                     row["collection_role"] = "additional_expiry"
                                     out.write(json.dumps(row, separators=(",", ":")) + "\n")
                                 extra_status.update(status="ok", rows=len(extra_rows))
+                        except BudgetExhausted:
+                            extra_status.update(status="skipped_budget", fetched_ms=None)
+                            budget_exhausted = True
                         except Exception as exc:
                             extra_status.update(status="error", error=safe_error(exc))
                     additional_chains[name] = {extra: extra_status}
     if isinstance(client, Tradier):
-        client.retry_deadline = None
+        client.budget_deadline = None
     counts = Counter(s["status"] for s in chains.values())
     truncated = truncated or bool(deadline and datetime.now(ET) >= deadline)
     return {"sweep": sweep, "file": out_path.name, "started_ms": started, "ended_ms": now_ms(),
@@ -1809,7 +1837,7 @@ def run_day(cfg: Config, *, client: Tradier | None = None,
                              budget_s=cfg.sweep_budget_s or None)
         finally:
             if isinstance(client, Tradier):
-                client.deadline = client.retry_deadline = None
+                client.deadline = client.budget_deadline = None
         entry["start_interval_seconds"] = ((entry["started_ms"] - previous_start) / 1000
                                             if previous_start is not None else None)
         previous_start = entry["started_ms"]
