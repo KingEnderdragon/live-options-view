@@ -59,13 +59,18 @@ const prices = 'datetime,open,high,low,close\n2026-10-27T13:30:00Z,500,502,499,5
     await ctx.loadHistoryManifest();
     assert.equal(el('hist-status').textContent,'Archive is empty.');
     assert.match(el('hist-no-data').textContent,/No archived dates/);
-    for (const value of [404,503,new Error('offline'),'junk','Expiration,Type,Strike,UnderlyingPrice,OpenInterest\n2026-10-27,call,bad,500,1']) {
+    const blankOi = 'Expiration,Type,Strike,UnderlyingPrice,OpenInterest\n2026-10-27,call,500,500,\n2026-10-27,put,500,500,';
+    for (const [value, notice] of [[404,/^No archived chain/],[503,/^Could not load/],[new Error('offline'),/^Could not load/],
+        ['junk',/unusable/],['Expiration,Type,Strike,UnderlyingPrice,OpenInterest\n2026-10-27,call,bad,500,1',/unusable/],[blankOi,/unusable/]]) {
       ({ctx,el} = harness()); routes['raw/qqq_chain_20261027.csv'] = value;
       await ctx.loadHistoryManifest();
       assert.match(el('hist-status').textContent,/Error loading/);
+      assert.match(el('hist-no-data').textContent,notice);
       assert.equal(ctx.rendered,undefined);
       if(value!==404) assert.ok(!calls.some(k=>k.includes('/opex/')),'only missing daily files use legacy fallback');
     }
+    ({ctx,el} = harness()); routes['raw/qqq_chain_20261027.csv'] = blankOi;
+    await assert.rejects(ctx.fetchChainCsv('2026-10-27'), /OpenInterest invalid in 2 of 2 rows/);
     ({ctx,el} = harness()); routes['raw/qqq_chain_20261027.csv'] = chain.replaceAll('2026-10-27','2026-10-30');
     await ctx.loadHistoryManifest();
     assert.match(el('hist-status').textContent,/No 0DTE chain/);

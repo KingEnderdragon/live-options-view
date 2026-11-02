@@ -2589,10 +2589,15 @@ async function fetchChainCsv(dateStr) {
   if (resp.status === 404) resp = await fetch(`${BROWSER_DATA}/raw/opex/qqq_chain_${key}.csv?_=${Date.now()}`);
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
   const raw = parseCsv(await resp.text());
-  if (raw.some(r => !validArchiveDate(r.Expiration) || !['call', 'put'].includes(r.Type) ||
-      ![r.Strike, r.UnderlyingPrice, r.OpenInterest].every(v => v !== '' && Number.isFinite(+v)) ||
-      +r.Strike <= 0 || +r.UnderlyingPrice <= 0 || +r.OpenInterest < 0)) {
-    throw new Error('Malformed chain archive');
+  // Name the first failing field so the panel says why a dated archive is unusable
+  // (e.g. a file with blank OpenInterest throughout must not render as zero OI).
+  const badField = r => !validArchiveDate(r.Expiration) ? 'Expiration'
+    : !['call', 'put'].includes(r.Type) ? 'Type'
+    : ['Strike', 'UnderlyingPrice', 'OpenInterest'].find(c => r[c] === '' || !Number.isFinite(+r[c])) ||
+      (+r.Strike <= 0 ? 'Strike' : +r.UnderlyingPrice <= 0 ? 'UnderlyingPrice' : +r.OpenInterest < 0 ? 'OpenInterest' : null);
+  const bad = raw.filter(badField);
+  if (bad.length) {
+    throw new Error(`Malformed chain archive: ${badField(bad[0])} invalid in ${bad.length} of ${raw.length} rows`);
   }
   if (!raw.length) throw new Error('Empty chain archive');
   const rows = raw.map(normalizeHistRow);
@@ -2630,7 +2635,11 @@ async function loadHistoryDate(dateStr) {
   } catch (e) {
     if (request !== histRequest) return;
     setHistStatus(`Error loading ${dateStr}: ${e.message}`);
-    document.getElementById('hist-no-data').textContent = `No archived chain for ${dateStr}.`;
+    document.getElementById('hist-no-data').textContent = e.message === 'HTTP 404'
+      ? `No archived chain for ${dateStr}.`
+      : /^(Malformed|Empty) chain archive/.test(e.message)
+        ? `The archived chain for ${dateStr} is unusable and is not shown.`
+        : `Could not load the archived chain for ${dateStr}.`;
   }
 }
 
