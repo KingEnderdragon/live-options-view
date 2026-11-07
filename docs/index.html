@@ -264,6 +264,7 @@
     font-size: 0.76rem;
     color: var(--dim);
   }
+  #steo-panel.hidden { display: none; }
   #steo-panel .steo-label {
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -839,7 +840,8 @@
 <!-- EIA STEO crude calibration + OVX regime, see collector.py's macro/eia_steo.json
      (optional feed -- gated on EIA_API_KEY; panel just never appears if it's absent). -->
 <div id="steo-panel" class="hidden">
-  <span><span class="steo-label">STEO</span><span class="steo-value" id="steo-release">—</span></span>
+  <span><span class="steo-label">EIA STEO</span><span class="steo-value" id="steo-release">—</span></span>
+  <span><span class="steo-label">Forecast</span><span class="steo-value" id="steo-period">—</span></span>
   <span><span class="steo-label">Brent fcst</span><span class="steo-value" id="steo-brent">—</span><span class="steo-delta" id="steo-brent-delta"></span></span>
   <span><span class="steo-label">WTI fcst</span><span class="steo-value" id="steo-wti">—</span><span class="steo-delta" id="steo-wti-delta"></span></span>
   <span><span class="steo-label">World balance</span><span class="steo-value" id="steo-balance">—</span><span class="steo-delta" id="steo-balance-delta"></span></span>
@@ -2050,18 +2052,25 @@ async function fetchPrices() {
 }
 
 // EIA STEO crude calibration + OVX regime. Optional feed -- collector.py
-// only ever writes macro/eia_steo.json if EIA_API_KEY is configured, so a
-// 404 here just means the feature isn't enabled; the panel stays hidden
-// rather than showing an error, same as #steo-panel's default state.
+// only writes macro/eia_steo.json when EIA_API_KEY is configured. A 404
+// means the optional publication is absent, not proof of why it is absent;
+// keep the panel hidden without treating absence as a transport failure.
 // fmtSteoDelta/findRevision live in shared.js (pure, tested directly there).
 async function fetchSteoCalibration() {
   const panel = document.getElementById('steo-panel');
   try {
-    const resp = await fetch(`${R2}/macro/eia_steo.json?_=${Date.now()}`);
-    if (!resp.ok) { panel.classList.add('hidden'); return; }
+    const resp = await fetch(`${BROWSER_DATA}/macro/eia_steo.json?_=${Date.now()}`);
+    if (resp.status === 404) { panel.classList.add('hidden'); return; }
+    if (!resp.ok) throw new Error(`STEO publication returned HTTP ${resp.status}`);
     const data = await resp.json();
-    const points = data.points || [];
+    const points = data?.points;
+    if (!Array.isArray(points)) throw new Error('Invalid STEO points');
     if (!points.length) { panel.classList.add('hidden'); return; }
+    const isPeriod = value => typeof value === 'string' && /^\d{4}-(0[1-9]|1[0-2])$/.test(value);
+    if (!isPeriod(data.current_release) || (data.prior_release != null && !isPeriod(data.prior_release)) ||
+        points.some(p => !p || !isPeriod(p.period))) {
+      throw new Error('Invalid STEO release or forecast period');
+    }
 
     // Nearest forecast period still ahead of (or equal to) the current
     // calendar month -- the most relevant single number for "what does the
@@ -2070,6 +2079,7 @@ async function fetchSteoCalibration() {
     const nowPeriod = new Date().toISOString().slice(0, 7);
     const nearest = points.find(p => p.period >= nowPeriod) || points[points.length - 1];
     const revision = findRevision(data.revisions, nearest.period);
+    document.getElementById('steo-period').textContent = nearest.period;
 
     document.getElementById('steo-release').textContent =
       data.current_release + (data.prior_release ? ` (vs ${data.prior_release})` : '');

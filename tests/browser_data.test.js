@@ -4,6 +4,7 @@ const path = require('node:path');
 const KEYS = [
   'intraday/latest.json', 'intraday/spy/latest.json', 'intraday/prices.json',
   'intraday/health.json', 'derived/OIranges.csv',
+  'macro/eia_steo.json',
   'manifest.json', 'raw/qqq_chain_20261027.csv',
   'raw/opex/qqq_chain_20240229.csv', 'prices/qqq_intraday_20261027.csv',
   'squeeze-scanner/v1/scheduled/latest.json',
@@ -77,7 +78,9 @@ const APP = 'https://live-options-view.otmooper12.workers.dev';
       'intraday//latest.json', 'intraday/%6catest.json', 'intraday%2flatest.json',
       'intraday/..%2fauth/remember_token.json', '%2e%2e%2fauth/remember_token.json',
       'https://evil.example/data', '//evil.example/data', 'auth/remember_token.json',
-      'system/bot-membership-v1.json', 'paper-trades/a.json', 'macro/eia_steo.json',
+      'system/bot-membership-v1.json', 'paper-trades/a.json', 'macro/other.json',
+      'macro/eia_steo.json/', 'macro//eia_steo.json', 'macro/%65ia_steo.json',
+      'baselines/eia_steo_vintages.json',
       'raw/qqq_chain_2026-10-08.csv', 'derived/oiranges.csv',
       'raw/qqq_chain_20260229.csv', 'raw/qqq_chain_20261301.csv',
       'raw/qqq_chain_20260431.csv', 'raw/qqq_chain_20261000.csv',
@@ -90,7 +93,9 @@ const APP = 'https://live-options-view.otmooper12.workers.dev';
     assert.equal((await request('/browser-data')).status, 404);
     for (const query of ['?url=https://evil.example', '?_=1&url=x', '?_=1&_=2', '?_=abc', '?_=',
       '?token=private', '?_=123456789012345678901', '?%5f=1']) {
-      assert.equal((await request('/browser-data/' + KEYS[0] + query)).status, 400, query);
+      for (const key of KEYS) {
+        assert.equal((await request('/browser-data/' + key + query)).status, 400, key + query);
+      }
     }
     for (const method of ['HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']) {
       for (const key of [...KEYS, 'auth/remember_token.json']) {
@@ -101,13 +106,15 @@ const APP = 'https://live-options-view.otmooper12.workers.dev';
     }
     assert.equal(calls.length, allowedCalls, 'rejected requests never fetch');
     for (status of [204, 206, 301, 302, 303, 307, 308, 304, 400, 401, 403, 404, 429, 500, 503]) {
-      const before = calls.length;
-      const res = await request('/browser-data/' + KEYS[0]);
-      assert.equal(res.status, status);
-      assert.equal(calls.length, before + 1, 'no redirect or retry');
-      assert.equal(res.headers.get('location'), null);
-      assert.equal(res.headers.get('retry-after'), '7');
-      assert.deepEqual(new Uint8Array(await res.arrayBuffer()), [204, 304].includes(status) ? new Uint8Array() : body);
+      for (const key of KEYS) {
+        const before = calls.length;
+        const res = await request('/browser-data/' + key);
+        assert.equal(res.status, status);
+        assert.equal(calls.length, before + 1, 'no redirect or retry');
+        assert.equal(res.headers.get('location'), null);
+        assert.equal(res.headers.get('retry-after'), '7');
+        assert.deepEqual(new Uint8Array(await res.arrayBuffer()), [204, 304].includes(status) ? new Uint8Array() : body);
+      }
     }
     fail = true;
     const failure = await request('/browser-data/' + KEYS[0]);
@@ -122,7 +129,7 @@ const APP = 'https://live-options-view.otmooper12.workers.dev';
   }
   assert.ok(html.includes('fetch(`${BROWSER_DATA}/${path}?_=${Date.now()}`)'));
   assert.ok(html.includes('const base = `${BROWSER_DATA}/squeeze-scanner/v1/scheduled`;'));
-  assert.ok(html.includes('fetch(`${R2}/macro/eia_steo.json'));
+  assert.ok(html.includes('fetch(`${BROWSER_DATA}/macro/eia_steo.json'));
   assert.ok(html.includes('fetch(`${BROWSER_DATA}/raw/qqq_chain_'));
   assert.ok(html.includes('fetch(`${BROWSER_DATA}/raw/opex/qqq_chain_'));
   assert.ok(html.includes('fetch(`${BROWSER_DATA}/manifest.json'));
