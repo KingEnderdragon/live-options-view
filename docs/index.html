@@ -640,6 +640,7 @@
   .bot-pnl.down { color: #ee3300; }
   .bot-pnl.flat { color: var(--dim); }
   .bot-meta { font-size: 0.72rem; color: var(--dim); margin-top: 4px; }
+  .bot-last-trade { font-size: 0.8rem; line-height: 1.5; color: var(--fg); }
   .bot-card table { width: 100%; min-width: 0; margin-top: 8px; font-size: 0.72rem; }
   .bot-card th { color: var(--dim); font-weight: 500; text-align: right; }
   .bot-card th:first-child, .bot-card td:first-child { text-align: left; }
@@ -2413,6 +2414,20 @@ function botsStatusLine(suffix) {
   return botsError ? `roster unavailable — ${botsError} · showing last known` : suffix;
 }
 
+// Display only: retain the original trade timestamp and financial history.
+const botTradeDateFormat = new Intl.DateTimeFormat('en-US', {
+  timeZone: 'America/New_York', year: 'numeric', month: 'short', day: 'numeric',
+  hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true,
+  timeZoneName: 'short',
+});
+function formatBotLastTrade(value) {
+  if (value == null || (typeof value === 'string' && !value.trim())) return 'Not recorded';
+  if (typeof value !== 'string' && typeof value !== 'number') return 'Invalid timestamp';
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return 'Invalid timestamp';
+  return `${botTradeDateFormat.format(date)} (New York)`;
+}
+
 function renderBots() {
   if (!botsData) {
     if (botsError) {
@@ -2478,7 +2493,7 @@ function renderBots() {
         : '<span class="bot-unmarked">awaiting marks</span>'}</div>
       <div class="bot-meta">
         Cash $${bot.balance_cash.toFixed(2)} · ${bot.trade_count} trade${bot.trade_count === 1 ? '' : 's'}
-        ${bot.last_trade_ts ? ` · last ${new Date(bot.last_trade_ts).toLocaleTimeString()}` : ''}
+        <br><span class="bot-last-trade">Last trade: ${escapeHtml(formatBotLastTrade(bot.last_trade_ts))}</span>
         ${unmarked ? `<br><span class="bot-unmarked">${unmarked} position${unmarked === 1 ? '' : 's'} without a mark — equity and PnL withheld, and this account is unranked</span>` : ''}
       </div>
       ${bot.positions.length
