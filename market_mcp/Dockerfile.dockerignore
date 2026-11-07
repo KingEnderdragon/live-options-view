@@ -7,6 +7,7 @@ market_mcp/**
 !market_mcp/production.js
 !market_mcp/source.js
 !market_mcp/consumer.js
+!market_mcp/overview.js
 !market_mcp/server.js
 !market_mcp/http.js
 !docs/

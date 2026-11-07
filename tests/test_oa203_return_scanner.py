@@ -372,6 +372,49 @@ class FakeClient:
 
 
 class UniverseSelection(unittest.TestCase):
+    def test_second_chain_sweep_is_separate_and_nearest_preserved(self):
+        class Client:
+            def quotes(self, symbols):
+                return {}
+
+            def chain(self, symbol, expiration):
+                return [{"symbol": f"SPY{expiration}C", "expiration_date": expiration,
+                         "root_symbol": symbol, "option_type": "call", "strike": 100,
+                         "bid": 1, "ask": 1.1}]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "sweeps").mkdir()
+            path = Path(tmp) / "sweeps" / "sweep_0001.jsonl.gz"
+            manifest = scanner.run_sweep(Client(), [{"underlying": "SPY", "expiration": "2026-10-16",
+                                                     "additional_expiration": "2026-10-23"}], 1, path, 1, 1)
+            self.assertEqual(manifest["chains"]["SPY"]["status"], "ok")
+            self.assertEqual(manifest["additional_chains"]["SPY"]["2026-10-23"]["status"], "ok")
+            self.assertEqual(manifest["rows"], 2)
+            self.assertEqual(len(list(scanner.iter_rows(Path(tmp)))), 2)
+            self.assertEqual(len(list(scanner._contract_paths(Path(tmp), None, None))), 1)
+
+    def test_bounded_spy_qqq_friday_cohort_survives_weekend(self):
+        dates = ["2026-10-16", "2026-10-19", "2026-10-20", "2026-10-23", "2026-10-30"]
+        client = FakeClient(expirations={s: dates for s in ("SPY", "QQQ", "IWM")})
+        ranked = [(s, {}) for s in ("SPY", "QQQ", "IWM")]
+        friday = scanner.select_universe(client, ranked, date(2026, 10, 16), 3, 1, True)
+        monday = scanner.select_universe(client, ranked, date(2026, 10, 19), 3, 1, True)
+        self.assertEqual([(x["underlying"], x.get("additional_expiration")) for x in friday["selected"]],
+                         [("SPY", "2026-10-23"), ("QQQ", "2026-10-23"), ("IWM", None)])
+        self.assertEqual([(x["underlying"], x.get("additional_expiration")) for x in monday["selected"]],
+                         [("SPY", "2026-10-23"), ("QQQ", "2026-10-23"), ("IWM", None)])
+        self.assertEqual(len(friday["selected"]), 3)
+        self.assertTrue(all(sum(bool(x.get(k)) for k in ("expiration", "additional_expiration")) <= 2
+                            for x in friday["selected"]))
+
+    def test_holiday_friday_keeps_next_listed_friday(self):
+        dates = ["2027-03-25", "2027-03-29", "2027-04-02"]  # Good Friday 2027-03-26
+        client = FakeClient(expirations={"SPY": dates})
+        thursday = scanner.select_universe(client, [("SPY", {})], date(2027, 3, 25), 1, 1, True)
+        monday = scanner.select_universe(client, [("SPY", {})], date(2027, 3, 29), 1, 1, True)
+        self.assertEqual(thursday["selected"][0]["additional_expiration"], "2027-04-02")
+        self.assertEqual(monday["selected"][0]["additional_expiration"], "2027-04-02")
+
     def test_fills_from_later_ranks_and_records_skips(self):
         ranked = [(s, {"contracts": 10 - i, "calls": 0, "puts": 0}) for i, s in enumerate("ABCDE")]
         client = FakeClient(expirations={"A": ["2026-09-25", "2026-09-28"], "C": ["2026-09-24"],
@@ -662,6 +705,49 @@ class Assessment(unittest.TestCase):
         out = self.assess(manifest, backfill={"errors": 0})
         self.assertEqual(out["status"], "complete", out["reasons"])
         self.assertEqual(out["universe_coverage"], 1.0)
+
+    def test_failed_additional_expiry_cannot_hide_behind_nearest_chains(self):
+        universe = {**UNIVERSE_500, "selected": [
+            {**u, **({"additional_expiration": "2026-10-23"} if u["underlying"] == "S0" else {})}
+            for u in UNIVERSE_500["selected"]]}
+        manifest = [self.entry(i * 5, i * 5 + 5) for i in range(78)]
+        for entry in manifest:
+            entry["additional_chains"] = {"S0": {"2026-10-23": {
+                "status": "error", "expiration": "2026-10-23"}}}
+        out = self.assess(manifest, universe=universe, backfill={"errors": 0})
+        self.assertEqual(out["status"], "partial")
+        self.assertEqual(out["chain_fetches"], 78 * 501)
+        self.assertLess(out["chain_success_rate"], 1.0)
+        self.assertEqual(out["additional_chain_expected"], 78)
+        self.assertEqual(out["additional_chain_success_rate"], 0.0)
+        self.assertEqual(out["additional_expiry_coverage"], 0.0)
+        self.assertIn("additional_chain_failures:78", out["reasons"])
+        self.assertIn("additional_expiry_coverage:0.0000", out["reasons"])
+
+    def test_missing_extra_status_and_zero_row_ok_are_failures(self):
+        universe = {**UNIVERSE_500, "selected": [
+            {**u, **({"additional_expiration": "2026-10-23"} if u["underlying"] == "S0" else {})}
+            for u in UNIVERSE_500["selected"]]}
+        manifest = [self.entry(i * 5, i * 5 + 5) for i in range(78)]
+        manifest[0]["additional_chains"] = {"S0": {"2026-10-23": {
+            "status": "ok", "expiration": "2026-10-23", "rows": 0}}}
+        out = self.assess(manifest, universe=universe, backfill={"errors": 0})
+        self.assertEqual(out["additional_chain_expected"], 78)
+        self.assertEqual(out["additional_chain_statuses_recorded"], 1)
+        self.assertEqual(out["additional_chain_successes"], 0)
+        self.assertIn("additional_chain_failures:78", out["reasons"])
+
+    def test_successful_extra_chain_can_still_be_complete(self):
+        universe = {**UNIVERSE_500, "selected": [
+            {**u, **({"additional_expiration": "2026-10-23"} if u["underlying"] == "S0" else {})}
+            for u in UNIVERSE_500["selected"]]}
+        manifest = [self.entry(i * 5, i * 5 + 5) for i in range(78)]
+        for entry in manifest:
+            entry["additional_chains"] = {"S0": {"2026-10-23": {
+                "status": "ok", "expiration": "2026-10-23", "rows": 1}}}
+        out = self.assess(manifest, universe=universe, backfill={"errors": 0})
+        self.assertEqual(out["status"], "complete", out["reasons"])
+        self.assertEqual(out["additional_chain_success_rate"], 1.0)
 
     def test_gap_and_late_stop_are_partial(self):
         manifest = [self.entry(0, 5), self.entry(5, 10), self.entry(60, 65)]

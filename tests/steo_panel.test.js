@@ -78,6 +78,7 @@ async function showValid(data = fixture) {
 
   await showValid();
   assert.equal(el('steo-release').textContent, '2026-10 (vs 2026-09)');
+  assert.equal(el('steo-period').textContent, '2026-10');
   assert.equal(el('steo-brent').textContent, '$72.00');
   assert.equal(el('steo-wti').textContent, '$67.00');
   assert.equal(el('steo-balance').textContent, '-0.50 Mbbl/d');
@@ -115,6 +116,9 @@ async function showValid(data = fixture) {
     new TypeError('Failed to fetch'),
     { ok: true, status: 200, json: async () => { throw new SyntaxError('Invalid JSON'); } },
     response(null),
+    response({ ...fixture, current_release: undefined }),
+    response({ ...fixture, current_release: '2026-13' }),
+    response({ ...fixture, points: [{period:'invalid',brent:72}] }),
     response({ points: { length: 1 } }),
     response({ ...fixture, points: [{ period: '2026-10', brent: 'invalid' }] }),
   ]) {

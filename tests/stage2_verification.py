@@ -240,6 +240,42 @@ def test_last_known_price_preserves_observation_time():
         collector.fetch_yf_prices_bounded = original_fetch
 
 
+def test_price_receipt_tracks_selected_input_and_carry_origin():
+    original_prices = dict(collector._last_prices)
+    original_fetch = collector.fetch_yf_prices_bounded
+    old = "2026-10-12T13:00:00+00:00"
+    fresh = "2026-10-12T14:00:00+00:00"
+    try:
+        collector._last_prices.clear()
+        state = {sym: {"bid": 100.0, "ask": 100.2, "bid_ts": fresh, "ask_ts": fresh}
+                 for sym in collector.PRICE_TICKERS.values()}
+        state["AAPL"].update(last=101.0, last_ts=old)
+        state["QQQ"].update(bid_ts=old)
+        state[collector.PRICE_TICKERS["JPY/USD"]] = {"bid": 0.0065, "prev_close": 0.0066}
+        collector.fetch_yf_prices_bounded = lambda: {"JPY/USD": 0.0067}
+        s3 = FakeS3()
+        collector.push_prices(s3, FakeFeed(state, last_event_time=datetime.now(timezone.utc)), collector.Counters())
+        prices = s3.json_objects("intraday/prices.json")[-1]["prices"]
+        assert_equal((prices["AAPL"]["price_basis"], prices["AAPL"]["quote_ts"]),
+                     ("last_trade", old), "fresh quote side does not refresh older trade")
+        assert_equal((prices["QQQ"]["price_basis"], prices["QQQ"]["quote_ts"]),
+                     ("bid_ask_midpoint", old), "midpoint age uses older side")
+        assert_equal((prices["JPY/USD"]["source"], prices["JPY/USD"]["source_symbol"], prices["JPY/USD"]["quote_ts"]),
+                     ("yfinance", "JPYUSD=X", None), "spot fallback retains its identity and no event time")
+        assert_equal((prices["JPY/USD"]["bid"], prices["JPY/USD"]["prev_close"]),
+                     (None, None), "futures bid and reference cannot accompany Yahoo spot")
+        state.pop("AAPL")
+        collector.fetch_yf_prices_bounded = lambda: {}
+        collector.push_prices(s3, FakeFeed(state, last_event_time=datetime.now(timezone.utc)), collector.Counters())
+        carried = s3.json_objects("intraday/prices.json")[-1]["prices"]["AAPL"]
+        assert_equal((carried["source"], carried["origin_source"], carried["source_symbol"], carried["quote_ts"]),
+                     ("last-known", "dxlink", "AAPL", old), "carried value preserves original source and receipt")
+    finally:
+        collector._last_prices.clear()
+        collector._last_prices.update(original_prices)
+        collector.fetch_yf_prices_bounded = original_fetch
+
+
 def test_health_schema_and_counters():
     now = datetime.now(timezone.utc)
     counters = collector.Counters()
@@ -404,6 +440,7 @@ def run():
         test_per_side_quote_timestamps_and_registry_lifecycle,
         test_prices_feed_stale_flags,
         test_last_known_price_preserves_observation_time,
+        test_price_receipt_tracks_selected_input_and_carry_origin,
         test_health_schema_and_counters,
         test_snapshot_archive_key_uniqueness,
     ]

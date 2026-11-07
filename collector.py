@@ -1474,6 +1474,13 @@ def push_prices(s3, feed: DXLinkFeed, counters: Counters,
         last    = d.get("last")
         mid     = round((bid + ask) / 2, 4) if bid is not None and ask is not None else None
         price   = last or mid
+        # quote_ts is a collector receipt time, and must describe the value
+        # selected for price. A newer bid cannot refresh an older last trade;
+        # both sides of a midpoint must have receipt times.
+        price_basis = "last_trade" if last else "bid_ask_midpoint" if mid is not None else None
+        price_ts = (d.get("last_ts") if last else
+                    min(d["bid_ts"], d["ask_ts"])
+                    if mid is not None and d.get("bid_ts") and d.get("ask_ts") else None)
         prev    = d.get("prev_close")
         chg_pct = None
         if price and prev and prev != 0:
@@ -1486,8 +1493,9 @@ def push_prices(s3, feed: DXLinkFeed, counters: Counters,
             "chg_pct":    chg_pct,
             "volume":     d.get("volume"),
             "source":     "dxlink" if price is not None else None,
-            "quote_ts":   max([v for v in (d.get("last_ts"), d.get("bid_ts"), d.get("ask_ts")) if v],
-                              default=None),
+            "source_symbol": dxlink_sym if price is not None else None,
+            "price_basis": price_basis,
+            "quote_ts":   price_ts,
         }
 
     # yfinance fallback for any tickers DXLink didn't populate
@@ -1500,6 +1508,12 @@ def push_prices(s3, feed: DXLinkFeed, counters: Counters,
             if yf_price is not None:
                 prices[lbl]["price"] = yf_price
                 prices[lbl]["source"] = "yfinance"
+                prices[lbl]["source_symbol"] = YF_SYMBOL_MAP[lbl]
+                prices[lbl]["price_basis"] = "undated_last_price"
+                # Any Summary or one-sided quote still in d belongs to the
+                # DXLink instrument, which may differ from the Yahoo fallback.
+                for field in ("bid", "ask", "prev_close", "chg_pct", "volume"):
+                    prices[lbl][field] = None
                 # yfinance's simple last-price response has no trustworthy
                 # provider event timestamp. Retrieval time must not masquerade
                 # as market observation time.
@@ -1522,6 +1536,9 @@ def push_prices(s3, feed: DXLinkFeed, counters: Counters,
             _last_prices[lbl] = {
                 "price": d["price"],
                 "quote_ts": d.get("quote_ts"),
+                "origin_source": d.get("source"),
+                "source_symbol": d.get("source_symbol"),
+                "price_basis": d.get("price_basis"),
             }
 
     # last-known-value fallback for anything still missing
@@ -1533,6 +1550,11 @@ def push_prices(s3, feed: DXLinkFeed, counters: Counters,
             d["stale"] = True
             d["source"] = "last-known"
             d["quote_ts"] = remembered.get("quote_ts")
+            d["origin_source"] = remembered.get("origin_source")
+            d["source_symbol"] = remembered.get("source_symbol")
+            d["price_basis"] = remembered.get("price_basis")
+            for field in ("bid", "ask", "prev_close", "chg_pct", "volume"):
+                d[field] = None
             stale_filled.append(lbl)
     if stale_filled:
         log.warning(f"prices -- serving last-known values for: {', '.join(stale_filled)}")
@@ -1542,13 +1564,15 @@ def push_prices(s3, feed: DXLinkFeed, counters: Counters,
     # fallbacks so QQQ's CSV columns and health symbol counts do not change.
     spy = state.get("SPY", {}) if COLLECT_SPY else {}
     spy_bid, spy_ask = spy.get("bid"), spy.get("ask")
-    spy_price, spy_ts = _observed_spy_price(spy)
+    spy_price, spy_ts, spy_basis = _observed_spy_price_with_basis(spy)
     spy_prev = spy.get("prev_close")
     prices["SPY"] = {
         "price": spy_price, "bid": spy_bid, "ask": spy_ask,
         "prev_close": spy_prev,
         "chg_pct": round((spy_price - spy_prev) / spy_prev * 100, 2) if spy_price is not None and spy_prev else None,
         "volume": spy.get("volume"), "source": "dxlink" if spy_price is not None and spy_ts else None,
+        "source_symbol": "SPY" if spy_price is not None and spy_ts else None,
+        "price_basis": spy_basis,
         "quote_ts": spy_ts if spy_price is not None else None,
     }
 
@@ -2338,23 +2362,29 @@ def _resolve_underlying_spot(
 
 
 def _observed_spy_price(quote: dict) -> tuple[float | None, str | None]:
-    """Use only a SPY price with its own complete provider observation time."""
+    """Use only a SPY price with its own complete collector receipt time."""
+    price, received, _ = _observed_spy_price_with_basis(quote)
+    return price, received
+
+
+def _observed_spy_price_with_basis(quote: dict) -> tuple[float | None, str | None, str | None]:
+    """Return the selected SPY input, its receipt time and price basis."""
     bid, ask = quote.get("bid"), quote.get("ask")
     bid_ts, ask_ts = quote.get("bid_ts"), quote.get("ask_ts")
     if bid is not None and ask is not None and bid_ts and ask_ts:
         try:
             older = min((bid_ts, ask_ts), key=datetime.fromisoformat)
-            return round((bid + ask) / 2, 2), older
+            return round((bid + ask) / 2, 2), older, "bid_ask_midpoint"
         except (TypeError, ValueError):
             pass
     last, last_ts = quote.get("last"), quote.get("last_ts")
     if last is not None and last_ts:
         try:
             datetime.fromisoformat(last_ts)
-            return last, last_ts
+            return last, last_ts, "last_trade"
         except (TypeError, ValueError):
             pass
-    return None, None
+    return None, None, None
 
 
 def _fresh_spy_spot(quote: dict, now: datetime) -> tuple[float | None, str | None]:
