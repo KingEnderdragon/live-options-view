@@ -64,11 +64,14 @@ jobs:
       - name: Historical rendered browser workflow
         run: node tests/historical_browser.test.js
       # Catches syntax errors in the inline <script> that the panel test would
-      # otherwise only surface for the section it extracts.
+      # otherwise only surface for the section it extracts. B2 extracts
+      # sections into docs/js/ one at a time; each extracted module gets the
+      # same parse gate here so a broken module cannot ship.
       - name: parse check
         run: |
           node --check worker.js
           node --check docs/shared.js
+          for f in docs/js/*.js; do node --check "$f"; done
           node -e "
             const fs = require('fs');
             const html = fs.readFileSync('docs/index.html', 'utf8');
