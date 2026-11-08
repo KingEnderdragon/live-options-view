@@ -27,13 +27,6 @@ def _install_import_stubs():
     yfinance.Tickers = Mock()
     sys.modules.setdefault("yfinance", yfinance)
 
-    crude_calibration = types.ModuleType("crude_calibration")
-    sys.modules.setdefault("crude_calibration", crude_calibration)
-
-    market_signals = types.ModuleType("market_signals")
-    market_signals.VwapState = type("VwapState", (), {})
-    sys.modules.setdefault("market_signals", market_signals)
-
 
 _install_import_stubs()
 import collector

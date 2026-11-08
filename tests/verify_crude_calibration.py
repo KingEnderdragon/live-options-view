@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import crude_calibration as cc  # noqa: E402
+from collector import crude_calibration as cc  # noqa: E402
 
 
 def assert_equal(actual, expected, label):

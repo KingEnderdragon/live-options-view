@@ -1,0 +1,245 @@
+"""Collector configuration: constants, logging, session clock.
+
+WHY this module: every subsystem reads the same service constants (tickers,
+cadences, R2 keys, EIA/STEO and VWAP/RVOL tuning) and the same ET session
+clock, so they live in one place with no dependency on any other collector
+module. Nothing here imports any sibling module.
+"""
+
+import logging
+import os
+import sys
+from datetime import datetime
+
+import pytz
+
+# Force UTF-8 stdout to avoid UnicodeEncodeError on non-UTF-8 terminals/Railway
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)-8s %(message)s",
+    datefmt="%H:%M:%S",
+    stream=sys.stdout,
+)
+log = logging.getLogger("collector")
+
+
+# -- config -------------------------------------------------------------------
+
+ET              = pytz.timezone("America/New_York")
+TASTY_BASE      = "https://api.tastyworks.com"
+TICKER          = "QQQ"
+# Underlyings with their own 0DTE chain, snapshot, indicators and archive
+# (#121). Only TICKER (QQQ) gets the nearest-weekly archive; SPY is 0DTE only,
+# to bound subscriptions and writes.
+CHAIN_UNDERLYINGS = ("QQQ", "SPY")
+COLLECT_SPY     = os.environ.get("COLLECT_SPY", "1") != "0"
+STRIKE_WINDOW   = 33
+SPY_MAX_STRIKES = 67
+SNAPSHOT_SECS   = 60
+WEEKLY_SNAPSHOT_SECS = 60 * 60
+PRICES_SECS     = 10
+HEALTH_SECS     = 15
+PREMARKET_HOUR  = 6
+STOP_HOUR       = 16
+STOP_MIN        = 15
+STALE_FEED_SECS = 120   # warn if no feed event for this many seconds
+LIVE_QUOTE_PORT = int(os.environ.get("PORT", "8080"))
+MAX_LIVE_QUOTE_SYMBOLS = 100
+R2_BUCKET       = os.environ.get("R2_BUCKET_NAME", "pub-4d5c916b8cb74ffb8c0abd7dfadb02cf")
+WEEKLY_R2_PREFIX = "raw/weekly"
+
+# Keep the weekly archive byte-for-byte compatible with qqq-data-pipeline's
+# chain CSV field set and order.  The live 0DTE CSV intentionally retains its
+# additional VolDelta and macro columns.
+PIPELINE_CHAIN_COLUMNS = [
+    "TradeDate", "Expiration", "Strike", "Type", "OptionSymbol", "DTE",
+    "OpenInterest", "Volume", "Bid", "Mid", "Ask", "Last", "IV", "Delta",
+    "Gamma", "Theta", "Vega", "UnderlyingPrice",
+]
+
+# EIA STEO crude calibration feed (see collector/crude_calibration.py). Optional --
+# skipped entirely if EIA_API_KEY isn't set, same soft-dependency shape as
+# the KOSPI/OVX DXLink-symbol guesses degrading to yfinance rather than
+# failing the whole collector. Runs independent of the market session (unlike
+# prices_loop/health_loop, which only run inside _run_session) since STEO has
+# nothing to do with QQQ market hours -- started once from main().
+EIA_API_KEY          = os.environ.get("EIA_API_KEY")
+EIA_STEO_URL          = "https://api.eia.gov/v2/steo/data/"
+EIA_STEO_POLL_SECS    = 6 * 3600   # STEO itself updates ~monthly; polling a few times a
+                                    # day just catches a fresh release promptly without a cron
+EIA_STEO_KEY          = "macro/eia_steo.json"
+EIA_STEO_LOG_KEY      = "baselines/eia_steo_vintages.json"
+EIA_STEO_MAX_VINTAGES = 6
+# EIA v2's `length` caps *total rows returned*, not periods-per-series --
+# with 3 series requested together (facets[seriesId][] has 3 values), the
+# old length=36 capped the combined response at 36 rows total (effectively
+# ~12 periods across 3 series, not 36 periods per series as the docstring
+# claimed), silently truncating history. 5000 is comfortably above
+# 3 series x 36 periods = 108 rows with margin for future series/window
+# growth, and is at/near EIA v2's own per-request row cap. See
+# fetch_eia_steo_rows's truncation check for the actual safety net --
+# this constant alone doesn't guarantee nothing is ever dropped.
+EIA_STEO_PAGE_LENGTH = 5000
+
+# VWAP/RVOL (see collector/market_signals.py and docs/plans/2026-07-vwap-rvol.md).
+# Bucket/lookback/min-days are not derived from anything about QQQ itself --
+# reasonable defaults chosen to balance per-bucket sample density against how
+# fast RVOL exits "insufficient_history" after this feature first deploys.
+RVOL_BUCKET_MINUTES     = 5
+RVOL_LOOKBACK_DAYS      = 20
+RVOL_MIN_DAYS_REQUIRED  = 5
+RVOL_BASELINE_KEY       = "baselines/qqq_rvol_buckets.json"
+
+# Time-series momentum (display/log only, see collector/market_signals.py's module
+# docstring and docs/plans/2026-07-momentum-indicator.md) -- same shape as
+# momentum_qqq's own default params (crassus/crassus/strategies/momentum_qqq.py),
+# but this is a reference signal for the UI/log, not a change to what any
+# account actually trades on.
+MOMENTUM_LOOKBACK_MINUTES          = 60.0
+MOMENTUM_MAX_ANCHOR_OVERSHOOT_MIN  = 10.0
+MOMENTUM_NEUTRAL_BAND_PCT          = 0.05  # display-only up/down/flat threshold
+MOMENTUM_RETAIN_MINUTES            = 24 * 60.0  # generous, decoupled from the configured lookback
+
+PRICE_TICKERS: dict[str, str] = {
+    "QQQ":     "QQQ",
+    "USO":     "USO",
+    "VIX":     "$VIX.X",
+    # Cboe Crude Oil ETF Volatility Index. Same unverified-guess situation as
+    # KOSPI below: tastytrade/dxFeed may or may not carry this index symbol
+    # at all. If the guess is wrong this ticker just never gets DXLink data
+    # and always falls through to the yfinance path (a real, working ^OVX
+    # symbol) -- same graceful degradation every ticker here already has
+    # pre-market.
+    "OVX":     "$OVX.X",
+    "SMH":     "SMH",
+    "IGV":     "IGV",
+    "10Y":     "$TNX.X",      # CBOE 10-year Treasury yield index (value = yield × 10)
+    "JPY/USD": "/6J:XCME",    # CME yen futures, USD-per-JPY; inverted for display
+    # KOSPI Composite Index — tastytrade/dxFeed is a US-brokerage feed and may
+    # not carry this at all; unverified guess at the dxFeed index-symbol
+    # convention (cf. $VIX.X/$TNX.X above). If it's wrong this ticker simply
+    # never gets DXLink data and always falls through to the yfinance path
+    # below, which is a real, working symbol — same graceful-degradation
+    # behavior every ticker already has pre-market.
+    "KOSPI":   "$KOSPI.X",
+    "BTC/USD": "BTC/USD:CXERX",
+    "META":    "META",
+    "GOOGL":   "GOOGL",
+    "AMZN":    "AMZN",
+    "TSLA":    "TSLA",
+    "MU":      "MU",
+    "SPCX":    "SPCX",
+    "AAPL":    "AAPL",
+}
+
+TICKER_CLASSES: dict[str, str] = {
+    "QQQ": "equity", "SPY": "equity", "USO": "equity", "SMH": "equity", "IGV": "equity",
+    "META": "equity", "GOOGL": "equity", "AMZN": "equity", "TSLA": "equity",
+    "MU": "equity", "SPCX": "equity", "AAPL": "equity",
+    "VIX": "index", "OVX": "index", "10Y": "yield", "JPY/USD": "futures",
+    "KOSPI": "international", "BTC/USD": "crypto",
+}
+
+# Yahoo Finance symbols for the same tickers (fallback when DXLink has no data)
+YF_SYMBOL_MAP: dict[str, str] = {
+    "QQQ":     "QQQ",
+    "USO":     "USO",
+    "VIX":     "^VIX",       # pre-market: None expected (CBOE only calculates at open)
+    "OVX":     "^OVX",       # pre-market: same CBOE-open-only caveat as VIX above
+    "SMH":     "SMH",
+    "IGV":     "IGV",
+    "10Y":     "^TNX",       # yields the rate directly (e.g. 4.485), NOT × 10
+    "JPY/USD": "JPYUSD=X",
+    "KOSPI":   "^KS11",      # KOSPI Composite Index
+    "BTC/USD": "BTC-USD",
+    "META":    "META",
+    "GOOGL":   "GOOGL",
+    "AMZN":    "AMZN",
+    "TSLA":    "TSLA",
+    "MU":      "MU",
+    "SPCX":    "SPCX",
+    "AAPL":    "AAPL",
+}
+
+
+
+# -- session clock ------------------------------------------------------------
+# Pure ET wall-clock helpers on the constants above. They lived in the
+# sessions block of the flat file; they belong here because they depend only
+# on config values, and the market/prices/health modules need them without
+# importing the session-eligibility machinery.
+
+def past_stop() -> bool:
+    et = datetime.now(ET)
+    return (et.hour, et.minute) >= (STOP_HOUR, STOP_MIN)
+
+def _session_bounds(et: datetime) -> tuple[datetime, datetime]:
+    """Return the session start/stop bounds for the ET date of ``et``."""
+    session_date = et.date()
+    start = ET.localize(datetime(
+        session_date.year, session_date.month, session_date.day,
+        PREMARKET_HOUR, 0, 0,
+    ))
+    stop = ET.localize(datetime(
+        session_date.year, session_date.month, session_date.day,
+        STOP_HOUR, STOP_MIN, 0,
+    ))
+    return start, stop
+
+
+def _inside_session_window(et: datetime) -> bool:
+    start, stop = _session_bounds(et)
+    return start <= et < stop
+
+
+
+__all__ = [
+    "ET",
+    "TASTY_BASE",
+    "TICKER",
+    "CHAIN_UNDERLYINGS",
+    "COLLECT_SPY",
+    "STRIKE_WINDOW",
+    "SPY_MAX_STRIKES",
+    "SNAPSHOT_SECS",
+    "WEEKLY_SNAPSHOT_SECS",
+    "PRICES_SECS",
+    "HEALTH_SECS",
+    "PREMARKET_HOUR",
+    "STOP_HOUR",
+    "STOP_MIN",
+    "STALE_FEED_SECS",
+    "LIVE_QUOTE_PORT",
+    "MAX_LIVE_QUOTE_SYMBOLS",
+    "R2_BUCKET",
+    "WEEKLY_R2_PREFIX",
+    "PIPELINE_CHAIN_COLUMNS",
+    "EIA_API_KEY",
+    "EIA_STEO_URL",
+    "EIA_STEO_POLL_SECS",
+    "EIA_STEO_KEY",
+    "EIA_STEO_LOG_KEY",
+    "EIA_STEO_MAX_VINTAGES",
+    "EIA_STEO_PAGE_LENGTH",
+    "RVOL_BUCKET_MINUTES",
+    "RVOL_LOOKBACK_DAYS",
+    "RVOL_MIN_DAYS_REQUIRED",
+    "RVOL_BASELINE_KEY",
+    "MOMENTUM_LOOKBACK_MINUTES",
+    "MOMENTUM_MAX_ANCHOR_OVERSHOOT_MIN",
+    "MOMENTUM_NEUTRAL_BAND_PCT",
+    "MOMENTUM_RETAIN_MINUTES",
+    "PRICE_TICKERS",
+    "TICKER_CLASSES",
+    "YF_SYMBOL_MAP",
+    "log",
+    "past_stop",
+    "_session_bounds",
+    "_inside_session_window",
+]

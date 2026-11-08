@@ -8,15 +8,14 @@ on:
     branches: [master]
     paths:
       - "collector.py"
+      - "collector/**"
       - "collectors/**"
       - "scanners/**"
-      - "market_signals.py"
       - "market_overview.py"
       - "market_overview_universe.json"
       - "tests/test_market_overview.py"
       - "scripts/probe_cross_market_symbols.py"
       - "tests/test_probe_cross_market_symbols.py"
-      - "crude_calibration.py"
       - "requirements.txt"
       - "Dockerfile"
       - "railway.toml"
@@ -51,15 +50,14 @@ on:
   pull_request:
     paths:
       - "collector.py"
+      - "collector/**"
       - "collectors/**"
       - "scanners/**"
-      - "market_signals.py"
       - "market_overview.py"
       - "market_overview_universe.json"
       - "tests/test_market_overview.py"
       - "scripts/probe_cross_market_symbols.py"
       - "tests/test_probe_cross_market_symbols.py"
-      - "crude_calibration.py"
       - "requirements.txt"
       - "Dockerfile"
       - "railway.toml"
