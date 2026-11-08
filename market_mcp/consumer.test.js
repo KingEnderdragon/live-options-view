@@ -273,3 +273,26 @@ test('complete session with a sweep cut at the close surfaces it, old and new su
   const clean=setup();edit(clean.files,PREFIX+'summary.json',p=>Object.assign(p.assessment,{sweeps_in_session:78,complete_sweeps:78}));
   assert.ok(!(await clean.consumer.call('return_rankings',{session:SESSION})).warnings.some(w=>w.includes('did not finish')));
 });
+
+
+test('MCP failed scanner evidence is a successful read; corrupt evidence and invalid filters remain errors',async()=>{
+  const {consumer,files}=setup();partialAttempt(files);
+  const {hash}=require('./source');
+  edit(files,ATTEMPT_ARCHIVE+'/manifest.json',p=>p.status='failed');
+  edit(files,'squeeze-scanner/v1/scheduled/latest-attempt.json',p=>{p.status='failed';p.manifest_sha256=hash(files[ATTEMPT_ARCHIVE+'/manifest.json']);});
+  const p=new Protocol(consumer);
+  await p.handle({jsonrpc:'2.0',id:1,method:'initialize',params:{protocolVersion:'2025-11-25',capabilities:{},clientInfo:{name:'test',version:'1'}}});
+  await p.handle({jsonrpc:'2.0',method:'notifications/initialized'});
+  const call=arguments_=>p.handle({jsonrpc:'2.0',id:2,method:'tools/call',params:{name:'squeeze_results',arguments:arguments_}});
+  const read=await call({run:'latest_attempt'});
+  assert.equal(read.result.structuredContent.status,'failed');
+  assert.equal(read.result.structuredContent.actual.run_id,ATTEMPT_RUN);
+  assert.equal(read.result.structuredContent.reconciliation.matches,true);
+  assert.equal(read.result.isError,false);
+  assert.equal((await call({})).result.structuredContent.rows_basis.run_id,RUN);
+  assert.equal((await call({run:'invalid'})).result.isError,true);
+  files[ATTEMPT_ARCHIVE+'/results.json']='[]';
+  const corrupt=await call({run:'latest_attempt'});
+  assert.equal(corrupt.result.isError,true);
+  assert.equal(corrupt.result.structuredContent.errors.at(-1).code,'source_changed');
+});
