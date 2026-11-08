@@ -1,14 +1,19 @@
 // Exercise the shipped optional STEO fetch/render path with fixture responses.
 // No live EIA/R2 request, API key, or published forecast is created here.
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const { fmtSteoDelta, findRevision } = require('../docs/shared.js');
 
+// B2 slice 7: the STEO fetch moved out of docs/index.html into
+// docs/js/steo-fetch.js — load the shipped module, and pin the ?v= hash so
+// the page cannot silently serve a different copy.
 const html = fs.readFileSync(path.join(__dirname, '../docs/index.html'), 'utf8');
-const start = html.indexOf('async function fetchSteoCalibration()');
-const end = html.indexOf('// ── short-squeeze scanner panel', start);
-assert.ok(start >= 0 && end > start, 'test must exercise the shipped function');
+const moduleSrc = fs.readFileSync(path.join(__dirname, '../docs/js/steo-fetch.js'), 'utf8');
+const hash = crypto.createHash('sha256').update(moduleSrc).digest('hex').slice(0, 16);
+assert.equal(html.match(/<script src="js\/steo-fetch\.js\?v=([0-9a-f]{16})"><\/script>/)?.[1], hash, 'page pins the shipped steo-fetch.js');
+assert.ok(!html.includes('async function fetchSteoCalibration()'), 'fetchSteoCalibration no longer lives inline');
 
 const elements = new Map();
 const el = id => {
@@ -44,7 +49,7 @@ const scope = {
   },
 };
 const fetchPanel = new Function(...Object.keys(scope),
-  html.slice(start, end) + '; return fetchSteoCalibration;'
+  moduleSrc + '; return fetchSteoCalibration;'
 )(...Object.values(scope));
 const response = (data, status = 200) => ({
   ok: status >= 200 && status < 300, status, json: async () => data,
