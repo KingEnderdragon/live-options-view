@@ -9,6 +9,8 @@ on:
     paths:
       - "collector.py"
       - "collector/**"
+      - "collectors/**"
+      - "scanners/**"
       - "market_overview.py"
       - "market_overview_universe.json"
       - "tests/test_market_overview.py"
@@ -49,6 +51,8 @@ on:
     paths:
       - "collector.py"
       - "collector/**"
+      - "collectors/**"
+      - "scanners/**"
       - "market_overview.py"
       - "market_overview_universe.json"
       - "tests/test_market_overview.py"

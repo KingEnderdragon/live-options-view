@@ -5,13 +5,18 @@ const fs = require('node:fs');
 const path = require('node:path');
 const {chromium} = require('playwright');
 const APP = 'https://live-options-view.otmooper12.workers.dev';
-const html = fs.readFileSync(path.join(__dirname,'../docs/index.html'),'utf8');
+const html = fs.readFileSync(path.join(__dirname,'../site/index.html'),'utf8');
 const css = html.match(/<style>([\s\S]*?)<\/style>/)[1];
 const panel = html.match(/<div id="steo-panel"[\s\S]*?<\/div>/)[0];
-const from = html.indexOf('async function fetchSteoCalibration()');
-const source = html.slice(from,html.indexOf('// ── short-squeeze scanner panel',from));
+// B2 slice 7: the STEO fetch moved into site/js/steo-fetch.js — load the
+// shipped module instead of slicing it out of the page.
+const source = fs.readFileSync(path.join(__dirname,'../site/js/steo-fetch.js'),'utf8');
 const routing = html.slice(html.indexOf('const R2 ='),html.indexOf('const REFRESH'));
-const shared = fs.readFileSync(path.join(__dirname,'../docs/shared.js'),'utf8');
+const shared = fs.readFileSync(path.join(__dirname,'../site/shared.js'),'utf8');
+// B3 slice 4: fmtSteoDelta/findRevision moved to site/shared/format.js —
+// inject the shipped module too, in page order, so fetchSteoCalibration
+// reads the real ones.
+const format = fs.readFileSync(path.join(__dirname,'../site/shared/format.js'),'utf8');
 const fixture = {timestamp:'2026-10-09T10:00:00Z',current_release:'2026-10',prior_release:'2026-09',
  points:[{period:'2026-10',brent:72,wti:67,balance:-0.5},{period:'2026-11',brent:73,wti:68,balance:-0.7}],
  revisions:[{period:'2026-10',brent_delta:2,wti_delta:-1,balance_delta:-0.5}],ovx:{value:40,regime:'elevated'}};
@@ -53,7 +58,7 @@ const cases = [
    });
    const page=await context.newPage();page.on('pageerror',e=>errors.push(e.message));page.on('console',m=>{if(m.type()==='warning')warnings.push(m.text());});
    await page.clock.install({time:new Date('2026-10-09T12:00:00Z')});
-   await page.goto(APP+'/');await page.addScriptTag({content:shared});await page.addScriptTag({content:routing+'\n'+source});
+   await page.goto(APP+'/');await page.addScriptTag({content:shared});await page.addScriptTag({content:format});await page.addScriptTag({content:routing+'\n'+source});
    for(mode of cases) {
     await page.evaluate(()=>fetchSteoCalibration());
     const state=await page.evaluate(()=>{

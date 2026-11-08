@@ -1,0 +1,1215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>QQQ Live OI — moopertonic</title>
+<style>
+  :root {
+    --bg:      #0d1117;
+    --panel:   #161b22;
+    --border:  #30363d;
+    --fg:      #c9d1d9;
+    --dim:     #6e7681;
+    --bright:  #f0f6fc;
+
+    --call0: #0d1117;  --call1: #0a1f14;  --call2: #0a3020;
+    --call3: #007730;  --call4: #00cc55;  --call5: #88ffcc;
+
+    --put0:  #0d1117;  --put1:  #1a0d0d;  --put2:  #2a0a0a;
+    --put3:  #881100;  --put4:  #ee3300;  --put5:  #ffaa88;
+
+    --call-text3: #ffffff; --call-text4: #ffffff; --call-text5: #0d1117;
+    --put-text3:  #ffffff; --put-text4:  #ffffff; --put-text5:  #0d1117;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    min-height: 100vh;
+    padding: 1.25rem;
+  }
+
+  /* ── header ─────────────────────────────────────────────────────────── */
+  #header {
+    display: flex;
+    align-items: baseline;
+    gap: 1.5rem;
+    flex-wrap: wrap;
+    margin-bottom: 0.6rem;
+  }
+  #title { font-size: 1.05rem; font-weight: 700; color: var(--bright); }
+  #underlying-select {
+    font: inherit; font-size: 0.85rem; font-weight: 700;
+    color: var(--bright); background: var(--panel);
+    border: 1px solid var(--border); border-radius: 4px; padding: 2px 6px;
+  }
+  #underlying-select:focus-visible { outline: 2px solid #4a90d9; outline-offset: 1px; }
+  .chain-note { font-size: 0.72rem; color: var(--dim); }
+  #price { font-size: 1.6rem; font-weight: 700; color: var(--bright); letter-spacing: -0.02em; }
+  #tier-badge {
+    font-size: 0.72rem; font-weight: 600;
+    padding: 2px 8px; border-radius: 4px;
+    background: #1c2128; border: 1px solid var(--border);
+  }
+  #vwap-rvol, #momentum {
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: var(--dim);
+  }
+  #vwap-rvol[data-state="live"], #momentum[data-state="live"] { color: var(--bright); }
+  #vwap-rvol[data-state="stale"], #momentum[data-state="stale"],
+  #vwap-rvol[data-state="fallback"], #momentum[data-state="fallback"],
+  #vwap-rvol[data-state="closed"], #momentum[data-state="closed"] { opacity: 0.72; }
+
+  /* ── status bar ──────────────────────────────────────────────────────── */
+  #status-bar {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    margin-bottom: 1rem;
+    font-size: 0.76rem;
+    color: var(--dim);
+    flex-wrap: wrap;
+  }
+  #status-dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--dim); flex-shrink: 0;
+    transition: background 0.3s;
+  }
+  #status-dot.live { background: #00cc55; }
+  #status-dot.stale { background: #ee3300; }
+  #quote-health { margin-left: auto; }
+  .transport-health { color: var(--dim); }
+  .transport-health.live { color: #00a844; }
+  .transport-health.stale, .transport-health.rate-limited { color: #d49a00; }
+  .transport-health.backing-off, .transport-health.unavailable { color: #ee3300; }
+
+  /* ── heatmap table ───────────────────────────────────────────────────── */
+  #heatmap-wrap {
+    overflow-x: auto;
+    margin-bottom: 1rem;
+  }
+  table {
+    border-collapse: collapse;
+    font-size: 0.72rem;
+    min-width: 420px;
+  }
+  th {
+    color: var(--dim);
+    font-weight: 600;
+    font-size: 0.68rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 4px 6px;
+    text-align: center;
+    border-bottom: 1px solid var(--border);
+  }
+  td {
+    padding: 2px 4px;
+    text-align: center;
+    width: 80px;
+    height: 38px;
+    font-weight: 700;
+    font-size: 0.68rem;
+    position: relative;
+    line-height: 1.1;
+    vertical-align: middle;
+  }
+  td.strike-cell {
+    color: var(--fg);
+    font-size: 0.72rem;
+    font-weight: 400;
+    width: 70px;
+    background: var(--panel);
+    border-left: 1px solid var(--border);
+    border-right: 1px solid var(--border);
+  }
+  td.atm { color: var(--bright); font-weight: 700; }
+  tr.atm-row td.strike-cell {
+    background: #1c2128;
+    color: var(--bright);
+    font-weight: 700;
+  }
+  tr.atm-row td.call-cell,
+  tr.atm-row td.put-cell {
+    outline: 1px solid rgba(255,255,255,0.12);
+    outline-offset: -1px;
+  }
+
+  /* call cell colors */
+  td.c0 { background: var(--call0); color: var(--dim); }
+  td.c1 { background: var(--call1); color: var(--dim); }
+  td.c2 { background: var(--call2); color: #aaaaaa; }
+  td.c3 { background: var(--call3); color: var(--call-text3); }
+  td.c4 { background: var(--call4); color: var(--call-text4); }
+  td.c5 { background: var(--call5); color: var(--call-text5); }
+
+  /* put cell colors */
+  td.p0 { background: var(--put0); color: var(--dim); }
+  td.p1 { background: var(--put1); color: var(--dim); }
+  td.p2 { background: var(--put2); color: #aaaaaa; }
+  td.p3 { background: var(--put3); color: var(--put-text3); }
+  td.p4 { background: var(--put4); color: var(--put-text4); }
+  td.p5 { background: var(--put5); color: var(--put-text5); }
+
+  /* volume overlay — shown as small superscript when present */
+  .vol {
+    position: absolute;
+    top: 2px; right: 3px;
+    font-size: 0.55rem;
+    font-weight: 400;
+    color: rgba(255,255,255,0.55);
+    line-height: 1;
+  }
+  td.c5 .vol, td.p5 .vol { color: rgba(0,0,0,0.55); }
+
+  /* bid×ask quote line */
+  .quote {
+    display: block;
+    font-size: 0.54rem;
+    font-weight: 400;
+    color: rgba(255,255,255,0.5);
+    letter-spacing: 0.01em;
+  }
+  td.c5 .quote, td.p5 .quote { color: rgba(0,0,0,0.45); }
+
+  /* flow delta — contracts traded since last snapshot */
+  .flow {
+    position: absolute;
+    bottom: 2px; right: 3px;
+    font-size: 0.52rem;
+    font-weight: 700;
+    line-height: 1;
+  }
+  .flow-0  { display: none; }
+  .flow-1  { color: rgba(255,255,255,0.28); }
+  .flow-2  { color: #c8a84b; }
+  .flow-3  { color: #ff8c00; }
+  .flow-4  { color: #ffffff; text-shadow: 0 0 6px #ff8c00; }
+  td.c5 .flow-1, td.p5 .flow-1 { color: rgba(0,0,0,0.28); }
+  td.c5 .flow-2, td.p5 .flow-2 { color: #7a5c00; }
+  td.c5 .flow-3, td.p5 .flow-3 { color: #8b3a00; }
+  td.c5 .flow-4, td.p5 .flow-4 { color: #000; text-shadow: none; }
+
+  /* ── price strip ─────────────────────────────────────────────────────── */
+  #price-strip {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 1rem;
+  }
+  .price-group {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+  .price-group + .price-group::before {
+    content: '';
+    width: 1px;
+    height: 38px;
+    background: var(--border);
+    align-self: center;
+  }
+  .ticker-btn {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 4px 10px;
+    min-width: 68px;
+    cursor: default;
+    transition: border-color 0.2s;
+  }
+  .ticker-btn.tradable { cursor: pointer; }
+  .ticker-btn.tradable:hover { border-color: #58a6ff; }
+  .ticker-btn.sm {
+    min-width: 58px;
+    padding: 3px 7px;
+  }
+  .ticker-btn .sym {
+    font-size: 0.62rem;
+    font-weight: 600;
+    color: var(--dim);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    line-height: 1;
+    margin-bottom: 2px;
+  }
+  .ticker-btn .px {
+    font-size: 0.9rem;
+    font-weight: 700;
+    color: var(--bright);
+    line-height: 1;
+  }
+  .ticker-btn.sm .px { font-size: 0.78rem; }
+
+  /* ── crude calibration panel ─────────────────────────────────────────── */
+  #steo-panel {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 4px 14px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 12px;
+    margin-bottom: 1rem;
+    font-size: 0.76rem;
+    color: var(--dim);
+  }
+  #steo-panel.hidden { display: none; }
+  #steo-panel .steo-label {
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-size: 0.62rem;
+    color: var(--dim);
+    margin-right: 4px;
+  }
+  #steo-panel .steo-value { color: var(--bright); font-weight: 600; }
+  #steo-panel .steo-delta.up   { color: #3fb950; }
+  #steo-panel .steo-delta.down { color: #f85149; }
+  #steo-panel .ovx-regime {
+    text-transform: uppercase;
+    font-size: 0.62rem;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    padding: 1px 6px;
+    border-radius: 8px;
+  }
+  #steo-panel .ovx-regime.calm     { background: rgba(63,185,80,0.18); color: #3fb950; }
+  #steo-panel .ovx-regime.elevated { background: rgba(210,153,34,0.18); color: #d29922; }
+  #steo-panel .ovx-regime.high     { background: rgba(248,81,73,0.18); color: #f85149; }
+  #steo-panel .ovx-regime.no_data  { background: rgba(139,148,158,0.18); color: var(--dim); }
+  .ticker-btn .chg {
+    font-size: 0.6rem;
+    font-weight: 600;
+    line-height: 1;
+    margin-top: 1px;
+  }
+  .ticker-btn .market-state {
+    font-size: 0.48rem;
+    color: var(--dim);
+    line-height: 1;
+    margin-top: 2px;
+    text-transform: uppercase;
+  }
+  .ticker-btn .vwap-line, .ticker-btn .momentum-line {
+    font-size: 0.52rem;
+    color: var(--dim);
+    line-height: 1.2;
+    margin-top: 2px;
+    text-align: center;
+  }
+  .ticker-btn .vwap-line[data-state="live"], .ticker-btn .momentum-line[data-state="live"] { color: var(--bright); }
+  .ticker-btn[data-state="live"] { border-color: #167a3f; }
+  .ticker-btn[data-state="extended"] { border-color: #9a6a18; }
+  .ticker-btn[data-state="stale"], .ticker-btn[data-state="fallback"] { opacity: 0.72; }
+  .chg.up   { color: #00cc55; }
+  .chg.down { color: #ee3300; }
+  .chg.flat { color: var(--dim); }
+
+  /* flash animation on price update */
+  @keyframes flash-up   { 0%,100%{background:var(--panel)} 30%{background:#003318} }
+  @keyframes flash-down { 0%,100%{background:var(--panel)} 30%{background:#330808} }
+  .flash-up   { animation: flash-up   0.6s ease; }
+  .flash-down { animation: flash-down 0.6s ease; }
+
+  /* ── calibration error banner ────────────────────────────────────────── */
+  #cal-error {
+    display: none;
+    padding: 6px 10px;
+    margin-bottom: 0.6rem;
+    background: #2a0808;
+    border: 1px solid #ee3300;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    color: #ffaa88;
+  }
+
+  /* ── no-data state ───────────────────────────────────────────────────── */
+  #no-data {
+    padding: 3rem;
+    text-align: center;
+    color: var(--dim);
+    font-size: 0.9rem;
+  }
+  #no-data.hidden { display: none; }
+  #heatmap-wrap.hidden { display: none; }
+  #auth-panel.hidden { display: none; }
+  #paper-panel.hidden { display: none; }
+  #margin-call-screen.hidden { display: none; }
+
+  /* ── paper trading ───────────────────────────────────────────────────── */
+  td.tradable { cursor: pointer; }
+  td.tradable:hover { outline: 2px solid #58a6ff; outline-offset: -2px; }
+  .pos-badge {
+    position: absolute;
+    top: 2px; left: 3px;
+    font-size: 0.52rem;
+    font-weight: 700;
+    line-height: 1.2;
+    color: #58a6ff;
+    background: rgba(13,17,23,0.6);
+    border-radius: 2px;
+    padding: 0 2px;
+  }
+  #trade-ticket {
+    position: absolute;
+    z-index: 50;
+    background: var(--panel);
+    border: 1px solid #58a6ff;
+    border-radius: 6px;
+    padding: 8px 10px;
+    font-size: 0.72rem;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.6);
+  }
+  #trade-ticket .t-head { font-weight: 700; color: var(--bright); margin-bottom: 6px; }
+  #trade-ticket .t-row { display: flex; gap: 6px; align-items: center; }
+  #trade-ticket .t-order-row { margin-bottom: 6px; }
+  #trade-ticket select {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--bright);
+    border-radius: 4px;
+    padding: 3px 4px;
+    font-size: 0.72rem;
+  }
+  #trade-ticket .t-limit.hidden { display: none; }
+  #trade-ticket input {
+    width: 46px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--bright);
+    border-radius: 4px;
+    padding: 3px 4px;
+    font-size: 0.72rem;
+    text-align: center;
+  }
+  #trade-ticket button {
+    border: none;
+    border-radius: 4px;
+    padding: 4px 9px;
+    font-size: 0.68rem;
+    font-weight: 700;
+    cursor: pointer;
+    color: #fff;
+  }
+  #trade-ticket button:disabled { opacity: 0.4; cursor: default; }
+  .btn-buy  { background: #007730; }
+  .btn-sell { background: #881100; }
+  #paper-panel {
+    margin-top: 1rem;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 12px;
+    font-size: 0.72rem;
+    max-width: 760px;
+  }
+  #paper-panel h3 {
+    display: flex;
+    gap: 1rem;
+    align-items: baseline;
+    font-size: 0.7rem;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--dim);
+    margin-bottom: 6px;
+  }
+  #paper-summary { color: var(--fg); font-weight: 600; text-transform: none; letter-spacing: 0; }
+  #paper-hint { color: var(--dim); font-size: 0.68rem; }
+  #paper-order-status { color: var(--dim); font-size: 0.68rem; min-height: 1em; margin-top: 4px; }
+  #paper-order-status.error { color: #ff6666; }
+  #paper-order-status.success { color: #00cc55; }
+  #paper-panel table { min-width: 0; width: 100%; }
+  #paper-positions h4 { color: var(--dim); font-size: 0.66rem; margin: 8px 0 3px; text-transform: uppercase; }
+  #paper-panel th, #paper-panel td {
+    width: auto; height: auto;
+    padding: 3px 8px;
+    font-size: 0.7rem;
+    font-weight: 400;
+    text-align: right;
+  }
+  #paper-panel th { text-transform: none; letter-spacing: 0.02em; }
+  #auth-panel {
+    margin-top: 1rem;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 12px 14px;
+    font-size: 0.78rem;
+    max-width: 320px;
+  }
+  #auth-panel h3 {
+    font-size: 0.7rem; font-weight: 600; letter-spacing: 0.06em;
+    text-transform: uppercase; color: var(--dim); margin-bottom: 10px;
+  }
+  #auth-panel form { display: flex; flex-direction: column; gap: 8px; }
+  #auth-panel input {
+    background: var(--bg); border: 1px solid var(--border); color: var(--bright);
+    border-radius: 4px; padding: 6px 8px; font-size: 0.78rem;
+  }
+  #auth-panel button {
+    border: none; border-radius: 4px; padding: 6px 9px; font-size: 0.74rem;
+    font-weight: 700; cursor: pointer; color: #fff; background: #007730;
+  }
+  #auth-panel button:disabled { opacity: 0.4; cursor: default; }
+  #auth-toggle {
+    background: none; color: var(--dim); font-weight: 400; text-decoration: underline;
+    padding: 2px 0; margin-top: 2px; align-self: flex-start;
+  }
+  #auth-warning { color: #ee9955; font-size: 0.68rem; line-height: 1.4; }
+  #auth-error { color: #ff6666; font-size: 0.7rem; min-height: 1em; }
+  #user-bar { display: flex; align-items: center; gap: 8px; font-size: 0.72rem; color: var(--dim); }
+  #user-bar button.paper-btn { margin-left: 4px; }
+  #margin-call-screen {
+    position: fixed; inset: 0; z-index: 100;
+    background: rgba(13,17,23,0.96);
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 14px; padding: 20px; text-align: center;
+  }
+  #margin-call-screen img {
+    max-width: min(480px, 90vw); max-height: 55vh; border-radius: 8px;
+    border: 1px solid var(--border); box-shadow: 0 8px 32px rgba(0,0,0,0.7);
+  }
+  #margin-call-screen h2 {
+    color: #ee3300; font-size: 1.6rem; letter-spacing: 0.04em; text-transform: uppercase;
+  }
+  #margin-call-screen p { color: var(--fg); font-size: 0.85rem; max-width: 460px; }
+  #margin-call-screen button {
+    border: none; border-radius: 4px; padding: 8px 16px; font-size: 0.8rem;
+    font-weight: 700; cursor: pointer; color: #fff; background: #007730; margin-top: 8px;
+  }
+  #paper-panel th:first-child, #paper-panel td:first-child { text-align: left; }
+  .pnl-up   { color: #00cc55; }
+  .pnl-down { color: #ee3300; }
+  .paper-btn {
+    background: #1c2128;
+    border: 1px solid var(--border);
+    color: var(--fg);
+    border-radius: 4px;
+    padding: 2px 7px;
+    cursor: pointer;
+    font-size: 0.64rem;
+  }
+  #paper-actions { margin-left: auto; display: flex; gap: 4px; }
+  select.paper-btn { text-transform: none; letter-spacing: 0; font-weight: 600; color: var(--bright); }
+  #paper-log { margin-top: 6px; color: var(--dim); font-size: 0.66rem; }
+  #paper-log summary { cursor: pointer; }
+  #paper-log-body { margin-top: 4px; line-height: 1.7; max-height: 180px; overflow-y: auto; }
+
+  /* ── footer ──────────────────────────────────────────────────────────── */
+  #footer {
+    font-size: 0.68rem;
+    color: var(--dim);
+    margin-top: 1rem;
+    line-height: 1.8;
+  }
+  #footer a { color: #58a6ff; text-decoration: none; }
+
+  /* ── tabs ────────────────────────────────────────────────────────────── */
+  #tab-bar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 0.9rem;
+  }
+  .tab-btn {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--dim);
+    border-radius: 6px;
+    padding: 5px 14px;
+    font-size: 0.78rem;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .analysis-link {
+    display: inline-flex;
+    align-items: center;
+    padding: 5px 14px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: #58a6ff;
+    font-size: 0.78rem;
+    font-weight: 600;
+    text-decoration: none;
+  }
+  .analysis-link:hover { background: var(--panel); }
+  .analysis-link:focus-visible { outline: 2px solid #58a6ff; outline-offset: 2px; }
+  .tab-btn.active { color: var(--bright); border-color: #58a6ff; }
+  #live-panel.hidden, #history-panel.hidden, #bots-panel.hidden, #squeeze-panel.hidden { display: none; }
+
+  /* ── short-squeeze scanner panel (OA-191) ────────────────────────────── */
+  #squeeze-header {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 0.7rem;
+  }
+  #squeeze-title { font-weight: 600; color: var(--bright); }
+  #squeeze-status { color: var(--dim); font-size: 0.76rem; }
+  #squeeze-status[data-state="stale"], #squeeze-status[data-state="fallback"] { opacity: 0.72; }
+  #squeeze-warning {
+    background: #2d1f0a;
+    border: 1px solid #d49a00;
+    color: #ffcc66;
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-size: 0.76rem;
+    margin-bottom: 0.7rem;
+  }
+  #squeeze-warning.hidden { display: none; }
+  #squeeze-hint { color: var(--dim); font-size: 0.74rem; margin-bottom: 0.9rem; }
+  #squeeze-table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+  #squeeze-table th {
+    text-align: right;
+    color: var(--dim);
+    font-weight: 500;
+    padding: 4px 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  #squeeze-table th:first-child, #squeeze-table td:first-child { text-align: left; }
+  #squeeze-table td { text-align: right; padding: 5px 8px; border-bottom: 1px solid var(--border); }
+  #squeeze-table td a { color: #58a6ff; text-decoration: none; }
+  #squeeze-table td a:hover { text-decoration: underline; }
+  .squeeze-empty { color: var(--dim); text-align: center !important; padding: 16px 0; }
+  .squeeze-first-seen { color: var(--dim); font-size: 0.72rem; }
+  .squeeze-new-badge {
+    background: #167a3f;
+    color: #fff;
+    font-size: 0.66rem;
+    font-weight: 600;
+    padding: 1px 6px;
+    border-radius: 4px;
+    margin-right: 4px;
+  }
+
+  /* ── automated (bot) panel ───────────────────────────────────────────── */
+  #bots-header {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 0.7rem;
+  }
+  #bots-title { font-weight: 600; color: var(--bright); }
+  #bots-status { color: var(--dim); font-size: 0.76rem; }
+  #bots-hint { color: var(--dim); font-size: 0.74rem; margin-bottom: 0.9rem; }
+  #bots-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 10px;
+  }
+  .bot-card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+  }
+  .bot-card.leader { border-color: #007730; }
+  .bot-card h4 {
+    margin: 0 0 2px;
+    font-size: 0.9rem;
+    color: var(--bright);
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 8px;
+  }
+  .bot-user { font-size: 0.7rem; color: var(--dim); font-weight: 400; }
+  .bot-strategy {
+    font-size: 0.68rem;
+    color: var(--dim);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  #bots-by-strategy {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 0.9rem;
+  }
+  .strat-tile {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-size: 0.72rem;
+  }
+  .strat-tile .strat-name {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: var(--fg);
+  }
+  .strat-tile .strat-meta { color: var(--dim); }
+  .bot-equity { font-size: 1.15rem; font-weight: 600; margin: 6px 0 2px; }
+  .bot-pnl.up   { color: #00cc55; }
+  .bot-pnl.down { color: #ee3300; }
+  .bot-pnl.flat { color: var(--dim); }
+  .bot-meta { font-size: 0.72rem; color: var(--dim); margin-top: 4px; }
+  .bot-last-trade { font-size: 0.8rem; line-height: 1.5; color: var(--fg); }
+  .bot-card table { width: 100%; min-width: 0; margin-top: 8px; font-size: 0.72rem; }
+  .bot-card th { color: var(--dim); font-weight: 500; text-align: right; }
+  .bot-card th:first-child, .bot-card td:first-child { text-align: left; }
+  .bot-card td { text-align: right; }
+  .bot-nopos { color: var(--dim); font-size: 0.72rem; margin-top: 8px; }
+  .bot-unmarked { color: #d49a00; }
+
+  /* ── historical panel ────────────────────────────────────────────────── */
+  #hist-header {
+    display: flex;
+    align-items: center;
+    gap: 0.9rem;
+    flex-wrap: wrap;
+    margin-bottom: 0.75rem;
+  }
+  #hist-title { font-size: 1.05rem; font-weight: 700; color: var(--bright); }
+  #hist-date {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--fg);
+    border-radius: 4px;
+    padding: 4px 8px;
+    font-size: 0.76rem;
+  }
+  #hist-price { font-size: 1.3rem; font-weight: 700; color: var(--bright); }
+  #hist-tier-badge {
+    font-size: 0.72rem; font-weight: 600;
+    padding: 2px 8px; border-radius: 4px;
+    background: #1c2128; border: 1px solid var(--border);
+  }
+  #hist-status { font-size: 0.76rem; color: var(--dim); }
+  #hist-no-data {
+    padding: 3rem;
+    text-align: center;
+    color: var(--dim);
+    font-size: 0.9rem;
+  }
+  #hist-no-data.hidden { display: none; }
+  #hist-body { display: flex; align-items: flex-start; gap: 1rem; flex-wrap: wrap; }
+  #hist-heatmap-wrap { overflow-x: auto; margin-bottom: 1rem; }
+  #hist-heatmap-wrap.hidden, #hist-sidebar.hidden { display: none; }
+
+  /* ── historical sidebar widgets ──────────────────────────────────────── */
+  #hist-sidebar {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    width: 260px;
+    flex-shrink: 0;
+  }
+  .hist-widget {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 10px;
+    font-size: 0.72rem;
+    /* A touch-and-hold anywhere on one of these cards (title, canvas,
+       labels, the Similar Sessions list) is easy to do since the canvas is
+       meant for touch-scrubbing — shouldn't kick off text selection or
+       iOS's copy/lookup callout instead of the intended tooltip
+       interaction, so the whole card opts out, not just the title. */
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-touch-callout: none;
+  }
+  .hist-widget h4 {
+    font-size: 0.68rem;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--dim);
+    margin-bottom: 6px;
+  }
+  .hist-widget canvas { display: block; width: 100%; touch-action: none; }
+  .canvas-tooltip {
+    position: absolute;
+    z-index: 70;
+    display: none;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 5px 8px;
+    font-size: 0.68rem;
+    line-height: 1.45;
+    color: var(--fg);
+    box-shadow: 0 4px 16px rgba(0,0,0,0.6);
+    pointer-events: none;
+    white-space: nowrap;
+  }
+  .canvas-tooltip .tt-title { color: var(--dim); font-size: 0.64rem; margin-bottom: 2px; }
+  .hist-widget .widget-empty { color: var(--dim); font-size: 0.7rem; padding: 1.5rem 0; text-align: center; }
+  #similar-list { display: flex; flex-direction: column; gap: 4px; }
+  .similar-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 6px;
+    padding: 3px 4px;
+    border-radius: 3px;
+    cursor: default;
+  }
+  .similar-row:hover { background: #1c2128; }
+  .similar-date { color: var(--fg); }
+  .similar-score { color: var(--dim); }
+  .similar-move.up { color: #00cc55; }
+  .similar-move.down { color: #ee3300; }
+  #similar-popup {
+    position: absolute;
+    z-index: 60;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 8px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.6);
+  }
+  #similar-popup canvas { display: block; }
+
+  /* ── touch targets ───────────────────────────────────────────────────────
+     Scoped to coarse pointers (touch) only — desktop/mouse density is
+     unaffected. Bumps tap areas toward the ~44px baseline and raises form
+     control font-size to 16px, since iOS Safari auto-zooms the page on
+     focusing any input/select rendered below that size. */
+  @media (pointer: coarse) {
+    .tab-btn, .analysis-link {
+      min-height: 44px;
+      padding: 8px 16px;
+      font-size: 0.85rem;
+    }
+    #hist-date {
+      min-height: 44px;
+      padding: 8px 10px;
+      font-size: 1rem;
+    }
+    td.tradable { height: 44px; }
+    #trade-ticket input {
+      min-height: 40px;
+      width: 56px;
+      font-size: 1rem;
+    }
+    #trade-ticket button {
+      min-height: 40px;
+      padding: 6px 12px;
+      font-size: 0.8rem;
+    }
+    .paper-btn {
+      min-height: 36px;
+      padding: 5px 10px;
+      font-size: 0.72rem;
+    }
+    select.paper-btn { font-size: 1rem; }
+  }
+</style>
+</head>
+<body>
+
+<div id="tab-bar">
+  <button id="tab-live" class="tab-btn active">Live</button>
+  <button id="tab-history" class="tab-btn">Historical</button>
+  <button id="tab-bots" class="tab-btn">Automated</button>
+  <button id="tab-squeeze" class="tab-btn">Squeeze</button>
+  <a id="directional-analysis-link" class="analysis-link"
+     href="https://directional-analysis-production.up.railway.app/"
+     target="_blank" rel="noopener noreferrer"
+     aria-label="Move analysis: historical research workbench; opens in a new tab"
+     title="Historical research workbench. Opens the analysis app in a new tab.">Move analysis ↗</a>
+</div>
+
+<div id="live-panel">
+
+<div id="header">
+  <select id="underlying-select" aria-label="Options chain underlying">
+    <option value="QQQ">QQQ</option>
+    <option value="SPY">SPY</option>
+  </select>
+  <span id="title">QQQ 0DTE Live OI</span>
+  <span id="price">—</span>
+  <span id="tier-badge" style="display:none"></span>
+  <span id="vwap-rvol" class="vwap-rvol"></span>
+  <span id="momentum" class="momentum"></span>
+  <span id="chain-note" class="chain-note"></span>
+</div>
+
+<div id="status-bar">
+  <span id="status-dot"></span>
+  <span id="status-text">Loading…</span>
+  <span id="quote-health" class="transport-health idle">Options: waiting</span>
+  <span id="ticker-health" class="transport-health idle">Tickers: waiting</span>
+  <span id="spy-health" class="transport-health idle">SPY: waiting</span>
+</div>
+
+<div id="cal-error">Calibration data (OIranges.csv) failed to load — heatmap colors are unreliable. OI level 5 (wall) may be shown for all nonzero cells.</div>
+
+<div id="price-strip">
+  <div class="price-group" id="px-main">
+    <!-- QQQ USO VIX OVX SMH IGV — large -->
+  </div>
+  <div class="price-group" id="px-secondary">
+    <!-- BTC/USD META GOOGL AMZN TSLA — small -->
+  </div>
+</div>
+
+<!-- EIA STEO crude calibration + OVX regime, see collector.py's macro/eia_steo.json
+     (optional feed -- gated on EIA_API_KEY; panel just never appears if it's absent). -->
+<div id="steo-panel" class="hidden">
+  <span><span class="steo-label">EIA STEO</span><span class="steo-value" id="steo-release">—</span></span>
+  <span><span class="steo-label">Forecast</span><span class="steo-value" id="steo-period">—</span></span>
+  <span><span class="steo-label">Brent fcst</span><span class="steo-value" id="steo-brent">—</span><span class="steo-delta" id="steo-brent-delta"></span></span>
+  <span><span class="steo-label">WTI fcst</span><span class="steo-value" id="steo-wti">—</span><span class="steo-delta" id="steo-wti-delta"></span></span>
+  <span><span class="steo-label">World balance</span><span class="steo-value" id="steo-balance">—</span><span class="steo-delta" id="steo-balance-delta"></span></span>
+  <span><span class="steo-label">OVX</span><span class="steo-value" id="steo-ovx">—</span><span class="ovx-regime" id="steo-ovx-regime">—</span></span>
+</div>
+
+<div id="no-data">No live data yet. The collector starts each session day and uploads the first snapshot ~11 minutes after pre-market opens.</div>
+
+<div id="heatmap-wrap" class="hidden">
+  <table id="heatmap">
+    <thead>
+      <tr>
+        <th style="text-align:right">Calls</th>
+        <th>Strike</th>
+        <th style="text-align:left">Puts</th>
+      </tr>
+    </thead>
+    <tbody id="heatmap-body"></tbody>
+  </table>
+</div>
+
+<div id="auth-panel" class="hidden">
+  <h3 id="auth-heading">Log In</h3>
+  <div id="auth-error"></div>
+  <form id="auth-form">
+    <input type="text" id="auth-username" placeholder="Username" autocomplete="username" maxlength="20" required>
+    <input type="password" id="auth-password" placeholder="Password" autocomplete="current-password" maxlength="256" required>
+    <div id="auth-warning" class="hidden">There is no password recovery. If you lose your password, this account and its $10,000 balance are gone for good — write it down somewhere safe.</div>
+    <button type="submit" id="auth-submit">Log In</button>
+    <button type="button" id="auth-toggle">Need an account? Register</button>
+  </form>
+</div>
+
+<div id="paper-panel" class="hidden">
+  <h3>Paper Trading
+    <span id="paper-summary"></span>
+    <span id="paper-actions">
+      <span id="user-bar"><span id="user-name"></span><button id="auth-logout" class="paper-btn">log out</button></span>
+    </span>
+  </h3>
+  <div id="paper-hint">Click an option cell or listed equity tile to buy/sell. Options use ×100; shares use ×1. Balance persists across devices.</div>
+  <div id="paper-order-status" role="status" aria-live="polite"></div>
+  <div id="paper-positions"></div>
+  <details id="paper-log">
+    <summary>Trade log</summary>
+    <div id="paper-log-body"></div>
+  </details>
+</div>
+
+</div> <!-- /live-panel -->
+
+<div id="margin-call-screen" class="hidden">
+  <img src="margin-call.png" alt="Margin call">
+  <h2>Margin Call</h2>
+  <p id="margin-call-reason"></p>
+  <button id="margin-call-continue">Back to login</button>
+</div>
+
+<div id="history-panel" class="hidden">
+
+  <div id="hist-header">
+    <span id="hist-title">Historical OI</span>
+    <select id="hist-date"></select>
+    <span id="hist-price">—</span>
+    <span id="hist-tier-badge" style="display:none"></span>
+    <span id="hist-status">Loading archive…</span>
+  </div>
+
+  <div id="hist-no-data">Loading historical archive…</div>
+
+  <div id="hist-body">
+    <div id="hist-sidebar">
+      <div class="hist-widget">
+        <h4>Top 5 Open Interest</h4>
+        <canvas id="widget-top5" width="240" height="110"></canvas>
+      </div>
+      <div class="hist-widget">
+        <h4>Intraday <span id="widget-intraday-label" style="text-transform:none;font-weight:400;"></span></h4>
+        <canvas id="widget-intraday" width="240" height="90"></canvas>
+      </div>
+      <div class="hist-widget">
+        <h4>Daily</h4>
+        <canvas id="widget-daily" width="240" height="90"></canvas>
+      </div>
+      <div class="hist-widget">
+        <h4>Similar Sessions</h4>
+        <div id="similar-list"></div>
+      </div>
+    </div>
+
+    <div id="hist-heatmap-wrap" class="hidden">
+      <table id="hist-heatmap">
+        <thead>
+          <tr>
+            <th style="text-align:right">Calls</th>
+            <th>Strike</th>
+            <th style="text-align:left">Puts</th>
+          </tr>
+        </thead>
+        <tbody id="hist-heatmap-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+</div> <!-- /history-panel -->
+
+<div id="bots-panel" class="hidden">
+
+  <div id="bots-header">
+    <span id="bots-title">Automated Accounts</span>
+    <span id="bots-status">—</span>
+  </div>
+  <div id="bots-hint">
+    Crassus / Golden Goose paper-trading bots. Equity = cash + open positions marked at
+    the live mid. Positions are marked against the same quotes the Live tab polls, so a
+    bot's mark here matches what you'd see clicking the same contract.
+  </div>
+  <div id="bots-by-strategy"></div>
+  <div id="bots-grid"></div>
+
+</div> <!-- /bots-panel -->
+
+<div id="squeeze-panel" class="hidden">
+
+  <div id="squeeze-header">
+    <span id="squeeze-title">Ranked Candidates</span>
+    <span id="squeeze-status" data-state="fallback">—</span>
+  </div>
+  <div id="squeeze-warning" class="hidden"></div>
+  <div id="squeeze-hint">
+    Experimental short-squeeze scanner (<a href="https://linear.app/objecta/issue/OA-191" target="_blank" rel="noopener">OA-191</a>),
+    an independently maintained producer (<a href="https://github.com/OwenTanzer/short-squeeze-scanner" target="_blank" rel="noopener">source</a>) --
+    this page only displays what it publishes. Scores are experimental screening
+    measures, not calibrated squeeze probabilities. Updates at 9 a.m. and noon New York time on exchange session days; 20-candidate pilot. Historical outcomes and research
+    comparisons are archived separately and not shown here.
+  </div>
+  <table id="squeeze-table">
+    <thead>
+      <tr>
+        <th>Ticker</th>
+        <th>Price at scan</th>
+        <th>Factor score</th>
+        <th>Options score</th>
+        <th>Combined score</th>
+        <th>First seen (ET)</th>
+      </tr>
+    </thead>
+    <tbody id="squeeze-tbody"></tbody>
+  </table>
+
+</div> <!-- /squeeze-panel -->
+
+<div id="footer">
+  OI color = calibrated historical percentile. Cell: OI · top-right = total vol · bottom-right = contracts last 60s (amber=20+, orange=100+, white=500+).<br>
+  Data: tastytrade / DXLink. Snapshots every 60s. ±20 strikes from ATM shown. <a href="/">← Download desktop app</a>
+</div>
+
+<script src="shared.js?v=050c96a265673ac3"></script>
+<script src="shared/csv-ranges.js?v=2037c69afbe5d94b"></script>
+<script src="shared/heatmap.js?v=c4a883a5bc99b558"></script>
+<script src="shared/quotes.js?v=8eefeac90dfd88bf"></script>
+<script src="shared/format.js?v=132e6deb03cda939"></script>
+<script src="shared/chain.js?v=cb4a1bb1bb828c64"></script>
+<script>
+// ── stale-page protection ──────────────────────────────────────────────────────
+// Cache-Control: no-store (set by the Worker) stops new responses from being
+// cached, but it can't evict a copy a device already cached before that header
+// existed, and it does nothing for iOS Safari's back-forward cache (bfcache),
+// which can restore a frozen page snapshot with zero network request. Both show
+// up as "stuck on an old version" on mobile, so this page self-heals instead of
+// relying on the user finding a hard-refresh. BUILD_ID is stamped by the deploy
+// workflow (sed-replaced from the literal placeholder below); left as the
+// placeholder in local/dev checkouts, where it harmlessly never mismatches.
+const BUILD_ID = "__BUILD_ID__";
+
+function checkForNewBuild() {
+  fetch(`${location.pathname}?_=${Date.now()}`, { cache: 'no-store' })
+    .then(r => r.text())
+    .then(html => {
+      const m = html.match(/const BUILD_ID = "([^"]+)"/);
+      if (m && m[1] !== BUILD_ID) location.reload();
+    })
+    .catch(() => {});
+}
+
+// Safari (and other browsers) can restore a page from bfcache instead of loading
+// it fresh — event.persisted is true only on that restore path, never on a normal
+// first load, so this can't cause a reload loop.
+window.addEventListener('pageshow', (e) => {
+  if (e.persisted) location.reload();
+});
+document.addEventListener('visibilitychange', () => {
+  if (liveQuotePoller) liveQuotePoller.kick();
+  if (tickerPoller) tickerPoller.kick();
+  if (document.visibilityState !== 'visible') return;
+  checkForNewBuild();
+  // Mobile browsers throttle/suspend setInterval timers while a tab is
+  // backgrounded, and the network interface is frequently mid-reconnect right
+  // when a tab regains focus — that combination is the classic cause of a
+  // single "Load failed" appearing to hang around for up to a minute after
+  // unlocking the phone, even though the data itself was never actually
+  // broken. Refetch immediately on regaining visibility instead of waiting
+  // for whatever's left of the next 60/10/15s cycle.
+  fetchLatest();
+  fetchPrices();
+  if (!ranges) loadRanges();
+});
+setInterval(checkForNewBuild, 5 * 60 * 1000);
+
+const R2 = "https://pub-4d5c916b8cb74ffb8c0abd7dfadb02cf.r2.dev";
+// Only the production website uses the bounded same-origin route.
+const BROWSER_DATA = location.origin === 'https://live-options-view.otmooper12.workers.dev'
+  ? '/browser-data' : R2;
+const REFRESH  = 60;  // seconds between data refreshes
+let liveQuotePoller = null;
+
+let ranges = null;    // OIranges parsed: { tier: { offset: { call:[p25,p50,p75,p90], put:[...] } } }
+let lastTs  = null;
+let countdown = REFRESH;
+let timerHandle = null;
+
+// ── OIranges loader ───────────────────────────────────────────────────────────
+// Moved to js/oi-ranges-loader.js (B2) — loaded below in the same position,
+// so the page's script order is unchanged. No test slices up to this banner;
+// it stays here as the section's marker.
+</script>
+<script src="js/oi-ranges-loader.js?v=a5bf07b374d77fb2"></script>
+<script>
+
+// ── render heatmap (live panel) ─────────────────────────────────────────────────
+// Moved to js/render-heatmap.js (B2) — loaded below in the same position,
+// so the page's script order is unchanged. No test slices up to this banner;
+// it stays here as the section's marker.
+</script>
+<script src="js/render-heatmap.js?v=97e7d3a7dfb9b53f"></script>
+<script>
+
+// ── paper trading ─────────────────────────────────────────────────────────────
+// Moved to js/paper-trading.js (B2) — loaded below in the same position,
+// so the page's script order is unchanged. The banner stays here as
+// the section's marker.
+</script>
+<script src="js/paper-trading.js?v=c4b77cd16efe880e"></script>
+<script>
+
+// ── auth ───────────────────────────────────────────────────────────────────────
+// Moved to js/auth.js (B2) — loaded below in the same position,
+// so the page's script order is unchanged. The banner stays here as
+// the section's marker.
+</script>
+<script src="js/auth.js?v=602f112254101ca9"></script>
+<script>
+
+// ── trade ticket popover ──────────────────────────────────────────────────────
+// Moved to js/trade-ticket.js (B2) — loaded below in the same position,
+// so the page's script order is unchanged. The banner stays here as
+// the section's marker.
+</script>
+<script src="js/trade-ticket.js?v=2b37b3770bf70527"></script>
+<script>
+
+// ── data fetch cycle ──────────────────────────────────────────────────────────
+// Moved to js/data-fetch-cycle.js (B2) — loaded below in the same position,
+// so the page's script order is unchanged. The chain_underlying test now
+// loads the module instead of slicing up to the countdown banner; the banner
+// stays here as the section's marker.
+</script>
+<script src="js/data-fetch-cycle.js?v=cd8743d8e85b8594"></script>
+<script>
+
+// ── countdown timer ───────────────────────────────────────────────────────────
+// Moved to js/countdown-timer.js (B2) — loaded below in the same position,
+// so the page's script order is unchanged. The countdown_timer test asserts
+// the banner stays here as the section's marker.
+</script>
+<script src="js/countdown-timer.js?v=a8000ee27c92f681"></script>
+<script>
+
+// ── price strip ───────────────────────────────────────────────────────────────
+// Moved to js/price-strip.js (B2) — loaded below in the same position,
+// so the page's script order is unchanged. The price-strip test loads the
+// module instead of slicing fetchPrices out of the page; the banner stays
+// here as the section's marker.
+</script>
+<script src="js/price-strip.js?v=9a6cab8c6585f356"></script>
+<script>
+
+// EIA STEO crude calibration + OVX regime — moved to js/steo-fetch.js (B2),
+// loaded below in the same position, so the page's script order is unchanged.
+// The steo tests load the module instead of slicing fetchSteoCalibration out
+// of the page.
+</script>
+<script src="js/steo-fetch.js?v=6674489d914aef7f"></script>
+<script>
+
+
+// ── short-squeeze scanner panel (OA-191) ────────────────────────────────────
+// Moved to js/squeeze-panel.js (B2) — loaded below in the same position,
+// so the page's script order is unchanged. The banner stays here as
+// the section's marker.
+</script>
+<script src="js/squeeze-panel.js?v=29307f6a6d2645a7"></script>
+<script>
+
+// ── tab switching ────────────────────────────────────────────────────────────
+// Moved to js/tab-switching.js (B2) — loaded below in the same position,
+// so the page's script order is unchanged. The banner stays here as
+// the section's marker.
+</script>
+<script src="js/tab-switching.js?v=eb4da7c54f71b804"></script>
+<script>
+
+// ── automated (bot) panel ────────────────────────────────────────────────────
+// Moved to js/bots-panel.js (B2) — loaded below in the same position,
+// so the page's script order is unchanged. The banner stays here as
+// the section's marker.
+</script>
+<script src="js/bots-panel.js?v=9172729f772c2119"></script>
+<script>
+
+// ── historical panel ─────────────────────────────────────────────────────────
+// Moved to js/historical-panel.js (B2) — loaded below in the same position,
+// so the page's script order is unchanged. The banner stays here as
+// the section's marker.
+</script>
+<script src="js/historical-panel.js?v=f8fd93e0e91f24f5"></script>
+<script>
+
+// ── sidebar widgets: Top 5 OI, Intraday, Daily context, Similar Sessions ──────
+// Moved to js/sidebar-widgets.js (B2) — loaded below in the same position,
+// so the page's script order is unchanged. The banner stays here as
+// the section's marker.
+</script>
+<script src="js/sidebar-widgets.js?v=a7f0cf0ff6fb7e0b"></script>
+<script>
+
+// ── canvas hover/touch tooltip ────────────────────────────────────────────────
+// Moved to js/canvas-tooltip.js (B2) — loaded below in the same position,
+// so the page's script order is unchanged. The banner stays here as
+// the section's marker.
+</script>
+<script src="js/canvas-tooltip.js?v=fa2037051ac9de8d"></script>
+<script>
+
+// ── boot ──────────────────────────────────────────────────────────────────────
+// Moved to js/boot.js (B2) — loaded below in the same position,
+// so the page's script order is unchanged. The banner stays here as
+// the section's marker.
+</script>
+<script src="js/boot.js?v=4c9a1bd5ea8e6341"></script>
+</body>
+</html>

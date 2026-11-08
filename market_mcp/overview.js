@@ -10,7 +10,7 @@
 // fills and last-known values are never presented as live observations, and
 // a percent change is never synthesized where the producer gave none.
 const { DataError } = require('./source');
-const calendar = require('../docs/squeeze-calendar.json');
+const calendar = require('../site/squeeze-calendar.json');
 
 const KEY = 'intraday/prices.json';
 const ASSET_CLASSES = ['equity', 'etf', 'index', 'rates', 'fx', 'crypto', 'commodity'];

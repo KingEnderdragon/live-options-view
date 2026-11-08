@@ -1,16 +1,21 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const shared = require('../docs/shared.js');
-const html = fs.readFileSync(path.join(__dirname, '../docs/index.html'), 'utf8');
-const sharedHash = require('node:crypto').createHash('sha256').update(fs.readFileSync(path.join(__dirname, '../docs/shared.js'))).digest('hex').slice(0, 16);
+const shared = require('../site/shared.js');
+const html = fs.readFileSync(path.join(__dirname, '../site/index.html'), 'utf8');
+const sharedHash = require('node:crypto').createHash('sha256').update(fs.readFileSync(path.join(__dirname, '../site/shared.js'))).digest('hex').slice(0, 16);
 assert.ok(html.includes('shared.js?v=' + sharedHash), 'shared script URL must match its content hash on every hosting path');
-const start = html.indexOf('// ── short-squeeze scanner panel (OA-191)');
-const end = html.indexOf('// ── tab switching', start);
-assert.ok(start >= 0 && end > start);
+// B2 (readability quest): the panel code moved out of index.html into
+// site/js/squeeze-panel.js, loaded in the same position. The test loads the
+// shipped module instead of slicing the page by banner text, and pins the
+// ?v= hash in the page to the module's content, like shared.js above.
+const panelSource = fs.readFileSync(path.join(__dirname, '../site/js/squeeze-panel.js'), 'utf8');
+const panelHash = require('node:crypto').createHash('sha256').update(panelSource).digest('hex').slice(0, 16);
+assert.ok(html.includes('js/squeeze-panel.js?v=' + panelHash), 'squeeze-panel script URL must match its content hash on every hosting path');
+assert.ok(!html.includes('function fetchSqueezeLatest'), 'fetchSqueezeLatest must live in js/squeeze-panel.js, not inline in index.html');
 const elements = {};
 const el = id => elements[id] ||= { textContent: '', innerHTML: '', dataset: {}, classList: { toggle() {} } };
-const calendar = require('../docs/squeeze-calendar.json');
+const calendar = require('../site/squeeze-calendar.json');
 let responses = {}, calls = [];
 const response = value => ({ ok: true, status: 200, json: async () => value });
 const scope = { ...shared, document: { getElementById: el }, R2: '/r2-proxy', BROWSER_DATA: '/browser-data',
@@ -23,7 +28,7 @@ const scope = { ...shared, document: { getElementById: el }, R2: '/r2-proxy', BR
     return typeof value === 'function' ? value() : value;
   },
 };
-const panel = new Function(...Object.keys(scope), html.slice(start, end) + `
+const panel = new Function(...Object.keys(scope), panelSource + `
   let clock = Date.parse('2026-09-23T13:05:00Z');
   function squeezeNow() { return clock; }
   return { fetchSqueezeLatest, set now(v) { clock = Date.parse(v); },

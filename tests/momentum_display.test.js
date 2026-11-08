@@ -1,10 +1,10 @@
-// Proves formatMomentum() (docs/shared.js) -- the pure formatting/state
+// Proves formatMomentum() (site/shared.js) -- the pure formatting/state
 // function both the options-chain header and the QQQ price-strip tile call
-// (see docs/index.html's renderHeatmap/updateQqqMomentumLine). Mirrors
+// (see site/index.html's renderHeatmap/updateQqqMomentumLine). Mirrors
 // tests/vwap_rvol_display.test.js's structure and rationale: pure, DOM-free
 // function, testable the simple direct-require way.
 const assert = require('node:assert/strict');
-const { formatMomentum } = require('../docs/shared.js');
+const { formatMomentum } = require('../site/shared.js');
 
 const NOW = Date.parse('2026-07-30T14:32:00Z');
 

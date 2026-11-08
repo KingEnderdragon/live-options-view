@@ -1,8 +1,60 @@
+// B3 slice 3 (Nov 2026): the live-quote transport + ticker state
+// (TRADEABLE_SHARE_SYMBOLS / isTradeableShareSymbol / LiveQuoteService /
+// tickerSessionState / SHARE_QUOTE_MAX_AGE_MS / freshShareQuote /
+// TickerStateStore / sameSet / LiveQuotePoller / parseRetryAfter) moved
+// verbatim out of site/shared.js into site/shared/quotes.js. Pins the
+// module's ?v= hash in the page, asserts the ten names no longer live in
+// shared.js, pins the entry's export surface (the eight names that were
+// always among the 26 are still re-exported — the same function objects —
+// while TRADEABLE_SHARE_SYMBOLS and sameSet stay browser globals by design),
+// and drives the moved code directly.
 const assert = require('node:assert/strict');
+const { createHash } = require('node:crypto');
+const fs = require('node:fs');
+const path = require('node:path');
+
+const html = fs.readFileSync(path.join(__dirname, '..', 'site', 'index.html'), 'utf8');
+const shared = fs.readFileSync(path.join(__dirname, '..', 'site', 'shared.js'), 'utf8');
+const moduleSource = fs.readFileSync(path.join(__dirname, '..', 'site', 'shared', 'quotes.js'), 'utf8');
+const quotes = require('../site/shared/quotes.js');
+const entry = require('../site/shared.js');
+
+const moduleHash = createHash('sha256').update(moduleSource).digest('hex').slice(0, 16);
+assert.ok(html.includes('shared/quotes.js?v=' + moduleHash),
+  'quotes script URL must match its content hash on every hosting path');
+
+for (const name of ['LiveQuoteService', 'LiveQuotePoller', 'TickerStateStore', 'tickerSessionState', 'parseRetryAfter', 'freshShareQuote']) {
+  assert.ok(!shared.includes(`function ${name}(`) && !shared.includes(`class ${name} `), `${name} must no longer live in shared.js`);
+  assert.equal(typeof quotes[name], 'function', `quotes.js must export ${name}`);
+}
+for (const decl of ['const TRADEABLE_SHARE_SYMBOLS = new Set([', 'const SHARE_QUOTE_MAX_AGE_MS = 15_000;', 'function sameSet(', 'function isTradeableShareSymbol(']) {
+  assert.ok(!shared.includes(decl), `${decl} must no longer live in shared.js`);
+}
+
+// The entry's export list is the behavior evidence for the split: exactly the
+// same 26 names shared.js exported before B3 slice 3, with the eight
+// live-quote names re-exported from the new home — the same function objects,
+// not copies — and TRADEABLE_SHARE_SYMBOLS / sameSet still browser-only.
+assert.deepEqual(Object.keys(entry).sort(), [
+  'CHAIN_UNDERLYINGS', 'ChainSelection', 'LiveQuotePoller', 'LiveQuoteService',
+  'SHARE_QUOTE_MAX_AGE_MS', 'TickerStateStore', 'chainLatestPath',
+  'computeAtmWindow', 'describeSqueezeAcquisitionFailure', 'findRevision',
+  'fmtSteoDelta', 'formatMomentum', 'formatSqueezeScanStatus',
+  'formatSqueezeScheduleStatus', 'formatSqueezeFirstSeen', 'formatVwapRvol',
+  'freshShareQuote', 'isTradeableShareSymbol', 'normalizePaperOrder',
+  'normalizeShareOrder', 'occRoot', 'parseRetryAfter', 'relativeOiRanges',
+  'summarizeSpyHealth', 'tickerSessionState', 'validateChainPayload',
+].sort());
+for (const name of ['LiveQuoteService', 'LiveQuotePoller', 'TickerStateStore', 'tickerSessionState', 'SHARE_QUOTE_MAX_AGE_MS', 'freshShareQuote', 'parseRetryAfter', 'isTradeableShareSymbol']) {
+  assert.equal(entry[name], quotes[name], `the entry must re-export the same ${name}`);
+}
+assert.equal(quotes.TRADEABLE_SHARE_SYMBOLS.has('QQQ'), true, 'QQQ is a tradeable share symbol');
+assert.equal(quotes.isTradeableShareSymbol('SPY'), false, 'SPY is display-only, not a tradeable share');
+
 const {
   LiveQuoteService, LiveQuotePoller, TickerStateStore, tickerSessionState, parseRetryAfter,
   SHARE_QUOTE_MAX_AGE_MS, freshShareQuote,
-} = require('../docs/shared.js');
+} = quotes;
 
 const service = new LiveQuoteService();
 let notifications = 0;

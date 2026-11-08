@@ -1,21 +1,30 @@
-// Exercises the Automated tab's rendering logic from docs/index.html.
-//
-// The panel's code lives in index.html's inline script, so it's extracted by
-// its section markers and evaluated against a minimal DOM/quote shim. That
-// keeps the test honest -- it runs the shipped source rather than a copy that
-// can drift -- at the cost of depending on those two comment banners staying
-// put. If this file starts failing with "could not locate", that's why.
+// B2 (readability quest): the bots panel moved out of index.html into
+// site/js/bots-panel.js, loaded in the same position. The test loads the
+// shipped module instead of slicing the page by banner text, pins the ?v=
+// hash in the page to the module's content (like shared.js), and drives the
+// module's functions with a minimal DOM/quote shim so equity, marks, leader
+// selection, the strategy rollup and the stale-mark rules are verified
+// without the network. (The roster fetch + polling wiring is covered by
+// tests/tab_switching.test.js with a stub setBotsPolling and by the assembly
+// check, which drives the real fetchBots against a stubbed /api/bots.)
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { createHash } = require('node:crypto');
 
-const html = fs.readFileSync(path.join(__dirname, '..', 'docs', 'index.html'), 'utf8');
-const START = '// ── automated (bot) panel';
-const END = '// ── historical panel';
-const from = html.indexOf(START);
-const to = html.indexOf(END, from);
-assert.ok(from !== -1 && to !== -1, 'could not locate the automated-panel section in docs/index.html');
-const source = html.slice(from, to);
+const html = fs.readFileSync(path.join(__dirname, '..', 'site', 'index.html'), 'utf8');
+const source = fs.readFileSync(path.join(__dirname, '..', 'site', 'js', 'bots-panel.js'), 'utf8');
+const moduleHash = createHash('sha256').update(source).digest('hex').slice(0, 16);
+assert.ok(html.includes('js/bots-panel.js?v=' + moduleHash), 'bots-panel script URL must match its content hash on every hosting path');
+for (const fn of ['fetchBots', 'renderBots', 'botEquity', 'botMark', 'renderStrategyRollup',
+  'setBotsPolling', 'botsStatusLine', 'formatBotLastTrade']) {
+  assert.ok(!html.includes(`function ${fn}(`), `${fn} must live in js/bots-panel.js, not inline in index.html`);
+}
+for (const name of ['const BOTS_POLL_MS', 'const BOT_MARK_MAX_AGE_MS']) {
+  assert.ok(!html.includes(name), `${name} must live in js/bots-panel.js, not inline in index.html`);
+}
+// The banner stays in index.html as the section's marker.
+assert.ok(html.includes('// ── automated (bot) panel'), 'bots panel banner must stay in index.html as the section marker');
 
 // ── DOM + collaborator shim ───────────────────────────────────────────────────
 const els = {};

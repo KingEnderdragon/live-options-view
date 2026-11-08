@@ -4,8 +4,9 @@ on:
   push:
     branches: [master]
     paths:
-      - "docs/**"
+      - "site/**"
       - "worker.js"
+      - "worker/**"
       - "wrangler.toml"
       - "scripts/stamp-build.mjs"
       - "tests/build_stamp.test.mjs"
