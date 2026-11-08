@@ -1,8 +1,8 @@
 # Shared market readings and snapshot lineage v1
 
 Issue #107, work item 3 and the bounded Crassus provenance part of item 4.
-Authority: [inventory](../../docs/plans/2026-09-market-reading-inventory.md) and
-[ownership decisions](../../docs/plans/2026-09-market-reading-ownership.md), merged as #108/#110.
+Authority: [inventory](../../site/plans/2026-09-market-reading-inventory.md) and
+[ownership decisions](../../site/plans/2026-09-market-reading-ownership.md), merged as #108/#110.
 This defines the future shared-reading envelope; this PR implements only the
 snapshot-lineage extension below. No shared-reading publisher is added.
 

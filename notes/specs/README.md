@@ -1,0 +1,13 @@
+# Internal product specifications
+
+These specifications are repository documentation, not served assets. Return to the [documentation homes](../README.md) for operations and public references. Source paths mentioned in the specification bodies are relative to the repository root.
+
+| Specification | Use it to understand | Boundary |
+|---|---|---|
+| [SPY collection](SPY_COLLECTION.md) | Parallel snapshot keys, symbol isolation, health and browser selection | No substitution of QQQ for missing SPY; current publication needs a live observation |
+| [Qualified ask-to-later-bid](OA203_QUALIFIED_ASK_BID_V1.md) | Endpoint eligibility and retrospective rankings | Qualified quotes do not establish fills or capacity |
+| [Active Big Banana lookup](OA203_ACTIVE_LOOKUP.md) | Cutoff-pinned daily-session products, bounds and November 8 activation policy | Earlier candidate proposals in its history are superseded where the policy says so |
+| [Multi-session windows](OA203_MULTI_SESSION_WINDOWS.md) | Contract continuity and weekly/overnight definitions | Daily active lookup is not evidence of deployed multi-session windows |
+| [Cross-market overview](CROSS_MARKET_OVERVIEW.md) | Current MCP strip consumer and broader proposed coverage | The proposed stock universe is not current subscriptions |
+
+The original root filenames remain small compatibility pointers; the full text has one maintained home here. Public plans stay under `site/plans/` with unchanged public paths, rather than being silently unpublished or duplicated into this directory.

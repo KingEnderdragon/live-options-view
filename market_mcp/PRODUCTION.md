@@ -20,7 +20,10 @@ record makes no merge-readiness decision for PR #119.
 
 The dedicated [Dockerfile](Dockerfile) uses Node 22, a non-root user and a 256 MB
 V8 old-space limit. Its explicit copies and Dockerfile-specific context allowlist
-include only six MCP runtime modules, `docs/shared.js` and the squeeze calendar.
+now include the seven runtime modules named in the [Dockerfile](Dockerfile),
+`site/shared.js`, `site/shared/` and `site/squeeze-calendar.json`. These are
+current packaging paths, updated after the browser helper split and site migration;
+the original runtime/deployment evidence below remains dated history.
 No scanner, Worker, Discord code, test signing keys, credentials or fixture
 artifacts enter the image. Build from the repository root:
 
