@@ -8,6 +8,8 @@ on:
     branches: [master]
     paths:
       - "collector.py"
+      - "collectors/**"
+      - "scanners/**"
       - "market_signals.py"
       - "market_overview.py"
       - "market_overview_universe.json"
@@ -49,6 +51,8 @@ on:
   pull_request:
     paths:
       - "collector.py"
+      - "collectors/**"
+      - "scanners/**"
       - "market_signals.py"
       - "market_overview.py"
       - "market_overview_universe.json"
