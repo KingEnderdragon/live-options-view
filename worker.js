@@ -5,7 +5,7 @@ import { handleBotIndexReconcile, handleBotMetadata, handleBots } from './worker
 import { handleLogin, handleLogout, handleMe, handleRegister } from './worker/auth.js';
 import { handlePaperTrade } from './worker/paper-trade.js';
 
-// Re-exported from worker/common.js so the Worker's public API (the 32
+// Re-exported from worker/common.js so the Worker's public API (the 31
 // exports pinned by tests/worker_logic.test.js) stays on worker.js.
 export { BOT_USERNAME_RE, STARTING_BALANCE, STRATEGY_ID_RE, computeBookFromTrades, parseCookies } from './worker/common.js';
 export { settleAllBots, settlementPriceServer, validateSettleRequest } from './worker/settlement.js';
