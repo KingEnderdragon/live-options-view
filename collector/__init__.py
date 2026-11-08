@@ -86,6 +86,8 @@ from .prices import *
 from .prices import __all__ as _prices_all
 from .steo import *
 from .steo import __all__ as _steo_all
+from .health import *
+from .health import __all__ as _health_all
 
 # --- temporary bridge (removed in the final B4 slice) -----------------------
 # Names not yet moved out of the flat file still live in root collector.py.
@@ -114,11 +116,11 @@ from .runner import *
 from .runner import __all__ as _runner_all
 
 __all__ = sorted(
-    set(_config_all) | set(_feed_all) | set(_oauth_all) | set(_tiers_all) | set(_chain_all) | set(_state_all) | set(_quotes_all) | set(_prices_all) | set(_steo_all) | set(_runner_all)
+    set(_config_all) | set(_feed_all) | set(_oauth_all) | set(_tiers_all) | set(_chain_all) | set(_state_all) | set(_quotes_all) | set(_prices_all) | set(_steo_all) | set(_health_all) | set(_runner_all)
     | {"cc", "ms"}
     | set(['BaseHTTPRequestHandler', 'Optional', 'ThreadingHTTPServer', 'boto3', 'date', 'datetime', 'io', 'json', 'logging', 'lru_cache', 'math', 'os', 'parse_qs', 'pd', 'pytz', 're', 'requests', 'secrets', 'sys', 'threading', 'time', 'timedelta', 'timezone', 'urlparse', 'websocket', 'yf'])
     | {name for name in vars(_legacy) if not name.startswith("__")}
 )
 
 # Bridge internals are not part of the collector surface.
-del _load_legacy, _legacy, _config_all, _feed_all, _oauth_all, _tiers_all, _chain_all, _state_all, _quotes_all, _prices_all, _steo_all, _runner_all, Path, importlib
+del _load_legacy, _legacy, _config_all, _feed_all, _oauth_all, _tiers_all, _chain_all, _state_all, _quotes_all, _prices_all, _steo_all, _health_all, _runner_all, Path, importlib

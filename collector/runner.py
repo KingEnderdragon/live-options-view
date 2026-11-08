@@ -37,6 +37,7 @@ from .oauth import OAuthTokenManager, TastyAuthError, tasty_auth
 from .tiers import classify_tier
 from .chain import load_chain
 from .steo import eia_steo_loop
+from .health import health_loop, push_health
 from .prices import (
     _classify_startup,
     _log_ticker_health,
@@ -60,8 +61,6 @@ from .state import (
     restore_state,
 )
 from ._legacy import (
-    health_loop,
-    push_health,
     take_snapshot,
     weekly_snapshot_loop,
 )
