@@ -1,11 +1,16 @@
 // QQQ/SPY chain selection (#121): the pure helpers in docs/shared.js, plus
-// docs/index.html's own fetch/render cycle run against a minimal DOM shim
-// (same section-extraction approach as bots_panel.test.js, so the shipped
-// source is what's tested). If this fails with "could not locate", the
-// '// ── data fetch cycle' or '// ── countdown timer' banner moved.
+// the page's fetch/render cycle — docs/js/data-fetch-cycle.js since B2 slice 5
+// (Nov 2026), loaded by index.html in the same position the inline section
+// occupied — run against a minimal DOM shim, so the shipped source is what's
+// tested. This was the first B2 slice that moved a test: earlier versions
+// sliced the section out of index.html by banner text. The SPY health badge
+// (fetchSpyHealth) moved again in B2 slice 15 with the paper-trading section —
+// its test now loads docs/js/paper-trading.js instead of slicing the page.
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const vm = require('node:vm');
+const { createHash } = require('node:crypto');
 const shared = require('../docs/shared.js');
 const { chainLatestPath, occRoot, validateChainPayload, ChainSelection, relativeOiRanges, summarizeSpyHealth } = shared;
 
@@ -72,39 +77,89 @@ function snapshot(symbol, { declare = true, price = symbol === 'SPY' ? 670.2 : 6
 
 // ── index.html fetch/render cycle ────────────────────────────────────────────
 const html = fs.readFileSync(path.join(__dirname, '..', 'docs', 'index.html'), 'utf8');
-const START = '// ── data fetch cycle';
-const END = '// ── countdown timer';
-const from = html.indexOf(START);
-const to = html.indexOf(END, from);
-assert.ok(from !== -1 && to !== -1, 'could not locate the data fetch cycle in docs/index.html');
-const source = html.slice(from, to);
+// B2 (readability quest): the data fetch cycle moved out of index.html into
+// docs/js/data-fetch-cycle.js, loaded in the same position. The test loads the
+// shipped module instead of slicing the page by banner text, and pins the ?v=
+// hash in the page to the module's content (like shared.js).
+const source = fs.readFileSync(path.join(__dirname, '..', 'docs', 'js', 'data-fetch-cycle.js'), 'utf8');
+const moduleHash = createHash('sha256').update(source).digest('hex').slice(0, 16);
+assert.ok(html.includes('js/data-fetch-cycle.js?v=' + moduleHash), 'data-fetch-cycle script URL must match its content hash on every hosting path');
+assert.ok(!html.includes('async function fetchChain('), 'fetchChain must live in js/data-fetch-cycle.js, not inline in index.html');
+assert.ok(!html.includes('function fetchLatest('), 'fetchLatest must live in js/data-fetch-cycle.js, not inline in index.html');
+assert.ok(html.includes('// ── data fetch cycle'), 'data fetch cycle banner must stay in index.html as the section marker');
 
-// The price tile and SPY health badge use the shipped HTML functions, with
+// The price tile and SPY health badge use the shipped page functions, with
 // offline artifact responses and no provider/browser network dependency.
-assert.match(html, /const MAIN_TICKERS = \['QQQ', 'SPY'/);
+// B2 (readability quest): the price strip moved out of index.html into
+// docs/js/price-strip.js, loaded in the same position. The test loads the
+// shipped module instead of slicing fetchPrices out of the page by banner
+// text, and pins the ?v= hash in the page to the module's content (like
+// shared.js). The module runs against the real shared.js TickerStateStore
+// with a stub DOM, so the SPY provider-vs-fallback routing is verified
+// through the store the page actually uses.
+const priceStripSource = fs.readFileSync(path.join(__dirname, '..', 'docs', 'js', 'price-strip.js'), 'utf8');
+const priceStripHash = createHash('sha256').update(priceStripSource).digest('hex').slice(0, 16);
+assert.ok(html.includes('js/price-strip.js?v=' + priceStripHash), 'price-strip script URL must match its content hash on every hosting path');
+assert.ok(!html.includes('async function fetchPrices('), 'fetchPrices must live in js/price-strip.js, not inline in index.html');
+assert.ok(!html.includes("const MAIN_TICKERS = ['QQQ', 'SPY'"), 'the price-strip tickers must live in js/price-strip.js, not inline in index.html');
+assert.ok(html.includes('// ── price strip'), 'price strip banner must stay in index.html as the section marker');
+assert.match(priceStripSource, /const MAIN_TICKERS = \['QQQ', 'SPY'/);
 assert.equal(shared.isTradeableShareSymbol('SPY'), false, 'SPY tile is display-only');
 const testPriceTile = async () => {
-  const published = [];
-  const fallback = [];
-  const rendered = [];
-  let prices = { SPY: { price: 670.2, source: 'dxlink', quote_ts: new Date(NOW).toISOString() }, QQQ: { price: 600.1 } };
-  const tickerState = {
-    publishFallback: p => fallback.push(p), publish: q => published.push(...q),
-    snapshot: () => ({ SPY: published.at(-1) }),
+  // Stub DOM: one cached tile per id, each with cached .px/.chg/.market-state
+  // spans — updatePriceStrip writes the tile state through these, and the
+  // getElementById count is the tile-refresh count.
+  const makeSpan = () => ({ textContent: '', className: '', dataset: {} });
+  const makeTile = () => {
+    const spans = {};
+    const classList = { _s: new Set(), add(...c) { c.forEach(x => this._s.add(x)); }, remove(...c) { c.forEach(x => this._s.delete(x)); }, contains(c) { return this._s.has(c); } };
+    return {
+      textContent: '', title: '', dataset: {}, offsetWidth: 0, classList,
+      querySelector: sel => (spans[sel] ||= makeSpan()),
+    };
   };
-  const priceSource = html.slice(html.indexOf('async function fetchPrices()'), html.indexOf('// EIA STEO crude calibration', html.indexOf('async function fetchPrices()')));
-  const fetchPrices = new Function('fetch', 'BROWSER_DATA', 'tickerState', 'updatePriceStrip', 'console', `${priceSource}\nreturn fetchPrices;`)(
-    async () => ({ ok: true, json: async () => ({ prices }) }), 'https://r2.example', tickerState,
-    state => rendered.push(state), { warn() {} },
-  );
+  const tiles = {};
+  const byIdCount = {};
+  const documentStub = {
+    getElementById: id => { byIdCount[id] = (byIdCount[id] || 0) + 1; return (tiles[id] ||= makeTile()); },
+    createElement: () => makeTile(),
+  };
+  let prices = { SPY: { price: 670.2, source: 'dxlink', quote_ts: new Date(NOW).toISOString() }, QQQ: { price: 600.1 } };
+  const context = vm.createContext({
+    console: { warn() {} },
+    document: documentStub,
+    fetch: async () => ({ ok: true, json: async () => ({ prices }) }),
+    BROWSER_DATA: 'https://r2.example',
+    // The module constructs its tickerState at load from the real shared.js
+    // store, so the provider-vs-fallback routing is exercised for real.
+    TickerStateStore: shared.TickerStateStore,
+    SHARE_QUOTE_MAX_AGE_MS: shared.SHARE_QUOTE_MAX_AGE_MS,
+    isTradeableShareSymbol: shared.isTradeableShareSymbol,
+    formatVwapRvol: shared.formatVwapRvol,
+    formatMomentum: shared.formatMomentum,
+    openShareTicket: () => {},
+  });
+  vm.runInContext(priceStripSource, context, { filename: 'docs/js/price-strip.js' });
+  // Primitive reads across the vm boundary (deepEqual fails across realms).
+  const g = expr => vm.runInContext(expr, context);
+  const fetchPrices = () => vm.runInContext('fetchPrices()', context);
+  const spyPrice = () => g("tickerState.get('SPY').price");
+  const spySource = () => g("tickerState.get('SPY').source");
   await fetchPrices();
-  assert.equal(published[0].price, 670.2, 'SPY tile uses the SPY provider price');
-  assert.equal(published[0].quote_ts, prices.SPY.quote_ts, 'SPY tile keeps provider observation time');
-  assert.equal(fallback[0].SPY, undefined, 'SPY does not use macro fallback');
+  assert.equal(spyPrice(), 670.2, 'SPY tile uses the SPY provider price');
+  assert.equal(spySource(), 'dxlink', 'SPY keeps its provider source, not the macro fallback');
+  assert.equal(g("tickerState.get('SPY').observedAt"), prices.SPY.quote_ts, 'SPY tile keeps provider observation time');
+  assert.equal(g("tickerState.get('QQQ').source"), 'r2-snapshot', 'QQQ comes through the macro fallback');
+  assert.equal(g("tickerState.get('QQQ').price"), 600.1);
+  assert.equal(tiles['tk-SPY'].querySelector('.px').textContent, '670.20', 'SPY tile renders the provider price');
+  assert.equal(tiles['tk-QQQ'].querySelector('.px').textContent, '600.10');
+  assert.equal(tiles['tk-QQQ'].dataset.state, 'fallback', 'QQQ tile is marked fallback');
+  assert.equal(byIdCount['tk-SPY'], 1, 'one tile refresh per fetch');
   prices = { SPY: { price: null, source: null, quote_ts: null }, QQQ: { price: 600.1 } };
   await fetchPrices();
-  assert.equal(published.length, 1, 'missing SPY price is not fabricated');
-  assert.equal(rendered.length, 2, 'tile state is refreshed even when SPY is missing');
+  assert.equal(spyPrice(), 670.2, 'missing SPY price is not fabricated');
+  assert.equal(spySource(), 'dxlink', 'missing SPY does not fall back to a macro price');
+  assert.equal(byIdCount['tk-SPY'], 2, 'tile state is refreshed even when SPY is missing');
   for (const bad of [
     { price: 600, source: 'dxlink', quote_ts: new Date(NOW).toISOString(), symbol: 'QQQ' },
     { price: 670, source: 'yfinance', quote_ts: new Date(NOW).toISOString() },
@@ -113,9 +168,10 @@ const testPriceTile = async () => {
   ]) {
     prices = { SPY: bad, QQQ: { price: 600.1 } };
     await fetchPrices();
-    assert.equal(published.length, 1, 'foreign or unsupported SPY evidence is rejected');
-    assert.equal(fallback.at(-1).SPY, undefined);
+    assert.equal(spyPrice(), 670.2, 'foreign or unsupported SPY evidence is rejected');
+    assert.equal(spySource(), 'dxlink');
   }
+  assert.equal(byIdCount['tk-SPY'], 6, 'every fetch refreshes the tile');
   let now = Date.parse('2026-10-07T15:00:00Z');
   const store = new shared.TickerStateStore({ SPY: 'equity', QQQ: 'equity' }, { nowFn: () => now });
   assert.equal(store.get('SPY'), null, 'missing SPY stays missing');
@@ -129,19 +185,41 @@ const testPriceTile = async () => {
 
 };
 const testSpyHealthBadge = async () => {
+  // B2 (readability quest): fetchSpyHealth moved out of index.html into
+  // docs/js/paper-trading.js with the paper-trading section (slice 15), so
+  // this test loads the shipped module instead of slicing the page between
+  // `let latestSpyHealthRequest` and `liveQuotes.subscribe(`. The module
+  // needs the real shared.js in the same context (LiveQuoteService,
+  // ChainSelection, summarizeSpyHealth) plus the page's shared-scope stubs.
+  const moduleSource = fs.readFileSync(path.join(__dirname, '..', 'docs', 'js', 'paper-trading.js'), 'utf8');
+  const sharedSource = fs.readFileSync(path.join(__dirname, '..', 'docs', 'shared.js'), 'utf8');
+  const moduleHash = createHash('sha256').update(moduleSource).digest('hex').slice(0, 16);
+  assert.ok(html.includes('js/paper-trading.js?v=' + moduleHash), 'paper-trading script URL must match its content hash on every hosting path');
   const badge = { className: '', textContent: '', title: '' };
   let response = { updated_at: new Date().toISOString(), spy: {
     collection_status: 'collecting', spot: { status: 'live' },
     last_snapshot_upload_time: new Date().toISOString(),
   } };
-  const start = html.indexOf('let latestSpyHealthRequest = 0;');
-  const end = html.indexOf('liveQuotes.subscribe(', start);
-  assert.ok(start > 0 && end > start, 'shipped SPY health badge code found');
-  const fetchSpyHealth = new Function('fetch', 'BROWSER_DATA', 'document', 'summarizeSpyHealth',
-    `${html.slice(start, end)}\nreturn fetchSpyHealth;`)(
-      async () => ({ ok: true, json: async () => response }), 'https://r2.example',
-      { getElementById: () => badge }, summarizeSpyHealth,
-    );
+  const pending = [];
+  let fetchImpl = async () => ({ ok: true, json: async () => response });
+  const context = vm.createContext({
+    console,
+    document: { getElementById: () => badge, createElement: () => ({}) },
+    localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+    crypto: { randomUUID: () => 'test-uuid' },
+    BROWSER_DATA: 'https://r2.example',
+    fetch: async (url, options) => fetchImpl(url, options),
+    botsTimer: null,
+    renderBots: () => {},
+    showMarginCallScreen: () => {},
+    closeTicket: () => {},
+    renderSelectedChain: () => {},
+    tickerState: { get: () => null },
+    selectedChainData: () => null,
+  });
+  vm.runInContext(sharedSource, context, { filename: 'docs/shared.js' });
+  vm.runInContext(moduleSource, context, { filename: 'docs/js/paper-trading.js' });
+  const fetchSpyHealth = () => vm.runInContext('fetchSpyHealth()', context);
   await fetchSpyHealth();
   assert.equal(badge.className, 'transport-health live', 'fresh SPY health renders live');
   response = { ...response, updated_at: new Date(Date.now() - 60_000).toISOString() };
@@ -150,13 +228,9 @@ const testSpyHealthBadge = async () => {
   response = { updated_at: new Date().toISOString(), spy: { collection_status: 'missing_today_expiration', reason: 'no SPY 0DTE' } };
   await fetchSpyHealth();
   assert.match(badge.textContent, /missing today expiration/, 'missing SPY 0DTE is visible');
-  const pending = [];
-  const ordered = new Function('fetch', 'BROWSER_DATA', 'document', 'summarizeSpyHealth',
-    html.slice(start, end) + '\nreturn fetchSpyHealth;')(
-      () => new Promise((resolve, reject) => pending.push({ resolve, reject })), 'https://r2.example',
-      { getElementById: () => badge }, summarizeSpyHealth);
-  const oldRequest = ordered();
-  const newRequest = ordered();
+  fetchImpl = () => new Promise((resolve, reject) => pending.push({ resolve, reject }));
+  const oldRequest = fetchSpyHealth();
+  const newRequest = fetchSpyHealth();
   pending[1].resolve({ ok: true, json: async () => ({
     updated_at: new Date().toISOString(), spy: { collection_status: 'disabled' },
   }) });
@@ -164,7 +238,7 @@ const testSpyHealthBadge = async () => {
   pending[0].reject(new Error('old request failed'));
   await oldRequest;
   assert.equal(badge.textContent, 'SPY: disabled', 'old failure cannot replace newer health');
-  const failed = ordered();
+  const failed = fetchSpyHealth();
   pending[2].reject(new Error('network'));
   await failed;
   assert.equal(badge.className, 'transport-health unavailable');

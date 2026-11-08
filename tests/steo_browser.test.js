@@ -8,8 +8,9 @@ const APP = 'https://live-options-view.otmooper12.workers.dev';
 const html = fs.readFileSync(path.join(__dirname,'../docs/index.html'),'utf8');
 const css = html.match(/<style>([\s\S]*?)<\/style>/)[1];
 const panel = html.match(/<div id="steo-panel"[\s\S]*?<\/div>/)[0];
-const from = html.indexOf('async function fetchSteoCalibration()');
-const source = html.slice(from,html.indexOf('// ── short-squeeze scanner panel',from));
+// B2 slice 7: the STEO fetch moved into docs/js/steo-fetch.js — load the
+// shipped module instead of slicing it out of the page.
+const source = fs.readFileSync(path.join(__dirname,'../docs/js/steo-fetch.js'),'utf8');
 const routing = html.slice(html.indexOf('const R2 ='),html.indexOf('const REFRESH'));
 const shared = fs.readFileSync(path.join(__dirname,'../docs/shared.js'),'utf8');
 const fixture = {timestamp:'2026-10-09T10:00:00Z',current_release:'2026-10',prior_release:'2026-09',

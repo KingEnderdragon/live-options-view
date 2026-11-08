@@ -122,20 +122,24 @@ const APP = 'https://live-options-view.otmooper12.workers.dev';
     assert.equal(await failure.text(), 'Public data upstream unavailable');
   } finally { global.fetch = originalFetch; }
   // Real shipped frontend source: every changed read uses only the new route.
+  // B2 extracts index.html sections into docs/js/ one at a time, so the
+  // search covers the page plus every shipped module, not the page alone.
   const html = fs.readFileSync(path.join(__dirname, '../docs/index.html'), 'utf8');
-  assert.ok(html.includes('fetch(`${BROWSER_DATA}/derived/OIranges.csv`'));
+  const jsDir = path.join(__dirname, '../docs/js');
+  const frontend = html + (fs.existsSync(jsDir) ? fs.readdirSync(jsDir).filter(f => f.endsWith('.js')).map(f => fs.readFileSync(path.join(jsDir, f), 'utf8')).join('\n') : '');
+  assert.ok(frontend.includes('fetch(`${BROWSER_DATA}/derived/OIranges.csv`'));
   for (const key of ['intraday/health.json', 'intraday/prices.json']) {
-    assert.ok(html.includes('fetch(`${BROWSER_DATA}/' + key + '?_=${Date.now()}`)'));
+    assert.ok(frontend.includes('fetch(`${BROWSER_DATA}/' + key + '?_=${Date.now()}`)'));
   }
-  assert.ok(html.includes('fetch(`${BROWSER_DATA}/${path}?_=${Date.now()}`)'));
-  assert.ok(html.includes('const base = `${BROWSER_DATA}/squeeze-scanner/v1/scheduled`;'));
-  assert.ok(html.includes('fetch(`${BROWSER_DATA}/macro/eia_steo.json'));
-  assert.ok(html.includes('fetch(`${BROWSER_DATA}/raw/qqq_chain_'));
-  assert.ok(html.includes('fetch(`${BROWSER_DATA}/raw/opex/qqq_chain_'));
-  assert.ok(html.includes('fetch(`${BROWSER_DATA}/manifest.json'));
-  assert.ok(html.includes('fetch(`${BROWSER_DATA}/prices/qqq_intraday_'));
-  assert.ok(!html.includes('/r2-proxy/'));
-  const routing = html.slice(html.indexOf('const R2 ='), html.indexOf('const REFRESH'));
+  assert.ok(frontend.includes('fetch(`${BROWSER_DATA}/${path}?_=${Date.now()}`)'));
+  assert.ok(frontend.includes('const base = `${BROWSER_DATA}/squeeze-scanner/v1/scheduled`;'));
+  assert.ok(frontend.includes('fetch(`${BROWSER_DATA}/macro/eia_steo.json'));
+  assert.ok(frontend.includes('fetch(`${BROWSER_DATA}/raw/qqq_chain_'));
+  assert.ok(frontend.includes('fetch(`${BROWSER_DATA}/raw/opex/qqq_chain_'));
+  assert.ok(frontend.includes('fetch(`${BROWSER_DATA}/manifest.json'));
+  assert.ok(frontend.includes('fetch(`${BROWSER_DATA}/prices/qqq_intraday_'));
+  assert.ok(!frontend.includes('/r2-proxy/'));
+  const routing = frontend.slice(frontend.indexOf('const R2 ='), frontend.indexOf('const REFRESH'));
   assert.ok(routing.includes('location.origin'));
   for (const origin of [APP, 'https://options.moopertonic.net', 'http://localhost:8787',
     'https://preview.example', 'null', APP + ':8443', APP + '.evil.example',

@@ -8,17 +8,23 @@ on:
   pull_request:
     paths:
       - "worker.js"
+      - "worker/**"
       - "docs/**"
       - "tests/**"
       - "wrangler.toml"
+      - "scripts/stamp-build.mjs"
+      - ".github/workflows/deploy.yml"
       - ".github/workflows/web-ci.yml"
   push:
     branches: [master]
     paths:
       - "worker.js"
+      - "worker/**"
       - "docs/**"
       - "tests/**"
       - "wrangler.toml"
+      - "scripts/stamp-build.mjs"
+      - ".github/workflows/deploy.yml"
       - ".github/workflows/web-ci.yml"
 
 jobs:
@@ -29,6 +35,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
+      - name: Verify build packaging before merge
+        run: node --test tests/build_stamp.test.mjs
       - name: public browser data allowlist
         run: node tests/browser_data.test.js
       - name: historical archive loading
@@ -64,11 +72,26 @@ jobs:
       - name: Historical rendered browser workflow
         run: node tests/historical_browser.test.js
       # Catches syntax errors in the inline <script> that the panel test would
-      # otherwise only surface for the section it extracts.
+      # otherwise only surface for the section it extracts. B2 extracts
+      # sections into docs/js/ one at a time; each extracted module gets the
+      # same parse gate here so a broken module cannot ship.
       - name: parse check
         run: |
           node --check worker.js
+          node -e "
+            const fs = require('fs');
+            const { execFileSync } = require('child_process');
+            if (fs.existsSync('worker')) {
+              for (const file of fs.readdirSync('worker', { recursive: true }).filter(f => f.endsWith('.js'))) {
+                console.log('Checking worker/' + file);
+                execFileSync(process.execPath, ['--check', '--input-type=module'], {
+                  input: fs.readFileSync('worker/' + file), stdio: ['pipe', 'inherit', 'inherit']
+                });
+              }
+            }
+          "
           node --check docs/shared.js
+          for f in docs/js/*.js; do node --check "$f"; done
           node -e "
             const fs = require('fs');
             const html = fs.readFileSync('docs/index.html', 'utf8');
