@@ -30,6 +30,9 @@ on:
       - "tests/test_moo144_tradier_collector.py"
       - "tests/test_oa203_return_scanner.py"
       - "tests/test_oa203_active.py"
+      - "tests/test_oa203_active_budget.py"
+      - "scripts/oa203_active_budget.py"
+      - "scripts/oa203_active_readiness.py"
       - "scripts/oa203_windows.py"
       - "scripts/oa203_windows_replay.py"
       - "tests/test_oa203_windows.py"
@@ -68,6 +71,9 @@ on:
       - "tests/test_moo144_tradier_collector.py"
       - "tests/test_oa203_return_scanner.py"
       - "tests/test_oa203_active.py"
+      - "tests/test_oa203_active_budget.py"
+      - "scripts/oa203_active_budget.py"
+      - "scripts/oa203_active_readiness.py"
       - "scripts/oa203_windows.py"
       - "scripts/oa203_windows_replay.py"
       - "tests/test_oa203_windows.py"
@@ -103,7 +109,7 @@ jobs:
       - name: Run OA-203 options return scanner suite
         run: python -m unittest discover -s tests -p test_oa203_return_scanner.py -v
       - name: Run OA-203 active snapshot suite
-        run: python -m unittest discover -s tests -p test_oa203_active.py -v
+        run: python -m unittest discover -s tests -p 'test_oa203_active*.py' -v
       - name: Run cross-market overview suite (#132)
         run: python -m unittest discover -s tests -p test_market_overview.py -v
       - name: Run cross-market symbol probe safety suite (#132)
