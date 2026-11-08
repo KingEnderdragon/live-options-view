@@ -1529,64 +1529,12 @@ function renderPaper() {
 }
 
 // ── auth ───────────────────────────────────────────────────────────────────────
-let authMode = 'login';
-
-function renderAuthGate() {
-  const authPanel = document.getElementById('auth-panel');
-  const paperPanel = document.getElementById('paper-panel');
-  if (session) {
-    authPanel.classList.add('hidden');
-    paperPanel.classList.remove('hidden');
-  } else {
-    authPanel.classList.remove('hidden');
-    paperPanel.classList.add('hidden');
-    document.getElementById('auth-heading').textContent = authMode === 'login' ? 'Log In' : 'Register';
-    document.getElementById('auth-submit').textContent = authMode === 'login' ? 'Log In' : 'Create Account';
-    document.getElementById('auth-toggle').textContent =
-      authMode === 'login' ? 'Need an account? Register' : 'Have an account? Log in';
-    document.getElementById('auth-warning').classList.toggle('hidden', authMode !== 'register');
-    document.getElementById('auth-password').autocomplete = authMode === 'login' ? 'current-password' : 'new-password';
-    document.getElementById('auth-error').textContent = '';
-  }
-}
-
-function showMarginCallScreen(reason) {
-  session = null;
-  try { localStorage.removeItem(SESSION_CACHE_KEY); } catch (e) {}
-  document.getElementById('margin-call-reason').textContent = reason;
-  document.getElementById('margin-call-screen').classList.remove('hidden');
-  renderAuthGate();
-}
-
-function hideMarginCallScreen() {
-  document.getElementById('margin-call-screen').classList.add('hidden');
-  authMode = 'login';
-  renderAuthGate();
-}
-
-async function submitAuth(username, password) {
-  const endpoint = authMode === 'login' ? '/api/login' : '/api/register';
-  const response = await fetch(endpoint, {
-    method: 'POST',
-    credentials: 'same-origin',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username, password }),
-  });
-  const result = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(result.error || `Request failed (HTTP ${response.status})`);
-  return result;
-}
-
-async function refreshSessionFromServer() {
-  try {
-    const response = await fetch('/api/me', { credentials: 'same-origin' });
-    if (!response.ok) { session = null; return; }
-    session = await response.json();
-    cacheSessionDisplay();
-  } catch (error) {
-    session = null;
-  }
-}
+// Moved to js/auth.js (B2) — loaded below in the same position,
+// so the page's script order is unchanged. The banner stays here as
+// the section's marker.
+</script>
+<script src="js/auth.js?v=602f112254101ca9"></script>
+<script>
 
 // ── trade ticket popover ──────────────────────────────────────────────────────
 function closeTicket() {
