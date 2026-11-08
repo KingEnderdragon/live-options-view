@@ -2,7 +2,7 @@
 // function both the options-chain header and the QQQ price-strip tile call
 // (see docs/index.html's renderHeatmap/updateQqqVwapRvolLine). Kept as a
 // pure, DOM-free function specifically so it's testable this simple way,
-// like TickerStateStore/LiveQuotePoller above it in shared.js -- no need for
+// like TickerStateStore/LiveQuotePoller in docs/shared/quotes.js -- no need for
 // bots_panel.test.js's heavier comment-banner-extraction + DOM-shim pattern,
 // since none of this logic lives inline in index.html's <script>.
 const assert = require('node:assert/strict');

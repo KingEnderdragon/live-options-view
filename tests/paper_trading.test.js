@@ -118,8 +118,12 @@ const context = vm.createContext(sandbox);
 // B3 slice 2 (Nov 2026): fmtQ / computeAtmWindow moved out of shared.js
 // into docs/shared/heatmap.js — load the shipped module too, in page order,
 // so renderPaper / visibleContractSymbols read the real ones.
+// B3 slice 3 (Nov 2026): LiveQuoteService / freshShareQuote moved to
+// docs/shared/quotes.js — same, after heatmap.js, so the module's top-level
+// `const liveQuotes = new LiveQuoteService()` constructs the real service.
 vm.runInContext(sharedSource, context, { filename: 'docs/shared.js' });
 vm.runInContext(fs.readFileSync(path.join(__dirname, '../docs/shared/heatmap.js'), 'utf8'), context, { filename: 'docs/shared/heatmap.js' });
+vm.runInContext(fs.readFileSync(path.join(__dirname, '../docs/shared/quotes.js'), 'utf8'), context, { filename: 'docs/shared/quotes.js' });
 vm.runInContext(moduleSource, context, { filename: 'docs/js/paper-trading.js' });
 const get = name => vm.runInContext(name, context);
 const set = (name, value) => vm.runInContext(`${name} = (${JSON.stringify(value)})`, context);
