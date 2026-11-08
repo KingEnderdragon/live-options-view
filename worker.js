@@ -102,19 +102,3 @@ export default {
     ctx.waitUntil(settleAllBots(env));
   },
 }
-
-
-
-
-
-// ---------------------------------------------------------------------------
-// Auth: username/password accounts backed by the USERS KV namespace, opaque
-// session tokens backed by SESSIONS. Real auth (unlike the old shared-token
-// deterrent below) because a user's balance now needs to follow them across
-// devices rather than living in one browser's localStorage.
-// ---------------------------------------------------------------------------
-
-
-
-
-
