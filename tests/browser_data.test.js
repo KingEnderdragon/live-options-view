@@ -122,10 +122,10 @@ const APP = 'https://live-options-view.otmooper12.workers.dev';
     assert.equal(await failure.text(), 'Public data upstream unavailable');
   } finally { global.fetch = originalFetch; }
   // Real shipped frontend source: every changed read uses only the new route.
-  // B2 extracts index.html sections into docs/js/ one at a time, so the
+  // B2 extracts index.html sections into site/js/ one at a time, so the
   // search covers the page plus every shipped module, not the page alone.
-  const html = fs.readFileSync(path.join(__dirname, '../docs/index.html'), 'utf8');
-  const jsDir = path.join(__dirname, '../docs/js');
+  const html = fs.readFileSync(path.join(__dirname, '../site/index.html'), 'utf8');
+  const jsDir = path.join(__dirname, '../site/js');
   const frontend = html + (fs.existsSync(jsDir) ? fs.readdirSync(jsDir).filter(f => f.endsWith('.js')).map(f => fs.readFileSync(path.join(jsDir, f), 'utf8')).join('\n') : '');
   assert.ok(frontend.includes('fetch(`${BROWSER_DATA}/derived/OIranges.csv`'));
   for (const key of ['intraday/health.json', 'intraday/prices.json']) {

@@ -1,5 +1,5 @@
 // B2 (readability quest): the bots panel moved out of index.html into
-// docs/js/bots-panel.js, loaded in the same position. The test loads the
+// site/js/bots-panel.js, loaded in the same position. The test loads the
 // shipped module instead of slicing the page by banner text, pins the ?v=
 // hash in the page to the module's content (like shared.js), and drives the
 // module's functions with a minimal DOM/quote shim so equity, marks, leader
@@ -12,8 +12,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { createHash } = require('node:crypto');
 
-const html = fs.readFileSync(path.join(__dirname, '..', 'docs', 'index.html'), 'utf8');
-const source = fs.readFileSync(path.join(__dirname, '..', 'docs', 'js', 'bots-panel.js'), 'utf8');
+const html = fs.readFileSync(path.join(__dirname, '..', 'site', 'index.html'), 'utf8');
+const source = fs.readFileSync(path.join(__dirname, '..', 'site', 'js', 'bots-panel.js'), 'utf8');
 const moduleHash = createHash('sha256').update(source).digest('hex').slice(0, 16);
 assert.ok(html.includes('js/bots-panel.js?v=' + moduleHash), 'bots-panel script URL must match its content hash on every hosting path');
 for (const fn of ['fetchBots', 'renderBots', 'botEquity', 'botMark', 'renderStrategyRollup',

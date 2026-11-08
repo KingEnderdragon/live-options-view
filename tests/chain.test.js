@@ -1,5 +1,5 @@
 // B3 slice 5 (Nov 2026): chain underlying selection (#121) moved verbatim
-// out of docs/shared.js into docs/shared/chain.js. Pins the module's ?v=
+// out of site/shared.js into site/shared/chain.js. Pins the module's ?v=
 // hash in the page, asserts the seven names and CHAIN_LATEST_PATHS no longer
 // live in shared.js, pins the entry's export surface (the seven names are
 // still re-exported — the same function objects / class — while
@@ -13,11 +13,11 @@ const { createHash } = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const html = fs.readFileSync(path.join(__dirname, '..', 'docs', 'index.html'), 'utf8');
-const shared = fs.readFileSync(path.join(__dirname, '..', 'docs', 'shared.js'), 'utf8');
-const moduleSource = fs.readFileSync(path.join(__dirname, '..', 'docs', 'shared', 'chain.js'), 'utf8');
-const chain = require('../docs/shared/chain.js');
-const entry = require('../docs/shared.js');
+const html = fs.readFileSync(path.join(__dirname, '..', 'site', 'index.html'), 'utf8');
+const shared = fs.readFileSync(path.join(__dirname, '..', 'site', 'shared.js'), 'utf8');
+const moduleSource = fs.readFileSync(path.join(__dirname, '..', 'site', 'shared', 'chain.js'), 'utf8');
+const chain = require('../site/shared/chain.js');
+const entry = require('../site/shared.js');
 
 const moduleHash = createHash('sha256').update(moduleSource).digest('hex').slice(0, 16);
 assert.ok(html.includes('shared/chain.js?v=' + moduleHash),

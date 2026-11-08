@@ -1,5 +1,5 @@
 // B2 (readability quest): the render-heatmap section moved out of index.html
-// into docs/js/render-heatmap.js, loaded in the same position. The test
+// into site/js/render-heatmap.js, loaded in the same position. The test
 // loads the shipped module instead of slicing the page by banner text, pins
 // the ?v= hash in the page to the module's content (like shared.js), and
 // drives renderHeatmap with stubbed DOM + page globals so the QQQ /
@@ -12,8 +12,8 @@ const path = require('node:path');
 const vm = require('node:vm');
 const { createHash } = require('node:crypto');
 
-const html = fs.readFileSync(path.join(__dirname, '../docs/index.html'), 'utf8');
-const moduleSource = fs.readFileSync(path.join(__dirname, '../docs/js/render-heatmap.js'), 'utf8');
+const html = fs.readFileSync(path.join(__dirname, '../site/index.html'), 'utf8');
+const moduleSource = fs.readFileSync(path.join(__dirname, '../site/js/render-heatmap.js'), 'utf8');
 const moduleHash = createHash('sha256').update(moduleSource).digest('hex').slice(0, 16);
 assert.ok(html.includes('js/render-heatmap.js?v=' + moduleHash), 'render-heatmap script URL must match its content hash on every hosting path');
 assert.ok(!html.includes('function renderHeatmap(data, symbol'), 'renderHeatmap must live in js/render-heatmap.js, not inline in index.html');
@@ -49,7 +49,7 @@ const context = vm.createContext(sandbox);
 // section), before this module loads.
 vm.runInContext('let ranges = null;', context);
 vm.runInContext('ranges = ' + JSON.stringify(RANGES) + ';', context);
-vm.runInContext(moduleSource, context, { filename: 'docs/js/render-heatmap.js' });
+vm.runInContext(moduleSource, context, { filename: 'site/js/render-heatmap.js' });
 const get = name => vm.runInContext(name, context);
 
 assert.equal(typeof get('renderHeatmap'), 'function', 'module must define renderHeatmap');

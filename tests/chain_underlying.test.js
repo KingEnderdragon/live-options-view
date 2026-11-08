@@ -1,17 +1,17 @@
-// QQQ/SPY chain selection (#121): the pure helpers in docs/shared.js, plus
-// the page's fetch/render cycle — docs/js/data-fetch-cycle.js since B2 slice 5
+// QQQ/SPY chain selection (#121): the pure helpers in site/shared.js, plus
+// the page's fetch/render cycle — site/js/data-fetch-cycle.js since B2 slice 5
 // (Nov 2026), loaded by index.html in the same position the inline section
 // occupied — run against a minimal DOM shim, so the shipped source is what's
 // tested. This was the first B2 slice that moved a test: earlier versions
 // sliced the section out of index.html by banner text. The SPY health badge
 // (fetchSpyHealth) moved again in B2 slice 15 with the paper-trading section —
-// its test now loads docs/js/paper-trading.js instead of slicing the page.
+// its test now loads site/js/paper-trading.js instead of slicing the page.
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const { createHash } = require('node:crypto');
-const shared = require('../docs/shared.js');
+const shared = require('../site/shared.js');
 const { chainLatestPath, occRoot, validateChainPayload, ChainSelection, relativeOiRanges, summarizeSpyHealth } = shared;
 
 const NOW = Date.now();
@@ -76,12 +76,12 @@ function snapshot(symbol, { declare = true, price = symbol === 'SPY' ? 670.2 : 6
 }
 
 // ── index.html fetch/render cycle ────────────────────────────────────────────
-const html = fs.readFileSync(path.join(__dirname, '..', 'docs', 'index.html'), 'utf8');
+const html = fs.readFileSync(path.join(__dirname, '..', 'site', 'index.html'), 'utf8');
 // B2 (readability quest): the data fetch cycle moved out of index.html into
-// docs/js/data-fetch-cycle.js, loaded in the same position. The test loads the
+// site/js/data-fetch-cycle.js, loaded in the same position. The test loads the
 // shipped module instead of slicing the page by banner text, and pins the ?v=
 // hash in the page to the module's content (like shared.js).
-const source = fs.readFileSync(path.join(__dirname, '..', 'docs', 'js', 'data-fetch-cycle.js'), 'utf8');
+const source = fs.readFileSync(path.join(__dirname, '..', 'site', 'js', 'data-fetch-cycle.js'), 'utf8');
 const moduleHash = createHash('sha256').update(source).digest('hex').slice(0, 16);
 assert.ok(html.includes('js/data-fetch-cycle.js?v=' + moduleHash), 'data-fetch-cycle script URL must match its content hash on every hosting path');
 assert.ok(!html.includes('async function fetchChain('), 'fetchChain must live in js/data-fetch-cycle.js, not inline in index.html');
@@ -91,13 +91,13 @@ assert.ok(html.includes('// ── data fetch cycle'), 'data fetch cycle banner 
 // The price tile and SPY health badge use the shipped page functions, with
 // offline artifact responses and no provider/browser network dependency.
 // B2 (readability quest): the price strip moved out of index.html into
-// docs/js/price-strip.js, loaded in the same position. The test loads the
+// site/js/price-strip.js, loaded in the same position. The test loads the
 // shipped module instead of slicing fetchPrices out of the page by banner
 // text, and pins the ?v= hash in the page to the module's content (like
 // shared.js). The module runs against the real shared.js TickerStateStore
 // with a stub DOM, so the SPY provider-vs-fallback routing is verified
 // through the store the page actually uses.
-const priceStripSource = fs.readFileSync(path.join(__dirname, '..', 'docs', 'js', 'price-strip.js'), 'utf8');
+const priceStripSource = fs.readFileSync(path.join(__dirname, '..', 'site', 'js', 'price-strip.js'), 'utf8');
 const priceStripHash = createHash('sha256').update(priceStripSource).digest('hex').slice(0, 16);
 assert.ok(html.includes('js/price-strip.js?v=' + priceStripHash), 'price-strip script URL must match its content hash on every hosting path');
 assert.ok(!html.includes('async function fetchPrices('), 'fetchPrices must live in js/price-strip.js, not inline in index.html');
@@ -139,7 +139,7 @@ const testPriceTile = async () => {
     formatMomentum: shared.formatMomentum,
     openShareTicket: () => {},
   });
-  vm.runInContext(priceStripSource, context, { filename: 'docs/js/price-strip.js' });
+  vm.runInContext(priceStripSource, context, { filename: 'site/js/price-strip.js' });
   // Primitive reads across the vm boundary (deepEqual fails across realms).
   const g = expr => vm.runInContext(expr, context);
   const fetchPrices = () => vm.runInContext('fetchPrices()', context);
@@ -186,15 +186,15 @@ const testPriceTile = async () => {
 };
 const testSpyHealthBadge = async () => {
   // B2 (readability quest): fetchSpyHealth moved out of index.html into
-  // docs/js/paper-trading.js with the paper-trading section (slice 15), so
+  // site/js/paper-trading.js with the paper-trading section (slice 15), so
   // this test loads the shipped module instead of slicing the page between
   // `let latestSpyHealthRequest` and `liveQuotes.subscribe(`. The module
   // needs the real shared.js in the same context (ChainSelection,
-  // summarizeSpyHealth) plus docs/shared/quotes.js (B3 slice 3: the
+  // summarizeSpyHealth) plus site/shared/quotes.js (B3 slice 3: the
   // LiveQuoteService its top-level `liveQuotes` constructs) plus the page's
   // shared-scope stubs.
-  const moduleSource = fs.readFileSync(path.join(__dirname, '..', 'docs', 'js', 'paper-trading.js'), 'utf8');
-  const sharedSource = fs.readFileSync(path.join(__dirname, '..', 'docs', 'shared.js'), 'utf8');
+  const moduleSource = fs.readFileSync(path.join(__dirname, '..', 'site', 'js', 'paper-trading.js'), 'utf8');
+  const sharedSource = fs.readFileSync(path.join(__dirname, '..', 'site', 'shared.js'), 'utf8');
   const moduleHash = createHash('sha256').update(moduleSource).digest('hex').slice(0, 16);
   assert.ok(html.includes('js/paper-trading.js?v=' + moduleHash), 'paper-trading script URL must match its content hash on every hosting path');
   const badge = { className: '', textContent: '', title: '' };
@@ -219,16 +219,16 @@ const testSpyHealthBadge = async () => {
     tickerState: { get: () => null },
     selectedChainData: () => null,
   });
-  vm.runInContext(sharedSource, context, { filename: 'docs/shared.js' });
-  vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'docs', 'shared', 'quotes.js'), 'utf8'), context, { filename: 'docs/shared/quotes.js' });
+  vm.runInContext(sharedSource, context, { filename: 'site/shared.js' });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'site', 'shared', 'quotes.js'), 'utf8'), context, { filename: 'site/shared/quotes.js' });
   // B3 slice 4 (Nov 2026): the panel formatters + order validators moved to
-  // docs/shared/format.js — same, after quotes.js, in page order.
-  vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'docs', 'shared', 'format.js'), 'utf8'), context, { filename: 'docs/shared/format.js' });
+  // site/shared/format.js — same, after quotes.js, in page order.
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'site', 'shared', 'format.js'), 'utf8'), context, { filename: 'site/shared/format.js' });
   // B3 slice 5 (Nov 2026): the chain underlying names moved to
-  // docs/shared/chain.js — same, after format.js, in page order, so
+  // site/shared/chain.js — same, after format.js, in page order, so
   // paper-trading.js constructs the real ChainSelection at load.
-  vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'docs', 'shared', 'chain.js'), 'utf8'), context, { filename: 'docs/shared/chain.js' });
-  vm.runInContext(moduleSource, context, { filename: 'docs/js/paper-trading.js' });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'site', 'shared', 'chain.js'), 'utf8'), context, { filename: 'site/shared/chain.js' });
+  vm.runInContext(moduleSource, context, { filename: 'site/js/paper-trading.js' });
   const fetchSpyHealth = () => vm.runInContext('fetchSpyHealth()', context);
   await fetchSpyHealth();
   assert.equal(badge.className, 'transport-health live', 'fresh SPY health renders live');

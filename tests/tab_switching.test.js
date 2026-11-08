@@ -1,5 +1,5 @@
 // B2 (readability quest): the tab-switching section moved out of index.html
-// into docs/js/tab-switching.js, loaded in the same position. The test pins
+// into site/js/tab-switching.js, loaded in the same position. The test pins
 // the ?v= hash in the page to the module's content (like shared.js), asserts
 // the section no longer lives inline, and drives showTab with a stub DOM:
 // panel visibility, button active state, the one-shot history load, the bots
@@ -10,8 +10,8 @@ const path = require('node:path');
 const vm = require('node:vm');
 const { createHash } = require('node:crypto');
 
-const html = fs.readFileSync(path.join(__dirname, '../docs/index.html'), 'utf8');
-const moduleSource = fs.readFileSync(path.join(__dirname, '../docs/js/tab-switching.js'), 'utf8');
+const html = fs.readFileSync(path.join(__dirname, '../site/index.html'), 'utf8');
+const moduleSource = fs.readFileSync(path.join(__dirname, '../site/js/tab-switching.js'), 'utf8');
 const moduleHash = createHash('sha256').update(moduleSource).digest('hex').slice(0, 16);
 assert.ok(html.includes('js/tab-switching.js?v=' + moduleHash), 'tab-switching script URL must match its content hash on every hosting path');
 assert.ok(!html.includes('function showTab'), 'showTab must live in js/tab-switching.js, not inline in index.html');
@@ -47,7 +47,7 @@ const sandbox = {
   setBotsPolling: on => { pollingCalls.push(on); },
 };
 const context = vm.createContext(sandbox);
-vm.runInContext(moduleSource, context, { filename: 'docs/js/tab-switching.js' });
+vm.runInContext(moduleSource, context, { filename: 'site/js/tab-switching.js' });
 const get = name => vm.runInContext(name, context);
 
 assert.equal(typeof get('showTab'), 'function', 'module must define showTab');

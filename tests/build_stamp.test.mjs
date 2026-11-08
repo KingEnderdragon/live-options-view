@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { stampHtml } from '../scripts/stamp-build.mjs';
 
-const source = readFileSync(new URL('../docs/index.html', import.meta.url), 'utf8');
+const source = readFileSync(new URL('../site/index.html', import.meta.url), 'utf8');
 const revision = '73db30a01092a1fce45b8f0b0a88186db5ecb2ea';
 const time = new Date('2026-11-02T23:36:14Z');
 
@@ -15,7 +15,7 @@ test('packages the real source, changes only the declaration, and emits a byte r
   assert.equal(receipt.bytes, Buffer.byteLength(html));
   assert.equal(receipt.sha256, createHash('sha256').update(html).digest('hex'));
   assert.equal(receipt.commit, revision);
-  assert.equal(receipt.asset, 'docs/index.html');
+  assert.equal(receipt.asset, 'site/index.html');
   // The stale-page detector's existing extractor sees the exact stamped ID.
   assert.equal(html.match(/const BUILD_ID = "([^"]+)"/)[1], receipt.build_id);
 });

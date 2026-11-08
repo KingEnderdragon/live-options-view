@@ -34,7 +34,7 @@ const APP = 'https://live-options-view.otmooper12.workers.dev';
         return route.fulfill({status:response.status,body:Buffer.from(await response.arrayBuffer()),headers:Object.fromEntries(response.headers)});
       }
       if(url.origin === APP) {
-        const path = 'docs' + (url.pathname === '/' ? '/index.html':url.pathname);
+        const path = 'site' + (url.pathname === '/' ? '/index.html':url.pathname);
         if(fs.existsSync(path) && fs.statSync(path).isFile()) return route.fulfill({path});
       }
       return route.fulfill({status:404,body:'{}',contentType:'application/json'});

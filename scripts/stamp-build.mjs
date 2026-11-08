@@ -21,14 +21,14 @@ export function stampHtml(html, revision, now = new Date()) {
     throw new Error('Build ID verification failed');
   }
   return { html: output, receipt: { commit: revision, build_id: buildId,
-    asset: 'docs/index.html', bytes: Buffer.byteLength(output),
+    asset: 'site/index.html', bytes: Buffer.byteLength(output),
     sha256: createHash('sha256').update(output).digest('hex') } };
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const root = fileURLToPath(new URL('../', import.meta.url));
   const revision = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
-  const target = resolve(root, 'docs/index.html');
+  const target = resolve(root, 'site/index.html');
   const { html, receipt } = stampHtml(readFileSync(target, 'utf8'), revision);
   writeFileSync(target, html);
   if (createHash('sha256').update(readFileSync(target)).digest('hex') !== receipt.sha256) {

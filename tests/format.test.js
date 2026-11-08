@@ -1,8 +1,8 @@
 // B3 slice 4 (Nov 2026): the panel status formatters (formatVwapRvol /
 // formatMomentum, the short-squeeze scanner formatters, fmtSteoDelta /
 // findRevision) and the order validators (normalizePaperOrder /
-// normalizeShareOrder) moved verbatim out of docs/shared.js into
-// docs/shared/format.js. Pins the module's ?v= hash in the page, asserts the
+// normalizeShareOrder) moved verbatim out of site/shared.js into
+// site/shared/format.js. Pins the module's ?v= hash in the page, asserts the
 // ten functions and two constants no longer live in shared.js, pins the
 // entry's export surface (the ten functions are still re-exported — the same
 // function objects — while the two staleness constants stay browser globals
@@ -12,11 +12,11 @@ const { createHash } = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const html = fs.readFileSync(path.join(__dirname, '..', 'docs', 'index.html'), 'utf8');
-const shared = fs.readFileSync(path.join(__dirname, '..', 'docs', 'shared.js'), 'utf8');
-const moduleSource = fs.readFileSync(path.join(__dirname, '..', 'docs', 'shared', 'format.js'), 'utf8');
-const format = require('../docs/shared/format.js');
-const entry = require('../docs/shared.js');
+const html = fs.readFileSync(path.join(__dirname, '..', 'site', 'index.html'), 'utf8');
+const shared = fs.readFileSync(path.join(__dirname, '..', 'site', 'shared.js'), 'utf8');
+const moduleSource = fs.readFileSync(path.join(__dirname, '..', 'site', 'shared', 'format.js'), 'utf8');
+const format = require('../site/shared/format.js');
+const entry = require('../site/shared.js');
 
 const moduleHash = createHash('sha256').update(moduleSource).digest('hex').slice(0, 16);
 assert.ok(html.includes('shared/format.js?v=' + moduleHash),

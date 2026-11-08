@@ -5,10 +5,10 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { chromium } = require('playwright');
-const html = fs.readFileSync(path.join(__dirname, '../docs/index.html'), 'utf8');
-// B2 slice 13: the bots panel moved into docs/js/bots-panel.js — load the
+const html = fs.readFileSync(path.join(__dirname, '../site/index.html'), 'utf8');
+// B2 slice 13: the bots panel moved into site/js/bots-panel.js — load the
 // shipped module instead of slicing it out of the page by banner text.
-const source = fs.readFileSync(path.join(__dirname, '../docs/js/bots-panel.js'), 'utf8');
+const source = fs.readFileSync(path.join(__dirname, '../site/js/bots-panel.js'), 'utf8');
 const css = html.match(/<style>([\s\S]*?)<\/style>/)[1];
 const origin = 'http://o4-fixture.invalid';
 const fixtures = [

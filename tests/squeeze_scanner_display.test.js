@@ -1,5 +1,5 @@
 // Proves formatSqueezeScanStatus()/describeSqueezeAcquisitionFailure()
-// (docs/shared.js) -- the pure formatting functions docs/index.html's
+// (site/shared.js) -- the pure formatting functions site/index.html's
 // squeeze panel (OA-191) calls to render the short-squeeze scanner's
 // published latest.json / latest-attempt.json pointers. Mirrors
 // tests/steo_calibration_display.test.js's structure: pure, DOM-free
@@ -12,7 +12,7 @@
 // per that review's explicit instruction not to invent browser-local
 // history in place of real producer-owned first-seen metadata.
 const assert = require('node:assert/strict');
-const { formatSqueezeScanStatus, describeSqueezeAcquisitionFailure, formatSqueezeFirstSeen } = require('../docs/shared.js');
+const { formatSqueezeScanStatus, describeSqueezeAcquisitionFailure, formatSqueezeFirstSeen } = require('../site/shared.js');
 
 // -- formatSqueezeScanStatus --------------------------------------------------
 
@@ -117,7 +117,7 @@ const { formatSqueezeScanStatus, describeSqueezeAcquisitionFailure, formatSqueez
 
 // -- formatSqueezeFirstSeen ----------------------------------------------------
 // Against the real producer contract (short-squeeze-scanner#2's
-// docs/archive-contract.md): first_seen_at (UTC write-attempt timestamp,
+// site/archive-contract.md): first_seen_at (UTC write-attempt timestamp,
 // null if unknown) + is_new (true only for the introducing run; false for
 // a known existing candidate including a reappearance; null if unknown).
 
@@ -152,8 +152,8 @@ console.log('PASS squeeze scanner scan-status, acquisition-failure, and first-se
 
 // Scheduled cadence replaces elapsed six-hour freshness in the live panel.
 {
-  const {formatSqueezeScheduleStatus: format} = require('../docs/shared.js');
-  const calendar = require('../docs/squeeze-calendar.json');
+  const {formatSqueezeScheduleStatus: format} = require('../site/shared.js');
+  const calendar = require('../site/squeeze-calendar.json');
   const make = slot => ({run_id:slot,status:'complete',sampling_mode:'scheduled',scheduled_for:slot,
     started_at:new Date(Date.parse(slot)+3000).toISOString(),finished_at:new Date(Date.parse(slot)+13000).toISOString()});
   const record = p => ({run_id:p.run_id,status:'finished',acquisition_status:p.status,scheduled_for:p.scheduled_for});

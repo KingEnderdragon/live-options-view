@@ -1,10 +1,10 @@
-// Proves fmtSteoDelta()/findRevision() (docs/shared.js) -- the pure
-// formatting/lookup functions docs/index.html's fetchSteoCalibration() calls
+// Proves fmtSteoDelta()/findRevision() (site/shared.js) -- the pure
+// formatting/lookup functions site/index.html's fetchSteoCalibration() calls
 // to render the EIA STEO crude calibration panel. Mirrors
 // tests/momentum_display.test.js's structure and rationale: pure, DOM-free
 // functions, testable the simple direct-require way.
 const assert = require('node:assert/strict');
-const { fmtSteoDelta, findRevision } = require('../docs/shared.js');
+const { fmtSteoDelta, findRevision } = require('../site/shared.js');
 
 // -- fmtSteoDelta -------------------------------------------------------------
 

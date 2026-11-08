@@ -1,5 +1,5 @@
 // B2 (readability quest): the paper-trading section moved out of index.html
-// into docs/js/paper-trading.js, loaded in the same position. The test pins
+// into site/js/paper-trading.js, loaded in the same position. The test pins
 // the ?v= hash in the page to the module's content (like shared.js), asserts
 // the section no longer lives inline, and drives the book / execution /
 // settlement / render paths with a stub DOM + stub fetch + the real shared.js
@@ -17,9 +17,9 @@ const path = require('node:path');
 const vm = require('node:vm');
 const { createHash } = require('node:crypto');
 
-const html = fs.readFileSync(path.join(__dirname, '../docs/index.html'), 'utf8');
-const moduleSource = fs.readFileSync(path.join(__dirname, '../docs/js/paper-trading.js'), 'utf8');
-const sharedSource = fs.readFileSync(path.join(__dirname, '../docs/shared.js'), 'utf8');
+const html = fs.readFileSync(path.join(__dirname, '../site/index.html'), 'utf8');
+const moduleSource = fs.readFileSync(path.join(__dirname, '../site/js/paper-trading.js'), 'utf8');
+const sharedSource = fs.readFileSync(path.join(__dirname, '../site/shared.js'), 'utf8');
 const moduleHash = createHash('sha256').update(moduleSource).digest('hex').slice(0, 16);
 assert.ok(html.includes('js/paper-trading.js?v=' + moduleHash), 'paper-trading script URL must match its content hash on every hosting path');
 for (const fn of ['cacheSessionDisplay', 'readSessionDisplayCache', 'newExecutionRequestId',
@@ -116,22 +116,22 @@ const sandbox = {
 };
 const context = vm.createContext(sandbox);
 // B3 slice 2 (Nov 2026): fmtQ / computeAtmWindow moved out of shared.js
-// into docs/shared/heatmap.js — load the shipped module too, in page order,
+// into site/shared/heatmap.js — load the shipped module too, in page order,
 // so renderPaper / visibleContractSymbols read the real ones.
 // B3 slice 3 (Nov 2026): LiveQuoteService / freshShareQuote moved to
-// docs/shared/quotes.js — same, after heatmap.js, so the module's top-level
+// site/shared/quotes.js — same, after heatmap.js, so the module's top-level
 // `const liveQuotes = new LiveQuoteService()` constructs the real service.
 // B3 slice 4 (Nov 2026): the panel formatters + order validators moved to
-// docs/shared/format.js — same, after quotes.js, so normalizePaperOrder is
+// site/shared/format.js — same, after quotes.js, so normalizePaperOrder is
 // the real one when the trade paths run.
 // B3 slice 5 (Nov 2026): the chain underlying names moved to
-// docs/shared/chain.js — same, after format.js, in page order.
-vm.runInContext(sharedSource, context, { filename: 'docs/shared.js' });
-vm.runInContext(fs.readFileSync(path.join(__dirname, '../docs/shared/heatmap.js'), 'utf8'), context, { filename: 'docs/shared/heatmap.js' });
-vm.runInContext(fs.readFileSync(path.join(__dirname, '../docs/shared/quotes.js'), 'utf8'), context, { filename: 'docs/shared/quotes.js' });
-vm.runInContext(fs.readFileSync(path.join(__dirname, '../docs/shared/format.js'), 'utf8'), context, { filename: 'docs/shared/format.js' });
-vm.runInContext(fs.readFileSync(path.join(__dirname, '../docs/shared/chain.js'), 'utf8'), context, { filename: 'docs/shared/chain.js' });
-vm.runInContext(moduleSource, context, { filename: 'docs/js/paper-trading.js' });
+// site/shared/chain.js — same, after format.js, in page order.
+vm.runInContext(sharedSource, context, { filename: 'site/shared.js' });
+vm.runInContext(fs.readFileSync(path.join(__dirname, '../site/shared/heatmap.js'), 'utf8'), context, { filename: 'site/shared/heatmap.js' });
+vm.runInContext(fs.readFileSync(path.join(__dirname, '../site/shared/quotes.js'), 'utf8'), context, { filename: 'site/shared/quotes.js' });
+vm.runInContext(fs.readFileSync(path.join(__dirname, '../site/shared/format.js'), 'utf8'), context, { filename: 'site/shared/format.js' });
+vm.runInContext(fs.readFileSync(path.join(__dirname, '../site/shared/chain.js'), 'utf8'), context, { filename: 'site/shared/chain.js' });
+vm.runInContext(moduleSource, context, { filename: 'site/js/paper-trading.js' });
 const get = name => vm.runInContext(name, context);
 const set = (name, value) => vm.runInContext(`${name} = (${JSON.stringify(value)})`, context);
 const response = (data, status = 200) => ({

@@ -1,5 +1,5 @@
 // B2 (readability quest): the historical panel moved out of index.html
-// into docs/js/historical-panel.js, loaded in the same position. The test
+// into site/js/historical-panel.js, loaded in the same position. The test
 // loads the shipped module instead of slicing the page by banner text, pins
 // the ?v= hash in the page to the module's content (like shared.js), and
 // drives the module's functions with stubbed DOM + fetch so the tier
@@ -16,9 +16,9 @@ const path = require('node:path');
 const vm = require('node:vm');
 const { createHash } = require('node:crypto');
 
-const html = fs.readFileSync(path.join(__dirname, '../docs/index.html'), 'utf8');
-const shared = fs.readFileSync(path.join(__dirname, '../docs/shared.js'), 'utf8');
-const moduleSource = fs.readFileSync(path.join(__dirname, '../docs/js/historical-panel.js'), 'utf8');
+const html = fs.readFileSync(path.join(__dirname, '../site/index.html'), 'utf8');
+const shared = fs.readFileSync(path.join(__dirname, '../site/shared.js'), 'utf8');
+const moduleSource = fs.readFileSync(path.join(__dirname, '../site/js/historical-panel.js'), 'utf8');
 const rangesCsv = (() => {
   const lines = ['Tier,StrikeOffset,n_obs,Call_median,Call_p25,Call_p50,Call_p75,Call_p90,Call_adj,Put_median,Put_p25,Put_p50,Put_p75,Put_p90,Put_adj'];
   for (let o = -20; o <= 20; o++) {
@@ -95,14 +95,14 @@ function harness() {
   // shared.js + shared/csv-ranges.js + shared/heatmap.js whole, so parseCsv /
   // parseRangesCsv / buildHeatmapRows / TIER_COLORS are the real ones; ranges
   // parsed from the inline CSV above. B3 slice 1 (Nov 2026): parseCsv /
-  // parseRangesCsv moved to docs/shared/csv-ranges.js — load the shipped
+  // parseRangesCsv moved to site/shared/csv-ranges.js — load the shipped
   // module too, in page order. B3 slice 2 (Nov 2026): buildHeatmapRows /
-  // TIER_COLORS moved to docs/shared/heatmap.js — same, after csv-ranges.js.
-  vm.runInContext(shared, ctx, { filename: 'docs/shared.js' });
-  vm.runInContext(fs.readFileSync(path.join(__dirname, '../docs/shared/csv-ranges.js'), 'utf8'), ctx, { filename: 'docs/shared/csv-ranges.js' });
-  vm.runInContext(fs.readFileSync(path.join(__dirname, '../docs/shared/heatmap.js'), 'utf8'), ctx, { filename: 'docs/shared/heatmap.js' });
+  // TIER_COLORS moved to site/shared/heatmap.js — same, after csv-ranges.js.
+  vm.runInContext(shared, ctx, { filename: 'site/shared.js' });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../site/shared/csv-ranges.js'), 'utf8'), ctx, { filename: 'site/shared/csv-ranges.js' });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../site/shared/heatmap.js'), 'utf8'), ctx, { filename: 'site/shared/heatmap.js' });
   vm.runInContext(`ranges = parseRangesCsv(${JSON.stringify(rangesCsv)});`, ctx);
-  vm.runInContext(moduleSource, ctx, { filename: 'docs/js/historical-panel.js' });
+  vm.runInContext(moduleSource, ctx, { filename: 'site/js/historical-panel.js' });
   return { ctx, els, calls, routes };
 }
 const get = (ctx, name) => vm.runInContext(name, ctx);

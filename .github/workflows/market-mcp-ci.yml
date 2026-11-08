@@ -2,10 +2,10 @@ name: Market MCP consumer
 
 on:
   pull_request:
-    paths: ["market_mcp/**", "docs/shared.js", "docs/shared/**", "docs/squeeze-calendar.json", ".github/workflows/market-mcp-ci.yml"]
+    paths: ["market_mcp/**", "site/shared.js", "site/shared/**", "site/squeeze-calendar.json", ".github/workflows/market-mcp-ci.yml"]
   push:
     branches: [master]
-    paths: ["market_mcp/**", "docs/shared.js", "docs/shared/**", "docs/squeeze-calendar.json", ".github/workflows/market-mcp-ci.yml"]
+    paths: ["market_mcp/**", "site/shared.js", "site/shared/**", "site/squeeze-calendar.json", ".github/workflows/market-mcp-ci.yml"]
 
 jobs:
   test:

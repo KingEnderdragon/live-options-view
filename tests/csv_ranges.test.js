@@ -1,5 +1,5 @@
 // B3 slice 1 (Nov 2026): parseCsv / parseRangesCsv / getThresh / oiBucket
-// moved verbatim out of docs/shared.js into docs/shared/csv-ranges.js.
+// moved verbatim out of site/shared.js into site/shared/csv-ranges.js.
 // Pins the module's ?v= hash in the page, asserts the four functions no
 // longer live in shared.js, pins the entry's export list (exactly the same
 // 26 names as before the split — the four helpers stay browser globals by
@@ -9,11 +9,11 @@ const { createHash } = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const html = fs.readFileSync(path.join(__dirname, '..', 'docs', 'index.html'), 'utf8');
-const shared = fs.readFileSync(path.join(__dirname, '..', 'docs', 'shared.js'), 'utf8');
-const moduleSource = fs.readFileSync(path.join(__dirname, '..', 'docs', 'shared', 'csv-ranges.js'), 'utf8');
-const csvRanges = require('../docs/shared/csv-ranges.js');
-const entry = require('../docs/shared.js');
+const html = fs.readFileSync(path.join(__dirname, '..', 'site', 'index.html'), 'utf8');
+const shared = fs.readFileSync(path.join(__dirname, '..', 'site', 'shared.js'), 'utf8');
+const moduleSource = fs.readFileSync(path.join(__dirname, '..', 'site', 'shared', 'csv-ranges.js'), 'utf8');
+const csvRanges = require('../site/shared/csv-ranges.js');
+const entry = require('../site/shared.js');
 
 const moduleHash = createHash('sha256').update(moduleSource).digest('hex').slice(0, 16);
 assert.ok(html.includes('shared/csv-ranges.js?v=' + moduleHash),

@@ -1,5 +1,5 @@
 // B2 (readability quest): the boot section moved out of index.html into
-// docs/js/boot.js, loaded in the same position — the last inline section
+// site/js/boot.js, loaded in the same position — the last inline section
 // (only the stale-page protection stays inline, because BUILD_ID must live
 // in index.html itself). The test pins the ?v= hash in the page to the
 // module's content (like shared.js), asserts the section no longer lives
@@ -14,8 +14,8 @@ const path = require('node:path');
 const vm = require('node:vm');
 const { createHash } = require('node:crypto');
 
-const html = fs.readFileSync(path.join(__dirname, '../docs/index.html'), 'utf8');
-const moduleSource = fs.readFileSync(path.join(__dirname, '../docs/js/boot.js'), 'utf8');
+const html = fs.readFileSync(path.join(__dirname, '../site/index.html'), 'utf8');
+const moduleSource = fs.readFileSync(path.join(__dirname, '../site/js/boot.js'), 'utf8');
 const moduleHash = createHash('sha256').update(moduleSource).digest('hex').slice(0, 16);
 assert.ok(html.includes('js/boot.js?v=' + moduleHash), 'boot script URL must match its content hash on every hosting path');
 assert.ok(!html.includes('(async function boot()'), 'boot must live in js/boot.js, not inline in index.html');
@@ -106,7 +106,7 @@ function runBoot({ cachedSession = null, submitAuthImpl = null } = {}) {
     fetchSqueezeLatest: () => { calls.fetchSqueezeLatest++; },
   };
   const context = vm.createContext(sandbox);
-  vm.runInContext(moduleSource, context, { filename: 'docs/js/boot.js' });
+  vm.runInContext(moduleSource, context, { filename: 'site/js/boot.js' });
   const flush = () => new Promise(r => setTimeout(r, 20));
   return { els, calls, pollers, sandbox, context, flush, getTickerSubscribeCb: () => tickerSubscribeCb };
 }

@@ -1,5 +1,5 @@
 // B2 (readability quest): the sidebar-widgets section moved out of index.html
-// into docs/js/sidebar-widgets.js, loaded in the same position. The test pins
+// into site/js/sidebar-widgets.js, loaded in the same position. The test pins
 // the ?v= hash in the page to the module's content (like shared.js), asserts
 // the section no longer lives inline, and drives the widget data functions
 // with stubbed fetch + page globals: the intraday cache, the daily window,
@@ -15,9 +15,9 @@ const path = require('node:path');
 const vm = require('node:vm');
 const { createHash } = require('node:crypto');
 
-const html = fs.readFileSync(path.join(__dirname, '../docs/index.html'), 'utf8');
-const moduleSource = fs.readFileSync(path.join(__dirname, '../docs/js/sidebar-widgets.js'), 'utf8');
-const sharedSource = fs.readFileSync(path.join(__dirname, '../docs/shared.js'), 'utf8');
+const html = fs.readFileSync(path.join(__dirname, '../site/index.html'), 'utf8');
+const moduleSource = fs.readFileSync(path.join(__dirname, '../site/js/sidebar-widgets.js'), 'utf8');
+const sharedSource = fs.readFileSync(path.join(__dirname, '../site/shared.js'), 'utf8');
 const moduleHash = createHash('sha256').update(moduleSource).digest('hex').slice(0, 16);
 assert.ok(html.includes('js/sidebar-widgets.js?v=' + moduleHash), 'sidebar-widgets script URL must match its content hash on every hosting path');
 assert.ok(!html.includes('async function loadIntradayPrices'), 'loadIntradayPrices must live in js/sidebar-widgets.js, not inline in index.html');
@@ -85,14 +85,14 @@ function harness({ fetchImpl, chainRows, manifestDates = DATES } = {}) {
   // `getThresh`/`oiBucket` are browser globals in production (not in
   // shared.js's module.exports), so load both files into the context — they
   // define them as top-level functions. B3 slice 1 (Nov 2026): the three
-  // moved to docs/shared/csv-ranges.js, loaded here in page order.
+  // moved to site/shared/csv-ranges.js, loaded here in page order.
   // `ranges` is declared in the page's shared scope (just above the loader
   // section), before this module loads.
-  vm.runInContext(sharedSource, context, { filename: 'docs/shared.js' });
-  vm.runInContext(fs.readFileSync(path.join(__dirname, '../docs/shared/csv-ranges.js'), 'utf8'), context, { filename: 'docs/shared/csv-ranges.js' });
+  vm.runInContext(sharedSource, context, { filename: 'site/shared.js' });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../site/shared/csv-ranges.js'), 'utf8'), context, { filename: 'site/shared/csv-ranges.js' });
   vm.runInContext('let ranges = null;', context);
   vm.runInContext('ranges = ' + JSON.stringify(RANGES) + ';', context);
-  vm.runInContext(moduleSource, context, { filename: 'docs/js/sidebar-widgets.js' });
+  vm.runInContext(moduleSource, context, { filename: 'site/js/sidebar-widgets.js' });
   return { context, fetchCalls, saved, chainCalls };
 }
 const call = (h, expr) => vm.runInContext(expr, h.context);
