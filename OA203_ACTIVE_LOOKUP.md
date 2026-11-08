@@ -7,6 +7,61 @@ Status: **implementation candidate for independent review**. The code is
 disabled for production collection by default. No collection setting or
 deployment has been changed.
 
+## Activation policy — November 8, 2026
+
+Owen requested closing the activation loose end. The prior generic owner-decision
+gate is superseded by this bounded daily-session release policy.
+
+- Keep the accepted approximately 30-minute cadence and all/clean/qualified views.
+- Keep the existing 600-second quote-age display threshold. This labels old
+  ranked endpoint evidence; it does not change quote eligibility or claim a
+  30-minute publication is a live quote. Cutoff age and quote age remain separate.
+- Retain new active artifacts at least 30 days, then delete them on the next
+  successful publisher attempt. Both session date and object modification time
+  must exceed 30 days. If the scanner stops, cleanup waits; publication cannot
+  accumulate more data while stopped. No bucket-wide lifecycle permission needed.
+- Delete only validated keys below `oa203/scanner/<date>/inprogress/`, for
+  sessions on/after November 9, 2026. Never delete raw sweeps, final daily outputs,
+  historical pre-policy snapshots, or other product families.
+- Before each production build, inventory remote active artifacts and reserve
+  one conditional, immutable R2 budget token. At most 16 attempts per session,
+  three per cutoff, and 16 distinct cutoffs. Spool loss cannot reset these tokens.
+- Global active budget: 8 GiB, charged conservatively as actual retained object
+  bytes PLUS 17 MiB for every retained attempt token. Each generation already
+  limits four members to 4 MiB each; the extra MiB covers pointers/status/token
+  overhead. Stop before reserving if the charged budget would exceed the cap.
+  Fail closed on truncated inventory, unknown active keys, inaccessible storage,
+  failed cleanup or an exhausted budget. Collection and finalization continue.
+- Operational invariant: one scanner replica, no overlapping manual publisher.
+  Conditional reservation protects same-cutoff retries; the global inventory
+  check is not a distributed multi-writer quota. Do not scale replicas without
+  redesigning that check.
+- Linux snapshot child: one available CPU core, lower scheduling priority,
+  2 GiB virtual-address cap, 230 CPU seconds and 240 wall-clock seconds.
+  No sampling/provider-rate increase. The observed service limit is 8 CPU and
+  8,000,000,000 memory bytes; no plan upgrade or service-size increase is needed.
+
+Cost envelope, not an account-wide billing cutoff: 16 attempts × 230 CPU seconds
+and 16 × 240 wall seconds × 2 GiB per session. For 23 sessions, roughly
+23.5 CPU-hours and 49.1 GiB-hours at the enforced ceilings. At published
+Railway rates ($20/vCPU-month and $10/GB-month), approximately $1.35 of extra
+compute at continuous worst-case utilization, before small supervisor overhead.
+8 GiB stored is about $0.13/month at R2 Standard's $0.015/GB-month, before free
+allowances. Bounded storage listings/uploads add operation charges; ordinary
+usage should be substantially below these ceilings. Existing scanner collection,
+finalization, volume and unrelated services are outside this incremental estimate.
+Sources: https://docs.railway.com/pricing and https://developers.cloudflare.com/r2/pricing/.
+
+Checks before activation: regression tests; real-archive bounded builder;
+actual R2 conditional reservation/readback/delete capability; verified deployed
+revision and saved activation flag. Live cadence and connected-client results
+are verified during the already scheduled November 9 session, not claimed from
+offline replay. Weekly/multi-session integration belongs to #130 and is not
+required to activate this daily-session product.
+
+The design/history below records the original proposal and is superseded by this
+policy where it refers to unresolved owner decisions or activation defaults.
+
 ## Candidate implementation and activation gates
 
 The scanner now has a cutoff-aware `build_contract_rows(..., cutoff_sweep=N)`
@@ -219,6 +274,20 @@ endpoint.
 | A3 | MCP surface | **New `active_rankings` tool** (keeps `return_rankings` final-only) | Extend `return_rankings` with `session: "current"` and `snapshot` |
 | A4 | Which views get snapshots | all, clean and qualified (the same three as final) | Qualified only, to cut build cost |
 | A5 | Snapshot retention | Keep the day's snapshots. Optionally prune them after the session is final. | Keep only the latest |
+
+**A1 amendment (2026-10-15, proposed).** "Every 6 sweeps" assumed ~5-minute
+sweeps. On 2026-10-13, provider 504s stretched sweeps to 486–1,001 s and
+sweeps 6→12 took 57.8 minutes. The trigger is now elapsed time: a snapshot is
+due once 30 minutes have passed since the previous cutoff, to the nearest
+sweep end (half a nominal sweep of tolerance keeps the healthy cadence at six
+sweeps). Each pointer carries a `cadence` report (status `first`/`on_time`/`late`,
+sweeps covered, longest sweep, budget-cut sweeps, server and transport errors), and
+`active_rankings` reports `late` or `overdue` from elapsed time; for a pinned
+sweep, `overdue` is judged from the current latest pointer and `newer_snapshot`
+says whether a newer sweep exists. The sweep budget is enforced at request
+dispatch: no first attempt or retry starts after it, and rate-limit and backoff
+waits are capped at it. Activation
+remains gated by `OA203_ACTIVE_SNAPSHOTS_ENABLED`.
 
 ## Required tests (beyond the issue's checklist)
 
