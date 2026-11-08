@@ -1758,31 +1758,12 @@ function openShareTicket(e, sym) {
 <script>
 
 // ── tab switching ────────────────────────────────────────────────────────────
-let historyLoaded = false;
-
-// tab id -> [panel element id, tab button id]
-const TABS = {
-  live:    ['live-panel',    'tab-live'],
-  history: ['history-panel', 'tab-history'],
-  bots:    ['bots-panel',    'tab-bots'],
-  squeeze: ['squeeze-panel', 'tab-squeeze'],
-};
-
-function showTab(tab) {
-  if (!TABS[tab]) tab = 'live';
-  for (const [name, [panelId, btnId]] of Object.entries(TABS)) {
-    const active = name === tab;
-    document.getElementById(panelId).classList.toggle('hidden', !active);
-    document.getElementById(btnId).classList.toggle('active', active);
-  }
-  if (tab === 'history' && !historyLoaded) {
-    historyLoaded = true;
-    loadHistoryManifest();
-  }
-  // The bot roster is only polled while its tab is on screen -- no point
-  // holding an extra request cycle open behind a hidden panel.
-  setBotsPolling(tab === 'bots');
-}
+// Moved to js/tab-switching.js (B2) — loaded below in the same position,
+// so the page's script order is unchanged. The banner stays here as
+// the section's marker.
+</script>
+<script src="js/tab-switching.js?v=eb4da7c54f71b804"></script>
+<script>
 
 // ── automated (bot) panel ────────────────────────────────────────────────────
 // Reads /api/bots, a public read-only roster of the Crassus paper-trading
