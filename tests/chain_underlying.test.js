@@ -7,6 +7,7 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const vm = require('node:vm');
 const { createHash } = require('node:crypto');
 const shared = require('../docs/shared.js');
 const { chainLatestPath, occRoot, validateChainPayload, ChainSelection, relativeOiRanges, summarizeSpyHealth } = shared;
@@ -85,32 +86,78 @@ assert.ok(!html.includes('async function fetchChain('), 'fetchChain must live in
 assert.ok(!html.includes('function fetchLatest('), 'fetchLatest must live in js/data-fetch-cycle.js, not inline in index.html');
 assert.ok(html.includes('// ── data fetch cycle'), 'data fetch cycle banner must stay in index.html as the section marker');
 
-// The price tile and SPY health badge use the shipped HTML functions, with
+// The price tile and SPY health badge use the shipped page functions, with
 // offline artifact responses and no provider/browser network dependency.
-assert.match(html, /const MAIN_TICKERS = \['QQQ', 'SPY'/);
+// B2 (readability quest): the price strip moved out of index.html into
+// docs/js/price-strip.js, loaded in the same position. The test loads the
+// shipped module instead of slicing fetchPrices out of the page by banner
+// text, and pins the ?v= hash in the page to the module's content (like
+// shared.js). The module runs against the real shared.js TickerStateStore
+// with a stub DOM, so the SPY provider-vs-fallback routing is verified
+// through the store the page actually uses.
+const priceStripSource = fs.readFileSync(path.join(__dirname, '..', 'docs', 'js', 'price-strip.js'), 'utf8');
+const priceStripHash = createHash('sha256').update(priceStripSource).digest('hex').slice(0, 16);
+assert.ok(html.includes('js/price-strip.js?v=' + priceStripHash), 'price-strip script URL must match its content hash on every hosting path');
+assert.ok(!html.includes('async function fetchPrices('), 'fetchPrices must live in js/price-strip.js, not inline in index.html');
+assert.ok(!html.includes("const MAIN_TICKERS = ['QQQ', 'SPY'"), 'the price-strip tickers must live in js/price-strip.js, not inline in index.html');
+assert.ok(html.includes('// ── price strip'), 'price strip banner must stay in index.html as the section marker');
+assert.match(priceStripSource, /const MAIN_TICKERS = \['QQQ', 'SPY'/);
 assert.equal(shared.isTradeableShareSymbol('SPY'), false, 'SPY tile is display-only');
 const testPriceTile = async () => {
-  const published = [];
-  const fallback = [];
-  const rendered = [];
-  let prices = { SPY: { price: 670.2, source: 'dxlink', quote_ts: new Date(NOW).toISOString() }, QQQ: { price: 600.1 } };
-  const tickerState = {
-    publishFallback: p => fallback.push(p), publish: q => published.push(...q),
-    snapshot: () => ({ SPY: published.at(-1) }),
+  // Stub DOM: one cached tile per id, each with cached .px/.chg/.market-state
+  // spans — updatePriceStrip writes the tile state through these, and the
+  // getElementById count is the tile-refresh count.
+  const makeSpan = () => ({ textContent: '', className: '', dataset: {} });
+  const makeTile = () => {
+    const spans = {};
+    const classList = { _s: new Set(), add(...c) { c.forEach(x => this._s.add(x)); }, remove(...c) { c.forEach(x => this._s.delete(x)); }, contains(c) { return this._s.has(c); } };
+    return {
+      textContent: '', title: '', dataset: {}, offsetWidth: 0, classList,
+      querySelector: sel => (spans[sel] ||= makeSpan()),
+    };
   };
-  const priceSource = html.slice(html.indexOf('async function fetchPrices()'), html.indexOf('// EIA STEO crude calibration', html.indexOf('async function fetchPrices()')));
-  const fetchPrices = new Function('fetch', 'BROWSER_DATA', 'tickerState', 'updatePriceStrip', 'console', `${priceSource}\nreturn fetchPrices;`)(
-    async () => ({ ok: true, json: async () => ({ prices }) }), 'https://r2.example', tickerState,
-    state => rendered.push(state), { warn() {} },
-  );
+  const tiles = {};
+  const byIdCount = {};
+  const documentStub = {
+    getElementById: id => { byIdCount[id] = (byIdCount[id] || 0) + 1; return (tiles[id] ||= makeTile()); },
+    createElement: () => makeTile(),
+  };
+  let prices = { SPY: { price: 670.2, source: 'dxlink', quote_ts: new Date(NOW).toISOString() }, QQQ: { price: 600.1 } };
+  const context = vm.createContext({
+    console: { warn() {} },
+    document: documentStub,
+    fetch: async () => ({ ok: true, json: async () => ({ prices }) }),
+    BROWSER_DATA: 'https://r2.example',
+    // The module constructs its tickerState at load from the real shared.js
+    // store, so the provider-vs-fallback routing is exercised for real.
+    TickerStateStore: shared.TickerStateStore,
+    SHARE_QUOTE_MAX_AGE_MS: shared.SHARE_QUOTE_MAX_AGE_MS,
+    isTradeableShareSymbol: shared.isTradeableShareSymbol,
+    formatVwapRvol: shared.formatVwapRvol,
+    formatMomentum: shared.formatMomentum,
+    openShareTicket: () => {},
+  });
+  vm.runInContext(priceStripSource, context, { filename: 'docs/js/price-strip.js' });
+  // Primitive reads across the vm boundary (deepEqual fails across realms).
+  const g = expr => vm.runInContext(expr, context);
+  const fetchPrices = () => vm.runInContext('fetchPrices()', context);
+  const spyPrice = () => g("tickerState.get('SPY').price");
+  const spySource = () => g("tickerState.get('SPY').source");
   await fetchPrices();
-  assert.equal(published[0].price, 670.2, 'SPY tile uses the SPY provider price');
-  assert.equal(published[0].quote_ts, prices.SPY.quote_ts, 'SPY tile keeps provider observation time');
-  assert.equal(fallback[0].SPY, undefined, 'SPY does not use macro fallback');
+  assert.equal(spyPrice(), 670.2, 'SPY tile uses the SPY provider price');
+  assert.equal(spySource(), 'dxlink', 'SPY keeps its provider source, not the macro fallback');
+  assert.equal(g("tickerState.get('SPY').observedAt"), prices.SPY.quote_ts, 'SPY tile keeps provider observation time');
+  assert.equal(g("tickerState.get('QQQ').source"), 'r2-snapshot', 'QQQ comes through the macro fallback');
+  assert.equal(g("tickerState.get('QQQ').price"), 600.1);
+  assert.equal(tiles['tk-SPY'].querySelector('.px').textContent, '670.20', 'SPY tile renders the provider price');
+  assert.equal(tiles['tk-QQQ'].querySelector('.px').textContent, '600.10');
+  assert.equal(tiles['tk-QQQ'].dataset.state, 'fallback', 'QQQ tile is marked fallback');
+  assert.equal(byIdCount['tk-SPY'], 1, 'one tile refresh per fetch');
   prices = { SPY: { price: null, source: null, quote_ts: null }, QQQ: { price: 600.1 } };
   await fetchPrices();
-  assert.equal(published.length, 1, 'missing SPY price is not fabricated');
-  assert.equal(rendered.length, 2, 'tile state is refreshed even when SPY is missing');
+  assert.equal(spyPrice(), 670.2, 'missing SPY price is not fabricated');
+  assert.equal(spySource(), 'dxlink', 'missing SPY does not fall back to a macro price');
+  assert.equal(byIdCount['tk-SPY'], 2, 'tile state is refreshed even when SPY is missing');
   for (const bad of [
     { price: 600, source: 'dxlink', quote_ts: new Date(NOW).toISOString(), symbol: 'QQQ' },
     { price: 670, source: 'yfinance', quote_ts: new Date(NOW).toISOString() },
@@ -119,9 +166,10 @@ const testPriceTile = async () => {
   ]) {
     prices = { SPY: bad, QQQ: { price: 600.1 } };
     await fetchPrices();
-    assert.equal(published.length, 1, 'foreign or unsupported SPY evidence is rejected');
-    assert.equal(fallback.at(-1).SPY, undefined);
+    assert.equal(spyPrice(), 670.2, 'foreign or unsupported SPY evidence is rejected');
+    assert.equal(spySource(), 'dxlink');
   }
+  assert.equal(byIdCount['tk-SPY'], 6, 'every fetch refreshes the tile');
   let now = Date.parse('2026-10-07T15:00:00Z');
   const store = new shared.TickerStateStore({ SPY: 'equity', QQQ: 'equity' }, { nowFn: () => now });
   assert.equal(store.get('SPY'), null, 'missing SPY stays missing');
