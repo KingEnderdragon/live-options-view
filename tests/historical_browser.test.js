@@ -21,6 +21,7 @@ const APP = 'https://live-options-view.otmooper12.workers.dev';
   };
   try {
     const page = await browser.newPage();
+    await page.clock.setFixedTime(new Date('2026-10-29T12:00:00Z'));
     const errors = [];
     page.on('pageerror',e=>errors.push(e.message));
     const requests = [];
@@ -51,6 +52,14 @@ const APP = 'https://live-options-view.otmooper12.workers.dev';
     assert.ok(requests.some(u=>u.includes('/browser-data/prices/qqq_intraday_')));
     assert.ok(!requests.some(u=>/r2\.dev\/(manifest|raw|prices)/.test(u)));
     assert.deepEqual(errors,[]);
+
+    await page.clock.setFixedTime(new Date('2026-11-08T12:00:00Z'));
+    await page.reload(); await page.locator('#tab-history').click();
+    await page.waitForFunction(()=>document.querySelector('#hist-status').textContent ===
+      'Trade date 2026-10-27 - archive stale: newest date 2026-10-27 is 8 trading days old');
+    assert.equal(await page.locator('#hist-date option').count(),2);
+    assert.ok(await page.locator('#hist-heatmap-wrap').isVisible());
+    await page.clock.setFixedTime(new Date('2026-10-29T12:00:00Z'));
     archives['manifest.json']='{"dates":[]}';
     await page.reload(); await page.locator('#tab-history').click();
     await page.waitForFunction(()=>document.querySelector('#hist-status').textContent === 'Archive is empty.');
