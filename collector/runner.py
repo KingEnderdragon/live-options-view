@@ -36,26 +36,28 @@ from .feed import DXLinkFeed
 from .oauth import OAuthTokenManager, TastyAuthError, tasty_auth
 from .tiers import classify_tier
 from .chain import load_chain
-from ._legacy import (
+from .state import (
     Counters,
-    LiveQuoteRegistry,
     QQQ_SESSION,
     SnapshotTracker,
     UnderlyingSession,
     UNDERLYING_SESSIONS,
+    finalize_rvol_baseline,
+    load_rvol_baseline,
+    restore_state,
+)
+from ._legacy import (
+    LiveQuoteRegistry,
     _classify_startup,
     _fresh_spy_spot,
     _log_ticker_health,
     _observed_spy_price,
     _select_spy_strikes,
     eia_steo_loop,
-    finalize_rvol_baseline,
     health_loop,
-    load_rvol_baseline,
     make_s3,
     prices_loop,
     push_health,
-    restore_state,
     take_snapshot,
     weekly_snapshot_loop,
 )
