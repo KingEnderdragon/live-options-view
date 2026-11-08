@@ -36,6 +36,7 @@ from .feed import DXLinkFeed
 from .oauth import OAuthTokenManager, TastyAuthError, tasty_auth
 from .tiers import classify_tier
 from .chain import load_chain
+from .steo import eia_steo_loop
 from .prices import (
     _classify_startup,
     _log_ticker_health,
@@ -59,7 +60,6 @@ from .state import (
     restore_state,
 )
 from ._legacy import (
-    eia_steo_loop,
     health_loop,
     push_health,
     take_snapshot,
