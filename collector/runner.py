@@ -33,13 +33,12 @@ from .config import (
     past_stop,
 )
 from .feed import DXLinkFeed
+from .oauth import OAuthTokenManager, TastyAuthError, tasty_auth
 from ._legacy import (
     Counters,
     LiveQuoteRegistry,
-    OAuthTokenManager,
     QQQ_SESSION,
     SnapshotTracker,
-    TastyAuthError,
     UnderlyingSession,
     UNDERLYING_SESSIONS,
     _classify_startup,
@@ -58,7 +57,6 @@ from ._legacy import (
     push_health,
     restore_state,
     take_snapshot,
-    tasty_auth,
     weekly_snapshot_loop,
 )
 
