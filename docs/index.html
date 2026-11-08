@@ -1900,17 +1900,12 @@ function setStatus(type, text) {
 }
 
 // ── countdown timer ───────────────────────────────────────────────────────────
-function startCountdown() {
-  countdown = REFRESH;
-  clearInterval(timerHandle);
-  timerHandle = setInterval(() => {
-    countdown--;
-    if (countdown <= 0) {
-      fetchLatest();
-      countdown = REFRESH;
-    }
-  }, 1000);
-}
+// Moved to js/countdown-timer.js (B2) — loaded below in the same position,
+// so the page's script order is unchanged. The chain_underlying test slices
+// up to this banner, so it stays here as the section's marker.
+</script>
+<script src="js/countdown-timer.js?v=a8000ee27c92f681"></script>
+<script>
 
 // ── price strip ───────────────────────────────────────────────────────────────
 
