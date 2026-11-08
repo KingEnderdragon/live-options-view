@@ -6,6 +6,7 @@ on:
     paths:
       - "docs/**"
       - "worker.js"
+      - "worker/**"
       - "wrangler.toml"
       - "scripts/stamp-build.mjs"
       - "tests/build_stamp.test.mjs"
