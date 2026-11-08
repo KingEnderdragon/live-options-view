@@ -35,6 +35,7 @@ from .config import (
 from .feed import DXLinkFeed
 from .oauth import OAuthTokenManager, TastyAuthError, tasty_auth
 from .tiers import classify_tier
+from .chain import load_chain
 from ._legacy import (
     Counters,
     LiveQuoteRegistry,
@@ -50,7 +51,6 @@ from ._legacy import (
     eia_steo_loop,
     finalize_rvol_baseline,
     health_loop,
-    load_chain,
     load_rvol_baseline,
     make_s3,
     prices_loop,
