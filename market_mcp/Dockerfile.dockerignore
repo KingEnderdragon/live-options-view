@@ -10,9 +10,9 @@ market_mcp/**
 !market_mcp/overview.js
 !market_mcp/server.js
 !market_mcp/http.js
-!docs/
-docs/**
-!docs/shared.js
-!docs/shared/
-!docs/shared/**
-!docs/squeeze-calendar.json
+!site/
+site/**
+!site/shared.js
+!site/shared/
+!site/shared/**
+!site/squeeze-calendar.json

@@ -1,12 +1,12 @@
-// Proves formatVwapRvol() (docs/shared.js) -- the pure formatting/state
+// Proves formatVwapRvol() (site/shared.js) -- the pure formatting/state
 // function both the options-chain header and the QQQ price-strip tile call
-// (see docs/index.html's renderHeatmap/updateQqqVwapRvolLine). Kept as a
+// (see site/index.html's renderHeatmap/updateQqqVwapRvolLine). Kept as a
 // pure, DOM-free function specifically so it's testable this simple way,
-// like TickerStateStore/LiveQuotePoller in docs/shared/quotes.js -- no need for
+// like TickerStateStore/LiveQuotePoller in site/shared/quotes.js -- no need for
 // bots_panel.test.js's heavier comment-banner-extraction + DOM-shim pattern,
 // since none of this logic lives inline in index.html's <script>.
 const assert = require('node:assert/strict');
-const { formatVwapRvol } = require('../docs/shared.js');
+const { formatVwapRvol } = require('../site/shared.js');
 
 const NOW = Date.parse('2026-07-30T14:32:00Z');
 

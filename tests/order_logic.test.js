@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict');
 const {
   normalizePaperOrder, normalizeShareOrder, isTradeableShareSymbol,
-} = require('../docs/shared.js');
+} = require('../site/shared.js');
 
 assert.deepEqual(
   normalizePaperOrder({ side: 'buy', quantity: '2', orderType: 'market' }),

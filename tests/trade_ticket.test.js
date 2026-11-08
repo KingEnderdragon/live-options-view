@@ -1,5 +1,5 @@
 // B2 (readability quest): the trade-ticket popover section moved out of
-// index.html into docs/js/trade-ticket.js, loaded in the same position. The
+// index.html into site/js/trade-ticket.js, loaded in the same position. The
 // test pins the ?v= hash in the page to the module's content (like
 // shared.js), asserts the section no longer lives inline, and drives
 // openTicket / openShareTicket / closeTicket with a stub DOM + the page's
@@ -12,8 +12,8 @@ const path = require('node:path');
 const vm = require('node:vm');
 const { createHash } = require('node:crypto');
 
-const html = fs.readFileSync(path.join(__dirname, '../docs/index.html'), 'utf8');
-const moduleSource = fs.readFileSync(path.join(__dirname, '../docs/js/trade-ticket.js'), 'utf8');
+const html = fs.readFileSync(path.join(__dirname, '../site/index.html'), 'utf8');
+const moduleSource = fs.readFileSync(path.join(__dirname, '../site/js/trade-ticket.js'), 'utf8');
 const moduleHash = createHash('sha256').update(moduleSource).digest('hex').slice(0, 16);
 assert.ok(html.includes('js/trade-ticket.js?v=' + moduleHash), 'trade-ticket script URL must match its content hash on every hosting path');
 assert.ok(!html.includes('function openTicket'), 'openTicket must live in js/trade-ticket.js, not inline in index.html');
@@ -85,7 +85,7 @@ const sandbox = {
   announceOrderStatus: (...args) => { announceCalls.push(args); },
 };
 const context = vm.createContext(sandbox);
-vm.runInContext(moduleSource, context, { filename: 'docs/js/trade-ticket.js' });
+vm.runInContext(moduleSource, context, { filename: 'site/js/trade-ticket.js' });
 const get = name => vm.runInContext(name, context);
 
 assert.equal(typeof get('openTicket'), 'function', 'module must define openTicket');

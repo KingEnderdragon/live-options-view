@@ -2,7 +2,7 @@
 // (TRADEABLE_SHARE_SYMBOLS / isTradeableShareSymbol / LiveQuoteService /
 // tickerSessionState / SHARE_QUOTE_MAX_AGE_MS / freshShareQuote /
 // TickerStateStore / sameSet / LiveQuotePoller / parseRetryAfter) moved
-// verbatim out of docs/shared.js into docs/shared/quotes.js. Pins the
+// verbatim out of site/shared.js into site/shared/quotes.js. Pins the
 // module's ?v= hash in the page, asserts the ten names no longer live in
 // shared.js, pins the entry's export surface (the eight names that were
 // always among the 26 are still re-exported — the same function objects —
@@ -13,11 +13,11 @@ const { createHash } = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const html = fs.readFileSync(path.join(__dirname, '..', 'docs', 'index.html'), 'utf8');
-const shared = fs.readFileSync(path.join(__dirname, '..', 'docs', 'shared.js'), 'utf8');
-const moduleSource = fs.readFileSync(path.join(__dirname, '..', 'docs', 'shared', 'quotes.js'), 'utf8');
-const quotes = require('../docs/shared/quotes.js');
-const entry = require('../docs/shared.js');
+const html = fs.readFileSync(path.join(__dirname, '..', 'site', 'index.html'), 'utf8');
+const shared = fs.readFileSync(path.join(__dirname, '..', 'site', 'shared.js'), 'utf8');
+const moduleSource = fs.readFileSync(path.join(__dirname, '..', 'site', 'shared', 'quotes.js'), 'utf8');
+const quotes = require('../site/shared/quotes.js');
+const entry = require('../site/shared.js');
 
 const moduleHash = createHash('sha256').update(moduleSource).digest('hex').slice(0, 16);
 assert.ok(html.includes('shared/quotes.js?v=' + moduleHash),

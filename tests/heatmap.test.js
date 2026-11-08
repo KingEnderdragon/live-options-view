@@ -1,7 +1,7 @@
 // B3 slice 2 (Nov 2026): DISPLAY / TIER_COLORS, the heatmap cell formatters
 // (fmtOI / fmtVol / fmtQ / quoteHtml / flowLevel / flowHtml),
-// computeAtmWindow and buildHeatmapRows moved verbatim out of docs/shared.js
-// into docs/shared/heatmap.js. Pins the module's ?v= hash in the page,
+// computeAtmWindow and buildHeatmapRows moved verbatim out of site/shared.js
+// into site/shared/heatmap.js. Pins the module's ?v= hash in the page,
 // asserts the ten names no longer live in shared.js, pins the entry's export
 // surface (computeAtmWindow is still re-exported — it was always one of the
 // 26 names — while the other nine stay browser globals by design), and drives
@@ -14,11 +14,11 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 
-const html = fs.readFileSync(path.join(__dirname, '..', 'docs', 'index.html'), 'utf8');
-const shared = fs.readFileSync(path.join(__dirname, '..', 'docs', 'shared.js'), 'utf8');
-const moduleSource = fs.readFileSync(path.join(__dirname, '..', 'docs', 'shared', 'heatmap.js'), 'utf8');
-const heatmap = require('../docs/shared/heatmap.js');
-const entry = require('../docs/shared.js');
+const html = fs.readFileSync(path.join(__dirname, '..', 'site', 'index.html'), 'utf8');
+const shared = fs.readFileSync(path.join(__dirname, '..', 'site', 'shared.js'), 'utf8');
+const moduleSource = fs.readFileSync(path.join(__dirname, '..', 'site', 'shared', 'heatmap.js'), 'utf8');
+const heatmap = require('../site/shared/heatmap.js');
+const entry = require('../site/shared.js');
 
 const moduleHash = createHash('sha256').update(moduleSource).digest('hex').slice(0, 16);
 assert.ok(html.includes('shared/heatmap.js?v=' + moduleHash),
@@ -107,8 +107,8 @@ const ctx = vm.createContext({
   console,
   document: { createElement: () => makeEl() },
 });
-vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'docs', 'shared', 'csv-ranges.js'), 'utf8'), ctx, { filename: 'docs/shared/csv-ranges.js' });
-vm.runInContext(moduleSource, ctx, { filename: 'docs/shared/heatmap.js' });
+vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'site', 'shared', 'csv-ranges.js'), 'utf8'), ctx, { filename: 'site/shared/csv-ranges.js' });
+vm.runInContext(moduleSource, ctx, { filename: 'site/shared/heatmap.js' });
 const get = name => vm.runInContext(name, ctx);
 assert.equal(get('typeof buildHeatmapRows'), 'function', 'the module must define buildHeatmapRows in the page scope');
 assert.equal(get('typeof getThresh'), 'function', 'csv-ranges.js must load first so the module reads its globals');

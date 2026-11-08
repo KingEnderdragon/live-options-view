@@ -1,5 +1,5 @@
 // B2 (readability quest): the countdown section moved out of index.html
-// into docs/js/countdown-timer.js, loaded in the same position. The test
+// into site/js/countdown-timer.js, loaded in the same position. The test
 // loads the shipped module instead of slicing the page by banner text, pins
 // the ?v= hash in the page to the module's content (like shared.js), and
 // drives the timer with fake setInterval/clearInterval so the 60s cycle is
@@ -10,13 +10,13 @@ const path = require('node:path');
 const vm = require('node:vm');
 const { createHash } = require('node:crypto');
 
-const html = fs.readFileSync(path.join(__dirname, '../docs/index.html'), 'utf8');
-const moduleSource = fs.readFileSync(path.join(__dirname, '../docs/js/countdown-timer.js'), 'utf8');
+const html = fs.readFileSync(path.join(__dirname, '../site/index.html'), 'utf8');
+const moduleSource = fs.readFileSync(path.join(__dirname, '../site/js/countdown-timer.js'), 'utf8');
 const moduleHash = createHash('sha256').update(moduleSource).digest('hex').slice(0, 16);
 assert.ok(html.includes('js/countdown-timer.js?v=' + moduleHash), 'countdown-timer script URL must match its content hash on every hosting path');
 assert.ok(!html.includes('function startCountdown'), 'startCountdown must live in js/countdown-timer.js, not inline in index.html');
 // The chain_underlying test used to slice the data fetch cycle up to this
-// banner; since B2 slice 5 it loads docs/js/data-fetch-cycle.js instead.
+// banner; since B2 slice 5 it loads site/js/data-fetch-cycle.js instead.
 // The banner stays in index.html as the section's marker.
 assert.ok(html.includes('// ── countdown timer'), 'countdown banner must stay in index.html as the section marker');
 
@@ -35,7 +35,7 @@ const context = vm.createContext(sandbox);
 // countdown/timerHandle/REFRESH are declared in the page's shared scope
 // (just above the data fetch cycle), before this module loads.
 vm.runInContext('let countdown = 7; let timerHandle = null; const REFRESH = 60;', context);
-vm.runInContext(moduleSource, context, { filename: 'docs/js/countdown-timer.js' });
+vm.runInContext(moduleSource, context, { filename: 'site/js/countdown-timer.js' });
 const get = name => vm.runInContext(name, context);
 
 assert.equal(typeof get('startCountdown'), 'function', 'module must define startCountdown');

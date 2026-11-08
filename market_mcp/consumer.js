@@ -1,7 +1,7 @@
 'use strict';
 const { randomUUID } = require('node:crypto');
-const calendar = require('../docs/squeeze-calendar.json');
-const { formatSqueezeScheduleStatus } = require('../docs/shared.js');
+const calendar = require('../site/squeeze-calendar.json');
+const { formatSqueezeScheduleStatus } = require('../site/shared.js');
 const { DataError, LIMITS, UUID, errorRecord } = require('./source');
 const overview = require('./overview');
 

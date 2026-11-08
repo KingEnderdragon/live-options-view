@@ -1,5 +1,5 @@
 // B2 (readability quest): the canvas hover/touch tooltip section moved out
-// of index.html into docs/js/canvas-tooltip.js, loaded in the same position.
+// of index.html into site/js/canvas-tooltip.js, loaded in the same position.
 // The test pins the ?v= hash in the page to the module's content (like
 // shared.js), asserts the section no longer lives inline, and drives the
 // tooltip + renderers with a stub DOM + stub canvas: tooltip show/hide and
@@ -14,9 +14,9 @@ const path = require('node:path');
 const vm = require('node:vm');
 const { createHash } = require('node:crypto');
 
-const html = fs.readFileSync(path.join(__dirname, '../docs/index.html'), 'utf8');
-const moduleSource = fs.readFileSync(path.join(__dirname, '../docs/js/canvas-tooltip.js'), 'utf8');
-const sharedSource = fs.readFileSync(path.join(__dirname, '../docs/shared.js'), 'utf8');
+const html = fs.readFileSync(path.join(__dirname, '../site/index.html'), 'utf8');
+const moduleSource = fs.readFileSync(path.join(__dirname, '../site/js/canvas-tooltip.js'), 'utf8');
+const sharedSource = fs.readFileSync(path.join(__dirname, '../site/shared.js'), 'utf8');
 const moduleHash = createHash('sha256').update(moduleSource).digest('hex').slice(0, 16);
 assert.ok(html.includes('js/canvas-tooltip.js?v=' + moduleHash), 'canvas-tooltip script URL must match its content hash on every hosting path');
 assert.ok(!html.includes('function attachCanvasTooltip'), 'attachCanvasTooltip must live in js/canvas-tooltip.js, not inline in index.html');
@@ -139,10 +139,10 @@ function harness(stubs = {}) {
   // The real shared.js + shared/heatmap.js: `fmtOI` is a browser global in
   // production (not in shared.js's module.exports), so load the whole files
   // into the context, in page order — B3 slice 2 (Nov 2026): fmtOI moved out
-  // of docs/shared.js into docs/shared/heatmap.js.
-  vm.runInContext(sharedSource, context, { filename: 'docs/shared.js' });
-  vm.runInContext(fs.readFileSync(path.join(__dirname, '../docs/shared/heatmap.js'), 'utf8'), context, { filename: 'docs/shared/heatmap.js' });
-  vm.runInContext(moduleSource, context, { filename: 'docs/js/canvas-tooltip.js' });
+  // of site/shared.js into site/shared/heatmap.js.
+  vm.runInContext(sharedSource, context, { filename: 'site/shared.js' });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../site/shared/heatmap.js'), 'utf8'), context, { filename: 'site/shared/heatmap.js' });
+  vm.runInContext(moduleSource, context, { filename: 'site/js/canvas-tooltip.js' });
   return { context, els, bodyChildren, created };
 }
 const call = (h, expr) => vm.runInContext(expr, h.context);

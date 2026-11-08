@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
-const html = fs.readFileSync('docs/index.html', 'utf8');
+const html = fs.readFileSync('site/index.html', 'utf8');
 const APP = 'https://live-options-view.otmooper12.workers.dev';
 const chain = 'Expiration,Type,Strike,UnderlyingPrice,OpenInterest,Volume,DTE\n2026-10-27,call,500,500,200,20,0\n2026-10-27,put,500,500,100,10,0';
 const prices = 'datetime,open,high,low,close\n2026-10-27T13:30:00Z,500,502,499,501';
@@ -24,23 +24,23 @@ const prices = 'datetime,open,high,low,close\n2026-10-27T13:30:00Z,500,502,499,5
     const el = id => elements[id] ||= { textContent:'',innerHTML:'',style:{},classList:{add(){},remove(){}}, value:'',disabled:false };
     const ctx = vm.createContext({document:{getElementById:el}, localStorage:{getItem(){return null}}, BROWSER_DATA:'/browser-data', historyLoaded:true, console,
       fetch: url => worker.fetch(new Request(APP + url), new Proxy({}, { get(){throw Error('private binding accessed');} })) });
-    // B3 slice 1 (Nov 2026): parseCsv moved out of docs/shared.js into
-    // docs/shared/csv-ranges.js — load the shipped module instead of slicing
+    // B3 slice 1 (Nov 2026): parseCsv moved out of site/shared.js into
+    // site/shared/csv-ranges.js — load the shipped module instead of slicing
     // the function out of shared.js by banner text. B3 slice 2 (Nov 2026):
-    // buildHeatmapRows / fmtOI moved to docs/shared/heatmap.js — load it too,
+    // buildHeatmapRows / fmtOI moved to site/shared/heatmap.js — load it too,
     // in page order, so the canvas-tooltip module reads the real fmtOI.
-    vm.runInContext(fs.readFileSync('docs/shared/csv-ranges.js', 'utf8'), ctx);
-    vm.runInContext(fs.readFileSync('docs/shared/heatmap.js', 'utf8'), ctx);
+    vm.runInContext(fs.readFileSync('site/shared/csv-ranges.js', 'utf8'), ctx);
+    vm.runInContext(fs.readFileSync('site/shared/heatmap.js', 'utf8'), ctx);
     // B2 slice 12 (Nov 2026): the historical panel moved out of index.html
-    // into docs/js/historical-panel.js — the historical..sidebar slice would
+    // into site/js/historical-panel.js — the historical..sidebar slice would
     // now be the banner + a <script src> tag, which is not valid JS, so load
     // the shipped module instead, then the widgets module and the
     // canvas-tooltip module in page order. B2 slice 14 (Nov 2026): the
     // canvas-tooltip section moved out too, so slicing up to the boot banner
     // would now be the banner + a <script src> tag as well.
-    vm.runInContext(fs.readFileSync('docs/js/historical-panel.js', 'utf8'), ctx);
-    vm.runInContext(fs.readFileSync('docs/js/sidebar-widgets.js', 'utf8'), ctx);
-    vm.runInContext(fs.readFileSync('docs/js/canvas-tooltip.js', 'utf8'), ctx);
+    vm.runInContext(fs.readFileSync('site/js/historical-panel.js', 'utf8'), ctx);
+    vm.runInContext(fs.readFileSync('site/js/sidebar-widgets.js', 'utf8'), ctx);
+    vm.runInContext(fs.readFileSync('site/js/canvas-tooltip.js', 'utf8'), ctx);
     vm.runInContext(`renderHistoryHeatmap = data => { rendered = data; return true; }; renderHistWidgets = (...args) => { widgets = args; };`,ctx);
     return {ctx,el};
   }

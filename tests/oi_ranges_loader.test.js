@@ -1,5 +1,5 @@
 // B2 (readability quest): the OIranges loader section moved out of index.html
-// into docs/js/oi-ranges-loader.js, loaded in the same position. The test
+// into site/js/oi-ranges-loader.js, loaded in the same position. The test
 // loads the shipped module instead of slicing the page by banner text, pins
 // the ?v= hash in the page to the module's content (like shared.js), and
 // drives loadRanges with a stub fetch so the success + failure paths are
@@ -10,8 +10,8 @@ const path = require('node:path');
 const vm = require('node:vm');
 const { createHash } = require('node:crypto');
 
-const html = fs.readFileSync(path.join(__dirname, '../docs/index.html'), 'utf8');
-const moduleSource = fs.readFileSync(path.join(__dirname, '../docs/js/oi-ranges-loader.js'), 'utf8');
+const html = fs.readFileSync(path.join(__dirname, '../site/index.html'), 'utf8');
+const moduleSource = fs.readFileSync(path.join(__dirname, '../site/js/oi-ranges-loader.js'), 'utf8');
 const moduleHash = createHash('sha256').update(moduleSource).digest('hex').slice(0, 16);
 assert.ok(html.includes('js/oi-ranges-loader.js?v=' + moduleHash), 'oi-ranges-loader script URL must match its content hash on every hosting path');
 assert.ok(!html.includes('async function loadRanges'), 'loadRanges must live in js/oi-ranges-loader.js, not inline in index.html');
@@ -40,7 +40,7 @@ const context = vm.createContext(sandbox);
 // `ranges` is declared in the page's shared scope (just above the loader
 // section), before this module loads.
 vm.runInContext('let ranges = null;', context);
-vm.runInContext(moduleSource, context, { filename: 'docs/js/oi-ranges-loader.js' });
+vm.runInContext(moduleSource, context, { filename: 'site/js/oi-ranges-loader.js' });
 const get = name => vm.runInContext(name, context);
 
 assert.equal(typeof get('loadRanges'), 'function', 'module must define loadRanges');

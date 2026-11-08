@@ -1,5 +1,5 @@
 // B2 (readability quest): the auth section moved out of index.html into
-// docs/js/auth.js, loaded in the same position. The test pins the ?v= hash
+// site/js/auth.js, loaded in the same position. The test pins the ?v= hash
 // in the page to the module's content (like shared.js), asserts the section
 // no longer lives inline, and drives the gate / margin-call screen /
 // submitAuth / refreshSessionFromServer with a stub DOM + stub fetch:
@@ -12,8 +12,8 @@ const path = require('node:path');
 const vm = require('node:vm');
 const { createHash } = require('node:crypto');
 
-const html = fs.readFileSync(path.join(__dirname, '../docs/index.html'), 'utf8');
-const moduleSource = fs.readFileSync(path.join(__dirname, '../docs/js/auth.js'), 'utf8');
+const html = fs.readFileSync(path.join(__dirname, '../site/index.html'), 'utf8');
+const moduleSource = fs.readFileSync(path.join(__dirname, '../site/js/auth.js'), 'utf8');
 const moduleHash = createHash('sha256').update(moduleSource).digest('hex').slice(0, 16);
 assert.ok(html.includes('js/auth.js?v=' + moduleHash), 'auth script URL must match its content hash on every hosting path');
 assert.ok(!html.includes('function renderAuthGate'), 'renderAuthGate must live in js/auth.js, not inline in index.html');
@@ -76,7 +76,7 @@ const sandbox = {
   },
 };
 const context = vm.createContext(sandbox);
-vm.runInContext(moduleSource, context, { filename: 'docs/js/auth.js' });
+vm.runInContext(moduleSource, context, { filename: 'site/js/auth.js' });
 const get = name => vm.runInContext(name, context);
 const set = (name, value) => vm.runInContext(`${name} = (${JSON.stringify(value)})`, context);
 
