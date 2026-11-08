@@ -70,6 +70,8 @@ from . import crude_calibration as cc
 from . import market_signals as ms
 from .config import *
 from .config import __all__ as _config_all
+from .feed import *
+from .feed import __all__ as _feed_all
 
 # --- temporary bridge (removed in the final B4 slice) -----------------------
 # Names not yet moved out of the flat file still live in root collector.py.
@@ -93,11 +95,11 @@ globals().update(
 )
 
 __all__ = sorted(
-    set(_config_all)
+    set(_config_all) | set(_feed_all)
     | {"cc", "ms"}
     | set(['BaseHTTPRequestHandler', 'Optional', 'ThreadingHTTPServer', 'boto3', 'date', 'datetime', 'io', 'json', 'logging', 'lru_cache', 'math', 'os', 'parse_qs', 'pd', 'pytz', 're', 'requests', 'secrets', 'sys', 'threading', 'time', 'timedelta', 'timezone', 'urlparse', 'websocket', 'yf'])
     | {name for name in vars(_legacy) if not name.startswith("__")}
 )
 
 # Bridge internals are not part of the collector surface.
-del _load_legacy, _legacy, _config_all, Path, importlib
+del _load_legacy, _legacy, _config_all, _feed_all, Path, importlib
