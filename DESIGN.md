@@ -65,15 +65,17 @@ The product is a live web view at `options.moopertonic.net`, accessible from any
 
 ## 3. Auth Flow
 
-### 3.1 tastytrade session
+### 3.1 tastytrade OAuth
 
-1. Try R2-persisted remember-token first (`auth/remember_token.json`)
-2. If rejected (403) or missing, fall back to `POST /sessions` with `TASTY_LOGIN` + `TASTY_PASSWORD`
-3. If MFA challenge required, complete automatically using `TASTY_TOTP_SECRET` via `pyotp`
-4. `GET /api-quote-tokens` → `streamer-token` + `streamer-url` (DXLink WebSocket endpoint)
-5. Rotate and save new remember-token to R2 after each successful auth
+1. Read the personal application's client secret and refresh token from Railway secrets.
+2. Require `TASTY_OAUTH_SCOPES=read`; any additional scope fails closed before a broker request.
+3. Exchange the refresh token at `POST /oauth/token` for a short-lived access token.
+4. Cache the access token in memory, refresh it 60 seconds before expiry, and serialize concurrent refresh demand through one lock.
+5. Call `GET /api-quote-tokens` with `Authorization: Bearer <access-token>` to obtain the DXLink token and URL.
 
-Session is established once at startup. The token is rotated on every auth, persisted to R2, and reused on the next deployment to avoid repeated TOTP challenges.
+There is no username/password, TOTP, remember-token, or `/sessions` fallback. The legacy
+`auth/remember_token.json` R2 object is quarantined by omission: production code neither
+reads nor writes it. See `docs/tastytrade-oauth.md` for provisioning, rotation, and rollout gates.
 
 ### 3.2 DXLink connection sequence
 
@@ -326,9 +328,9 @@ Client-side paper trading (average-cost book, multiple named accounts for separa
 
 | Variable | Purpose |
 |---|---|
-| `TASTY_LOGIN` | tastytrade username |
-| `TASTY_PASSWORD` | tastytrade password |
-| `TASTY_TOTP_SECRET` | Base32 TOTP secret for MFA auto-completion |
+| `TASTY_OAUTH_CLIENT_SECRET` | Personal OAuth application secret |
+| `TASTY_OAUTH_REFRESH_TOKEN` | Personal OAuth grant refresh token |
+| `TASTY_OAUTH_SCOPES` | Must be exactly `read` |
 | `LIVE_QUOTE_KEY` | Shared collector/Worker key protecting the live quote endpoint |
 | `R2_ACCOUNT_ID` | Cloudflare account ID |
 | `R2_ACCESS_KEY_ID` | R2 API token access key (read+write) |
@@ -350,6 +352,153 @@ Client-side paper trading (average-cost book, multiple named accounts for separa
 - Static `docs/index.html` served via Cloudflare Worker at `options.moopertonic.net`
 - Auto-deploys on every push to `master`
 - No build step required
+
+### 8.4 MOO-169: permanent daily Tradier collector
+
+`scripts/moo144_tradier_collector.py` productionizes the MOO-144 probe
+(`scripts/moo144_tradier_probe.py`, PR #83) into a permanent daily collector.
+It runs as its own Railway service (project `live-market-monitor`, alongside
+`moo144-tradier-probe`), not as part of the primary `collector.py` service.
+
+**What is actually implemented** (kept accurate here, rather than restating
+MOO-169's aspirational scope; updated after each review pass rather than
+restating fixed claims):
+
+- Calendar-gated session lifecycle: cron-invoked once per weekday, exits 0
+  on a day with no NYSE session, runs to the calendar's actual close
+  (including early closes).
+- A daily contract universe selected once and persisted (`universe.json`),
+  reloaded on any same-day restart instead of re-selected against a
+  possibly-moved spot price.
+- A renewable, fenced lease (`lease.json`) with the confirmed deadline
+  enforced by two independent mechanisms, not one:
+  - A heartbeat thread attempts renewal every `ttl/3` and classifies a
+    genuine loss into one of two distinct kinds, since they require
+    opposite recovery: a **confirmed takeover** (a verified, live
+    competing owner) must never trigger a restart -- that would only
+    fight the real new owner; a **confirmed absence** (the lease object
+    is simply gone, deleted or never recreated) is NOT evidence of a
+    competing owner, so a restart to reacquire is the correct recovery.
+    A *transient* renewal failure (network/storage) is just retried on
+    the normal cadence, never treated as either of the above.
+  - A separate watchdog thread polls the confirmed deadline on its own
+    short, fixed cadence (independent of whatever the heartbeat's
+    renewal request is doing) and stops intake the moment that deadline
+    passes without a fresh confirmed renewal -- this is what actually
+    enforces "ownership can no longer be guaranteed," since a renewal
+    request that hangs or runs long can't be trusted to notice its own
+    lateness. This case is an **ownership-uncertain** loss (no confirmed
+    competing owner, but no confirmed continued ownership either) and,
+    like a confirmed absence, recovers via restart rather than exiting
+    clean.
+  A conditional renewal conflict (409/412) triggers a fresh lease read;
+  the conflict alone never proves takeover. Only a different, nonempty
+  owner identity with a valid, unexpired deadline suppresses restart.
+  Missing, expired, malformed, unreadable-after-conflict, and unclassified
+  ownership all stop intake and enter recoverable handling. Reacquisition
+  remains conditional and cannot overwrite a live competing lease.
+- Each session spools under its own `<MOO144_SPOOL_DIR>/<run_date>/`
+  subdirectory, so segments from different dates can never collide or be
+  misfiled under the wrong archive prefix. Any other date's leftover spool
+  (left behind by a crash before a date rollover) is reconciled and
+  resumed under *that date's own* prefix, before today's session starts --
+  never merged into today's.
+- Reconciliation on every startup against R2 by verified content identity
+  (not just filename or a trusted ETag): already-durable segments are
+  recognized and not re-uploaded; locally-spooled segments R2 doesn't have
+  yet are resumed; anything that's neither (corrupt, same name with
+  different content, or an unverifiable identity such as a multipart
+  ETag) is reported for manual review rather than silently deleted or
+  silently trusted. An ETag that can't be compared directly (multipart or
+  missing) triggers an actual download-and-hash of the remote object
+  rather than assuming a match.
+- A hard spool-size bound: once outstanding spool bytes would exceed
+  `MOO144_MAX_SPOOL_BYTES`, ingestion stops with an explicit `SpoolExhausted`
+  reason rather than growing the spool without limit.
+- `status: "complete"` is derived, not assumed: a run is only "complete" if
+  setup-through-capture-start was on time (not just the open-wait itself),
+  it ran to the actual session close with no unrecovered exception, had
+  zero reconnects (any stream gap marks the day "partial"), captured at
+  least one event, the upload spool fully drained, and reconciliation
+  (today's and any recovered stale date's) found nothing needing review.
+  Every other outcome is `"partial"` with an explicit `partial_reasons`
+  list, and a *recoverable* partial outcome (spool exhaustion, an
+  undrained upload backlog, or zero captured events) makes the process
+  exit non-zero so the `on_failure` restart policy actually fires -- a
+  partial summary object alone doesn't trigger anything. Losing the lease
+  is the deliberate exception: it exits 0, since another owner is already
+  legitimately active for that `run_date` and restarting would only start
+  a competing-restart loop against them.
+- A stream gap stays open -- measuring the full outage, not just backoff
+  sleep time -- until an event is actually received again; a
+  `stream_reconnect_resumed` marker is never written for a reconnect
+  attempt that hasn't actually succeeded yet.
+- `health.json` is published periodically during collection (not only at
+  the end) from the *same* mutable result object the capture loop updates
+  live, so a health snapshot taken mid-outage reflects the in-progress
+  reconnect count and gap duration rather than the pre-capture initial
+  state.
+- Manifest counters separate three non-overlapping totals: this attempt's
+  own captured counts (`attempt_event_counts`), already-durable segments
+  reconciled from R2 before this run (`reconciled_prior_records`), and
+  this-run-uploaded segments that were actually a prior owner's orphaned
+  local files (`resumed_local_records`) -- each read back via a real
+  decompress-and-count so none are silently conflated, omitted, or
+  double-counted.
+
+| Setting | Value |
+|---|---|
+| Start command | `python scripts/moo144_tradier_collector.py` |
+| Restart policy | `on_failure` (a mid-session crash is safe to retry — see lease above) |
+| Trigger | Railway Cron Schedule, recurring weekdays (e.g. `15 12 * * 1-5` = 8:15am EDT / 7:15am EST). Railway cron times are fixed UTC and do **not** shift with US DST, so pick a UTC time early enough to precede 9:30am ET under **either** offset — the process waits for the calendar's real open itself (see below), so an early trigger is harmless, but a trigger that's late under one offset would truncate that day's session. |
+| Volume | A mounted persistent volume for `MOO144_SPOOL_DIR`, so the upload spool survives a crash/restart |
+
+Additional env vars beyond the shared `TRADIER_TOKEN`/`R2_*` ones (§8.1):
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `MOO144_STRIKE_COUNT` | Number of nearest 0DTE strikes to capture | `8` |
+| `MOO144_CHECKPOINT_SECONDS` | Segment rotation interval | `180` |
+| `MOO144_MAX_CONSECUTIVE_RECONNECTS` | Stream reconnect budget before giving up | `5` |
+| `MOO144_LEASE_TTL_SECONDS` | Daily-collection lease TTL; a crashed owner's lease can be taken over after this expires | `300` |
+| `MOO144_MAX_SPOOL_BYTES` | Hard upload-spool cap; ingestion stops (reported, not silently dropped) once outstanding spool bytes would exceed this | `512 MiB` |
+| `MOO144_SPOOL_DIR` | Persistent spool directory (must be a mounted volume in production) | temp dir |
+
+Archive layout under `moo144/tradier/<date>/`: `universe.json` (written once,
+first writer wins), `lease.json`, `health.json` (overwritten periodically),
+and per-owner `run-started-<owner>.json` / `summary-<owner>.json` /
+`manifest-<owner>.json` plus the uploaded `*-part-*.ndjson.gz` segments. The
+owner suffix keeps a crash/restart within the same day from overwriting the
+prior attempt's records; reconciliation is what ties a new owner's manifest
+back to a prior owner's already-durable or resumed segments.
+
+Retention: same delete-after-verified-upload pattern as the probe (§7 of
+MOO-169 in Linear). Measured/projected volume from the MOO-144 probe's
+2026-09-03 run: ~52.9 MB compressed per session, ~1.11 GB per 21 sessions,
+~13.33 GB per 252 sessions — a planning estimate, not a hard cap; do not
+silently expand the captured symbol/expiration universe based on it.
+
+**Deployment checklist (for whoever has Railway dashboard access — this
+repo's contributor doesn't, per the MOO-144 probe's setup thread):**
+
+- The root `railway.toml` in this repo specifies `python collector.py` /
+  `restartPolicyType: never`. That governs any Railway service that does
+  **not** have its own service-level override. Before this collector's
+  service goes live, explicitly confirm in the Railway dashboard, under
+  that specific service's Settings → Deploy, that its **Custom Start
+  Command** is `python scripts/moo144_tradier_collector.py` and its
+  **Restart Policy** is `On Failure` — do not assume the dashboard value
+  wins without checking it for this service specifically, the same way the
+  probe's service needed its own explicit override to run
+  `moo144_tradier_probe.py` instead of the root `collector.py` command.
+- Confirm the persistent volume is actually mounted at the path
+  `MOO144_SPOOL_DIR` points to (not the container's ephemeral filesystem) --
+  a restart with no real volume can't recover anything to reconcile.
+  Confirm the Cron Schedule value directly in the dashboard rather than
+  inferring it from this document, and re-verify it after any DST
+  transition given the fixed-UTC caveat above.
+- Confirm the archive prefix (`moo144/tradier/`) doesn't collide with the
+  probe's own runs from the same bucket.
 
 ---
 
@@ -375,3 +524,77 @@ Client-side paper trading (average-cost book, multiple named accounts for separa
 - **Alert system** — detect strike crossing from p75 → p90 OI bucket and push notification
 - **Access control** — gate behind Cloudflare Access for subscriber-only distribution
 - **Historical replay** — scrub through today's intraday snapshots in the viewer
+
+## 11. Bot membership index (#102; staged rollout)
+
+The Automated tab still polls every 30 seconds. In `BOT_INDEX_READS=r2` mode,
+`/api/bots` and the settlement sweep read `system/bot-membership-v1.json` through
+the existing `PAPER_TRADES` R2 binding, then fetch current KV account records.
+The object contains only public bot identifiers, a schema version, and a migration
+readiness flag. It contains no balances, credentials, sessions, or trade history.
+Conditional object writes merge membership against the last-read entity tag;
+conflicting or rate-limited writers make at most five attempts, waiting 1.1 seconds
+between attempts and re-reading/merging current membership each time. R2 binding
+error 10058 / TooManyRequests and HTTP 429 are recognized; other failures remain
+visible. Exhaustion fails the caller and remains repairable on its next login or
+metadata sync. Registration, authenticated bot login,
+and operator metadata sync repair both the legacy marker and the R2 membership.
+Matching legacy markers and unchanged account metadata are not rewritten during
+startup. Necessary marker repairs retry only rate-limit errors, at most three
+attempts with 1.1-second waits and a fresh read before each attempt. Other storage
+errors remain visible. This covers concurrent repairs and stale KV reads without
+making login followed immediately by metadata sync consume two marker writes.
+An absent index can accept new members but remains unready until reconciliation.
+
+Bot insolvency retains the account and index membership, preserving closed-account
+history. There is no new account deletion endpoint. Reconciliation is additive:
+it does not prune missing accounts on an eventually consistent KV read. An indexed
+account that cannot be read makes the roster fail visibly and aborts the settlement
+sweep before mutations, rather than silently omitting it. A missing, invalid, or
+unready R2 index also fails visibly; there is no automatic KV-list fallback.
+
+### Rollout and recovery
+
+1. Deploy this change with the checked-in `BOT_INDEX_READS=legacy` setting. This
+   stage preserves existing readers while enabling dual writes and the protected
+   reconciliation endpoint. It does **not** yet eliminate ordinary list usage.
+2. Allow old Worker invocations to finish and KV writes to propagate. Invoke
+   `POST /api/bot-index/reconcile` using the existing `X-Bot-Registration-Key`
+   operator credential from the deployment's secret store; never place it in a
+   command history or log. No request body is needed. The endpoint scans `user:`
+   records so bots missing legacy markers are recovered, including closed bots,
+   while human accounts are excluded. It follows cursors and refuses to publish
+   an incomplete scan. The current safety bound is five pages / 500 account keys;
+   exceeding it requires an explicitly designed larger migration, not truncation.
+3. Inspect the private R2 binding's index and compare membership with the known bot
+   account inventory. Repeat reconciliation after KV propagation and verify stable
+   membership; a successful single scan is not proof of an atomic KV snapshot.
+   Concurrent registrations are unioned using a conditional write. Interrupted
+   scans do not publish partial membership or mark an unready index ready.
+4. Only after verification, commit `BOT_INDEX_READS = "r2"` in `wrangler.toml`
+   and deploy that cutover. Check roster identities/current balances and a
+   settlement run, including retained closed accounts. Keep the 30-second client
+   refresh and existing settlement schedule unchanged.
+5. Verify Cloudflare KV list metrics flatten during normal dashboard polling and
+   settlement. The reconciliation endpoint logs scan/member counts; roster failures
+   log `bot_roster_read_failed`, and scheduled errors fail the scheduled invocation.
+   Record actual read/write/list usage before closing #102.
+
+For a rollout rollback, explicitly redeploy `BOT_INDEX_READS=legacy`; this restores
+the former quota exposure. Do not silently switch modes on a failed index read.
+For interrupted membership writes, retry bot login or metadata sync; neither
+recreates the account nor resets history. Re-run bounded reconciliation after a
+known legacy repair. For a corrupt index, investigate and restore a verified object
+version through the binding before reconciling; do not replace it with an empty list.
+
+### Operation budget
+
+With B bots and C continuously polling clients, a 6.5-hour session uses roughly
+780*C R2 index reads and 780*C*B KV account reads, plus 48 daily settlement index
+reads and up to 48*B settlement account reads (and any reads/writes for actual
+settlement). This removes ordinary KV **list** operations after cutover; it does
+not remove KV reads or other application usage. For example, ten bots and two
+clients imply about 16,080 account reads before mutations and other endpoints.
+One reconciliation uses at most five lists and 500 account reads; idempotent
+membership repair avoids an R2 write when membership is unchanged. Capacity must
+be checked against actual account-wide usage before scaling clients or bot count.

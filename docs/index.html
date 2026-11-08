@@ -42,6 +42,13 @@
     margin-bottom: 0.6rem;
   }
   #title { font-size: 1.05rem; font-weight: 700; color: var(--bright); }
+  #underlying-select {
+    font: inherit; font-size: 0.85rem; font-weight: 700;
+    color: var(--bright); background: var(--panel);
+    border: 1px solid var(--border); border-radius: 4px; padding: 2px 6px;
+  }
+  #underlying-select:focus-visible { outline: 2px solid #4a90d9; outline-offset: 1px; }
+  .chain-note { font-size: 0.72rem; color: var(--dim); }
   #price { font-size: 1.6rem; font-weight: 700; color: var(--bright); letter-spacing: -0.02em; }
   #tier-badge {
     font-size: 0.72rem; font-weight: 600;
@@ -257,6 +264,7 @@
     font-size: 0.76rem;
     color: var(--dim);
   }
+  #steo-panel.hidden { display: none; }
   #steo-panel .steo-label {
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -524,7 +532,53 @@
     cursor: pointer;
   }
   .tab-btn.active { color: var(--bright); border-color: #58a6ff; }
-  #live-panel.hidden, #history-panel.hidden, #bots-panel.hidden { display: none; }
+  #live-panel.hidden, #history-panel.hidden, #bots-panel.hidden, #squeeze-panel.hidden { display: none; }
+
+  /* ── short-squeeze scanner panel (OA-191) ────────────────────────────── */
+  #squeeze-header {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 0.7rem;
+  }
+  #squeeze-title { font-weight: 600; color: var(--bright); }
+  #squeeze-status { color: var(--dim); font-size: 0.76rem; }
+  #squeeze-status[data-state="stale"], #squeeze-status[data-state="fallback"] { opacity: 0.72; }
+  #squeeze-warning {
+    background: #2d1f0a;
+    border: 1px solid #d49a00;
+    color: #ffcc66;
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-size: 0.76rem;
+    margin-bottom: 0.7rem;
+  }
+  #squeeze-warning.hidden { display: none; }
+  #squeeze-hint { color: var(--dim); font-size: 0.74rem; margin-bottom: 0.9rem; }
+  #squeeze-table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+  #squeeze-table th {
+    text-align: right;
+    color: var(--dim);
+    font-weight: 500;
+    padding: 4px 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  #squeeze-table th:first-child, #squeeze-table td:first-child { text-align: left; }
+  #squeeze-table td { text-align: right; padding: 5px 8px; border-bottom: 1px solid var(--border); }
+  #squeeze-table td a { color: #58a6ff; text-decoration: none; }
+  #squeeze-table td a:hover { text-decoration: underline; }
+  .squeeze-empty { color: var(--dim); text-align: center !important; padding: 16px 0; }
+  .squeeze-first-seen { color: var(--dim); font-size: 0.72rem; }
+  .squeeze-new-badge {
+    background: #167a3f;
+    color: #fff;
+    font-size: 0.66rem;
+    font-weight: 600;
+    padding: 1px 6px;
+    border-radius: 4px;
+    margin-right: 4px;
+  }
 
   /* ── automated (bot) panel ───────────────────────────────────────────── */
   #bots-header {
@@ -587,6 +641,7 @@
   .bot-pnl.down { color: #ee3300; }
   .bot-pnl.flat { color: var(--dim); }
   .bot-meta { font-size: 0.72rem; color: var(--dim); margin-top: 4px; }
+  .bot-last-trade { font-size: 0.8rem; line-height: 1.5; color: var(--fg); }
   .bot-card table { width: 100%; min-width: 0; margin-top: 8px; font-size: 0.72rem; }
   .bot-card th { color: var(--dim); font-weight: 500; text-align: right; }
   .bot-card th:first-child, .bot-card td:first-child { text-align: left; }
@@ -627,7 +682,7 @@
   #hist-no-data.hidden { display: none; }
   #hist-body { display: flex; align-items: flex-start; gap: 1rem; flex-wrap: wrap; }
   #hist-heatmap-wrap { overflow-x: auto; margin-bottom: 1rem; }
-  #hist-heatmap-wrap.hidden { display: none; }
+  #hist-heatmap-wrap.hidden, #hist-sidebar.hidden { display: none; }
 
   /* ── historical sidebar widgets ──────────────────────────────────────── */
   #hist-sidebar {
@@ -745,16 +800,22 @@
   <button id="tab-live" class="tab-btn active">Live</button>
   <button id="tab-history" class="tab-btn">Historical</button>
   <button id="tab-bots" class="tab-btn">Automated</button>
+  <button id="tab-squeeze" class="tab-btn">Squeeze</button>
 </div>
 
 <div id="live-panel">
 
 <div id="header">
+  <select id="underlying-select" aria-label="Options chain underlying">
+    <option value="QQQ">QQQ</option>
+    <option value="SPY">SPY</option>
+  </select>
   <span id="title">QQQ 0DTE Live OI</span>
   <span id="price">—</span>
   <span id="tier-badge" style="display:none"></span>
   <span id="vwap-rvol" class="vwap-rvol"></span>
   <span id="momentum" class="momentum"></span>
+  <span id="chain-note" class="chain-note"></span>
 </div>
 
 <div id="status-bar">
@@ -762,6 +823,7 @@
   <span id="status-text">Loading…</span>
   <span id="quote-health" class="transport-health idle">Options: waiting</span>
   <span id="ticker-health" class="transport-health idle">Tickers: waiting</span>
+  <span id="spy-health" class="transport-health idle">SPY: waiting</span>
 </div>
 
 <div id="cal-error">Calibration data (OIranges.csv) failed to load — heatmap colors are unreliable. OI level 5 (wall) may be shown for all nonzero cells.</div>
@@ -778,7 +840,8 @@
 <!-- EIA STEO crude calibration + OVX regime, see collector.py's macro/eia_steo.json
      (optional feed -- gated on EIA_API_KEY; panel just never appears if it's absent). -->
 <div id="steo-panel" class="hidden">
-  <span><span class="steo-label">STEO</span><span class="steo-value" id="steo-release">—</span></span>
+  <span><span class="steo-label">EIA STEO</span><span class="steo-value" id="steo-release">—</span></span>
+  <span><span class="steo-label">Forecast</span><span class="steo-value" id="steo-period">—</span></span>
   <span><span class="steo-label">Brent fcst</span><span class="steo-value" id="steo-brent">—</span><span class="steo-delta" id="steo-brent-delta"></span></span>
   <span><span class="steo-label">WTI fcst</span><span class="steo-value" id="steo-wti">—</span><span class="steo-delta" id="steo-wti-delta"></span></span>
   <span><span class="steo-label">World balance</span><span class="steo-value" id="steo-balance">—</span><span class="steo-delta" id="steo-balance-delta"></span></span>
@@ -901,12 +964,42 @@
 
 </div> <!-- /bots-panel -->
 
+<div id="squeeze-panel" class="hidden">
+
+  <div id="squeeze-header">
+    <span id="squeeze-title">Ranked Candidates</span>
+    <span id="squeeze-status" data-state="fallback">—</span>
+  </div>
+  <div id="squeeze-warning" class="hidden"></div>
+  <div id="squeeze-hint">
+    Experimental short-squeeze scanner (<a href="https://linear.app/objecta/issue/OA-191" target="_blank" rel="noopener">OA-191</a>),
+    an independently maintained producer (<a href="https://github.com/OwenTanzer/short-squeeze-scanner" target="_blank" rel="noopener">source</a>) --
+    this page only displays what it publishes. Scores are experimental screening
+    measures, not calibrated squeeze probabilities. Updates at 9 a.m. and noon New York time on exchange session days; 20-candidate pilot. Historical outcomes and research
+    comparisons are archived separately and not shown here.
+  </div>
+  <table id="squeeze-table">
+    <thead>
+      <tr>
+        <th>Ticker</th>
+        <th>Price at scan</th>
+        <th>Factor score</th>
+        <th>Options score</th>
+        <th>Combined score</th>
+        <th>First seen (ET)</th>
+      </tr>
+    </thead>
+    <tbody id="squeeze-tbody"></tbody>
+  </table>
+
+</div> <!-- /squeeze-panel -->
+
 <div id="footer">
   OI color = calibrated historical percentile. Cell: OI · top-right = total vol · bottom-right = contracts last 60s (amber=20+, orange=100+, white=500+).<br>
   Data: tastytrade / DXLink. Snapshots every 60s. ±20 strikes from ATM shown. <a href="/">← Download desktop app</a>
 </div>
 
-<script src="shared.js"></script>
+<script src="shared.js?v=21cfe2f235a63d27"></script>
 <script>
 // ── stale-page protection ──────────────────────────────────────────────────────
 // Cache-Control: no-store (set by the Worker) stops new responses from being
@@ -954,6 +1047,9 @@ document.addEventListener('visibilitychange', () => {
 setInterval(checkForNewBuild, 5 * 60 * 1000);
 
 const R2 = "https://pub-4d5c916b8cb74ffb8c0abd7dfadb02cf.r2.dev";
+// Only the production website uses the bounded same-origin route.
+const BROWSER_DATA = location.origin === 'https://live-options-view.otmooper12.workers.dev'
+  ? '/browser-data' : R2;
 const REFRESH  = 60;  // seconds between data refreshes
 let liveQuotePoller = null;
 
@@ -967,7 +1063,7 @@ let timerHandle = null;
 // TIER_COLORS / fmt*/quoteHtml/flowHtml live in shared.js (also used by diag.html).
 async function loadRanges() {
   try {
-    const resp = await fetch(`${R2}/derived/OIranges.csv`, { cache: 'no-store' });
+    const resp = await fetch(`${BROWSER_DATA}/derived/OIranges.csv`, { cache: 'no-store' });
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     ranges = parseRangesCsv(await resp.text());
     document.getElementById('cal-error').style.display = 'none';
@@ -983,21 +1079,29 @@ async function loadRanges() {
 }
 
 // ── render heatmap (live panel) ─────────────────────────────────────────────────
-function renderHeatmap(data) {
+function renderHeatmap(data, symbol = 'QQQ') {
   const { underlying_price, tier, snapshot_time, underlying_market } = data;
   const spot = underlying_price;
+  const isQqq = symbol === 'QQQ';
 
   if (!spot) {
     setStatus('stale', snapshot_time);
+    // A non-QQQ chain without its own spot is cleared, not left showing rows
+    // it can't center -- and never filled with another underlying's price.
+    if (!isQqq) clearChain(`${symbol} spot price unavailable in the latest snapshot.`);
     return;
   }
 
   const book = computeBook();   // computed once per render, not per-cell
-  buildHeatmapRows(document.getElementById('heatmap-body'), data, ranges, {
-    getPosition: (sym) => book[sym]?.pos || 0,
+  // Paper tickets, positions and QQQ's OIranges calibration are QQQ-only:
+  // other underlyings render view-only, colored relative to their own
+  // snapshot (see relativeOiRanges in shared.js).
+  buildHeatmapRows(document.getElementById('heatmap-body'), data, isQqq ? ranges : relativeOiRanges(data.rows), {
+    getPosition: (sym) => isQqq ? (book[sym]?.pos || 0) : 0,
     getQuote: (sym) => liveQuotes.get(sym),
-    onCellClick: (e, row) => openTicket(e, row),
+    onCellClick: isQqq ? (e, row) => openTicket(e, row) : null,
   });
+  document.getElementById('chain-note').textContent = isQqq ? '' : 'view-only · OI colors relative to this snapshot';
 
   // Header
   document.getElementById('price').textContent = `$${spot?.toFixed(2) ?? '—'}`;
@@ -1019,9 +1123,6 @@ function renderHeatmap(data) {
   const moEl = document.getElementById('momentum');
   moEl.textContent = mo.text;
   moEl.dataset.state = mo.state;
-
-  updateQqqVwapRvolLine(underlying_market);
-  updateQqqMomentumLine(underlying_market);
 
   document.getElementById('no-data').classList.add('hidden');
   document.getElementById('heatmap-wrap').classList.remove('hidden');
@@ -1096,8 +1197,15 @@ async function requestExecution(info, order, executionRequestId) {
 }
 
 const liveQuotes = new LiveQuoteService();
-let lastData = null;
+let lastData = null;          // QQQ snapshot: paper trading/settlement source
 let lastDataDate = null;
+const UNDERLYING_KEY = 'chain_underlying';
+const NO_DATA_TEXT = document.getElementById('no-data')?.textContent || 'No live data yet.';
+function readSavedUnderlying() {
+  try { return localStorage.getItem(UNDERLYING_KEY) || 'QQQ'; } catch (e) { return 'QQQ'; }
+}
+const chainSelection = new ChainSelection(readSavedUnderlying());
+const chainState = {};         // symbol -> { data, error }, each validated for that symbol
 let ticketEl = null;
 const pendingExecutions = new Set();
 let positionMarks = {};
@@ -1123,7 +1231,7 @@ function visibleContractSymbols(data) {
   return rows.filter(row => strikes.has(+row.Strike) && row.OptionSymbol).map(row => row.OptionSymbol);
 }
 
-function updateQuoteInterests(data = lastData) {
+function updateQuoteInterests(data = selectedChainData()) {
   liveQuotes.setOpenPositions(openPositionSymbols());
   liveQuotes.setVisibleContracts(visibleContractSymbols(data));
 }
@@ -1153,6 +1261,24 @@ function renderQuoteHealth(health) {
   renderTransportHealth('quote-health', 'Options', health);
 }
 
+let latestSpyHealthRequest = 0;
+async function fetchSpyHealth() {
+  const request = ++latestSpyHealthRequest;
+  let summary;
+  try {
+    const response = await fetch(`${BROWSER_DATA}/intraday/health.json?_=${Date.now()}`);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    summary = summarizeSpyHealth(await response.json());
+  } catch (e) {
+    summary = { state: 'unavailable', text: 'SPY: unavailable', detail: 'SPY health could not be loaded' };
+  }
+  if (request !== latestSpyHealthRequest) return;
+  const el = document.getElementById('spy-health');
+  el.className = `transport-health ${summary.state}`;
+  el.textContent = summary.text;
+  el.title = summary.detail;
+}
+
 liveQuotes.subscribe(() => {
   // Bot marks are independent of lastData/session -- the Automated tab is
   // readable while logged out, so this re-render must come before the guard
@@ -1165,7 +1291,7 @@ liveQuotes.subscribe(() => {
     const quote = liveQuotes.get(symbol);
     if (quote?.mid != null) positionMarks[symbol] = quote.mid;
   }
-  renderHeatmap(lastData);
+  renderSelectedChain();
   renderPaper();
 });
 
@@ -1181,17 +1307,8 @@ function ingestSnapshotQuotes(data) {
   // position that expired as of this snapshot's date doesn't count as "open"
   // and keep its now-stale quote alive for an extra cycle.
   settleExpired();
-  updateQuoteInterests(data);
-  const snapshotQuotes = (data.rows || []).map(row => ({
-    symbol: row.OptionSymbol,
-    bid: row.Bid,
-    ask: row.Ask,
-    mid: row.Mid,
-    strike: row.Strike,
-    type: row.Type,
-    exp: row.Expiration,
-  }));
-  liveQuotes.publish(snapshotQuotes, { source: 'r2-snapshot', observedAt: data.timestamp });
+  updateQuoteInterests();
+  publishSnapshotQuotes(data);
   if (session) {
     const book = computeBook(session.trades);
     for (const r of (data.rows || [])) {
@@ -1202,6 +1319,21 @@ function ingestSnapshotQuotes(data) {
       if (quote?.mid != null && book[r.OptionSymbol]?.pos) positionMarks[r.OptionSymbol] = quote.mid;
     }
   }
+}
+
+// Seeds the quote cache from a snapshot's own rows (any underlying). Quotes
+// are keyed by OCC symbol, so SPY and QQQ contracts can't collide.
+function publishSnapshotQuotes(data) {
+  const snapshotQuotes = (data.rows || []).map(row => ({
+    symbol: row.OptionSymbol,
+    bid: row.Bid,
+    ask: row.Ask,
+    mid: row.Mid,
+    strike: row.Strike,
+    type: row.Type,
+    exp: row.Expiration,
+  }));
+  liveQuotes.publish(snapshotQuotes, { source: 'r2-snapshot', observedAt: data.timestamp });
 }
 
 // Average-cost position book: sym -> {pos, avg, realized, strike, type, exp}
@@ -1265,7 +1397,7 @@ async function executeTrade(info, side, qty, orderType = 'market', limitPrice = 
   updateQuoteInterests();
   closeTicket();
   renderPaper();
-  if (lastData) renderHeatmap(lastData);  // refresh position badges
+  renderSelectedChain();  // refresh position badges
 }
 
 function announceOrderStatus(message, state = '') {
@@ -1332,7 +1464,7 @@ async function settleExpired() {
       cacheSessionDisplay();
       updateQuoteInterests();
       renderPaper();
-      if (lastData) renderHeatmap(lastData);
+      renderSelectedChain();
     }
   } catch (error) {
     // network hiccup -- retried on the next render cycle
@@ -1637,33 +1769,127 @@ function openShareTicket(e, sym) {
 }
 
 // ── data fetch cycle ──────────────────────────────────────────────────────────
-async function fetchLatest() {
+// One fetch of one underlying's latest snapshot, validated against the
+// requested symbol before anything can render it.
+async function fetchChain(symbol) {
+  const path = chainLatestPath(symbol);
+  if (!path) return { error: `${symbol} is not a supported underlying` };
   try {
-    const resp = await fetch(`${R2}/intraday/latest.json?_=${Date.now()}`);
+    const resp = await fetch(`${BROWSER_DATA}/${path}?_=${Date.now()}`);
+    if (resp.status === 404) return { error: `No ${symbol} snapshot has been published yet.` };
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const data = await resp.json();
-
-    if (!data.rows || data.rows.length === 0) {
-      setStatus('stale', '—');
-      return;
-    }
-
-    lastTs = data.timestamp;
-    lastData = data;
-    ingestSnapshotQuotes(data);
-    renderHeatmap(data);
-    renderPaper();
-
-    const snapAge = Math.round((Date.now() - new Date(lastTs).getTime()) / 1000 / 60);
-    const hasBids = data.rows.some(r => r.Bid != null);
-    // Dot color carries live/stale; text is just a small timestamp note —
-    // deeper diagnosis lives in diag.html, not the main view.
-    setStatus(snapAge > 2 || !hasBids ? 'stale' : 'live', data.snapshot_time);
-
+    const check = validateChainPayload(data, symbol);
+    if (!check.ok) return { error: `${symbol} snapshot rejected: ${check.reason}.` };
+    return { data };
   } catch (e) {
-    setStatus('stale', lastData?.snapshot_time || '—');
     console.error(e);
+    return { error: `${symbol} snapshot could not be loaded.`, transient: true };
   }
+}
+
+let latestQqqRequest = 0;
+async function fetchLatest() {
+  const token = chainSelection.token();
+  // QQQ is always refreshed: paper trading, expiry settlement marks and the
+  // QQQ price tile depend on it regardless of which chain is on screen.
+  const qqqRequest = ++latestQqqRequest;
+  const qqq = await fetchChain('QQQ');
+  // QQQ refreshes independently of the selected chain, but an older refresh
+  // must not replace newer paper-trading, indicator or cached chain state.
+  if (qqqRequest !== latestQqqRequest) return;
+  if (qqq.data && qqq.data.rows.length) {
+    lastTs = qqq.data.timestamp;
+    lastData = qqq.data;
+    chainState.QQQ = { data: qqq.data, error: null };
+    ingestSnapshotQuotes(qqq.data);
+    updateQqqVwapRvolLine(qqq.data.underlying_market);
+    updateQqqMomentumLine(qqq.data.underlying_market);
+  } else {
+    chainState.QQQ = { data: chainState.QQQ?.data ?? null, error: qqq.error || 'No QQQ rows in the latest snapshot.' };
+  }
+
+  if (token.symbol !== 'QQQ') {
+    const other = await fetchChain(token.symbol);
+    // The selection changed while this was in flight: drop the reply rather
+    // than render (or cache) it under whatever is selected now.
+    if (!chainSelection.accepts(token)) return;
+    if (other.data) {
+      chainState[token.symbol] = { data: other.data, error: null };
+      // Interests first: the quote cache only keeps wanted (visible) symbols.
+      updateQuoteInterests();
+      publishSnapshotQuotes(other.data);
+    } else {
+      chainState[token.symbol] = {
+        data: other.transient ? chainState[token.symbol]?.data ?? null : null,
+        error: other.error,
+      };
+    }
+  }
+  if (!chainSelection.accepts(token)) return;
+  updateQuoteInterests();
+  renderSelectedChain();
+  renderPaper();
+}
+
+function selectedChainData() {
+  return chainState[chainSelection.symbol]?.data ?? null;
+}
+
+function clearChain(message) {
+  document.getElementById('heatmap-body').innerHTML = '';
+  document.getElementById('heatmap-wrap').classList.add('hidden');
+  const noData = document.getElementById('no-data');
+  noData.textContent = message;
+  noData.classList.remove('hidden');
+  for (const id of ['vwap-rvol', 'momentum', 'chain-note']) document.getElementById(id).textContent = '';
+  document.getElementById('price').textContent = '—';
+  document.getElementById('tier-badge').style.display = 'none';
+}
+
+function renderChainTitle(symbol) {
+  document.getElementById('title').textContent = `${symbol} 0DTE Live OI`;
+  document.title = `${symbol} Live OI — moopertonic`;
+  const select = document.getElementById('underlying-select');
+  if (select.value !== symbol) select.value = symbol;
+}
+
+// Renders whichever underlying is selected, from that underlying's own
+// validated snapshot only. Each symbol's stale/unavailable state is its own.
+function renderSelectedChain() {
+  const symbol = chainSelection.symbol;
+  renderChainTitle(symbol);
+  const state = chainState[symbol];
+  const data = state?.data;
+  if (!data) {
+    clearChain(state?.error || (symbol === 'QQQ' ? NO_DATA_TEXT : `Loading ${symbol}…`));
+    setStatus(state?.error ? 'stale' : '', state?.error ? 'unavailable' : 'Loading…');
+    return;
+  }
+  if (!data.rows.length) {
+    clearChain(`No ${symbol} contracts in the latest snapshot.`);
+    setStatus('stale', data.snapshot_time || '—');
+    return;
+  }
+  renderHeatmap(data, symbol);
+  if (!data.underlying_price) return;  // renderHeatmap already marked it stale
+  const snapAge = Math.round((Date.now() - new Date(data.timestamp).getTime()) / 1000 / 60);
+  const hasBids = data.rows.some(r => r.Bid != null);
+  // Dot color carries live/stale; text is just a small timestamp note —
+  // deeper diagnosis lives in diag.html, not the main view.
+  setStatus(snapAge > 2 || !hasBids || state.error ? 'stale' : 'live', data.snapshot_time);
+}
+
+function selectUnderlying(symbol) {
+  if (!chainSelection.select(symbol)) return;
+  try { localStorage.setItem(UNDERLYING_KEY, chainSelection.symbol); } catch (e) {}
+  // Clear immediately so nothing from the previous underlying stays on screen
+  // under the new heading, then fetch the new one right away.
+  clearChain(`Loading ${chainSelection.symbol}…`);
+  renderSelectedChain();
+  updateQuoteInterests();
+  fetchLatest();
+  startCountdown();
 }
 
 function setStatus(type, text) {
@@ -1688,10 +1914,10 @@ function startCountdown() {
 
 // ── price strip ───────────────────────────────────────────────────────────────
 
-const MAIN_TICKERS = ['QQQ', 'VIX', 'OVX', 'SMH', 'IGV', 'JPY/USD', 'KOSPI', 'USO', '10Y'];
+const MAIN_TICKERS = ['QQQ', 'SPY', 'VIX', 'OVX', 'SMH', 'IGV', 'JPY/USD', 'KOSPI', 'USO', '10Y'];
 const SMALL_TICKERS = ['AAPL', 'META', 'GOOGL', 'AMZN', 'TSLA', 'MU', 'SPCX', 'BTC/USD'];
 const TICKER_CLASSES = {
-  QQQ:'equity', VIX:'index', OVX:'index', SMH:'equity', IGV:'equity', 'JPY/USD':'futures',
+  QQQ:'equity', SPY:'equity', VIX:'index', OVX:'index', SMH:'equity', IGV:'equity', 'JPY/USD':'futures',
   KOSPI:'international', USO:'equity', '10Y':'yield', AAPL:'equity', META:'equity',
   GOOGL:'equity', AMZN:'equity', TSLA:'equity', MU:'equity', SPCX:'equity',
   'BTC/USD':'crypto',
@@ -1719,7 +1945,7 @@ function buildTickerEl(sym, isSmall) {
   // see collector.py's TICKER constant) -- VIX/SMH/etc. never carry this
   // data, so only QQQ's tile gets the extra lines.
   const vwapLine = sym === 'QQQ' ? '<span class="vwap-line"></span><span class="momentum-line"></span>' : '';
-  el.innerHTML = `<span class="sym">${sym}</span><span class="px">—</span><span class="chg flat"></span><span class="market-state">fallback</span>${vwapLine}`;
+  el.innerHTML = `<span class="sym">${sym}</span><span class="px">—</span><span class="chg flat"></span><span class="market-state">${sym === 'SPY' ? 'unavailable' : 'fallback'}</span>${vwapLine}`;
   if (isTradeableShareSymbol(sym)) {
     el.classList.add('tradable');
     el.setAttribute('role', 'button');
@@ -1808,28 +2034,43 @@ function updateQqqMomentumLine(underlyingMarket) {
 
 async function fetchPrices() {
   try {
-    const resp = await fetch(`${R2}/intraday/prices.json?_=${Date.now()}`);
+    const resp = await fetch(`${BROWSER_DATA}/intraday/prices.json?_=${Date.now()}`);
     if (!resp.ok) return;
     const data = await resp.json();
-    tickerState.publishFallback(data.prices || {}, data.timestamp || new Date().toISOString());
+    const { SPY: spy, ...legacyPrices } = data.prices || {};
+    tickerState.publishFallback(legacyPrices, data.timestamp || new Date().toISOString());
+    // SPY has no yfinance or last-known substitute. Preserve its own provider
+    // observation time so a cached price ages to stale instead of looking live.
+    if (Number.isFinite(spy?.price) && spy.price > 0 && spy.quote_ts && spy.source === 'dxlink' &&
+        (spy.symbol == null || spy.symbol === 'SPY')) {
+      tickerState.publish([{ ...spy, symbol: 'SPY' }], { observedAt: spy.quote_ts });
+    }
+    updatePriceStrip(tickerState.snapshot());
   } catch (e) {
     console.warn('prices.json fetch failed:', e);
   }
 }
 
 // EIA STEO crude calibration + OVX regime. Optional feed -- collector.py
-// only ever writes macro/eia_steo.json if EIA_API_KEY is configured, so a
-// 404 here just means the feature isn't enabled; the panel stays hidden
-// rather than showing an error, same as #steo-panel's default state.
+// only writes macro/eia_steo.json when EIA_API_KEY is configured. A 404
+// means the optional publication is absent, not proof of why it is absent;
+// keep the panel hidden without treating absence as a transport failure.
 // fmtSteoDelta/findRevision live in shared.js (pure, tested directly there).
 async function fetchSteoCalibration() {
   const panel = document.getElementById('steo-panel');
   try {
-    const resp = await fetch(`${R2}/macro/eia_steo.json?_=${Date.now()}`);
-    if (!resp.ok) { panel.classList.add('hidden'); return; }
+    const resp = await fetch(`${BROWSER_DATA}/macro/eia_steo.json?_=${Date.now()}`);
+    if (resp.status === 404) { panel.classList.add('hidden'); return; }
+    if (!resp.ok) throw new Error(`STEO publication returned HTTP ${resp.status}`);
     const data = await resp.json();
-    const points = data.points || [];
+    const points = data?.points;
+    if (!Array.isArray(points)) throw new Error('Invalid STEO points');
     if (!points.length) { panel.classList.add('hidden'); return; }
+    const isPeriod = value => typeof value === 'string' && /^\d{4}-(0[1-9]|1[0-2])$/.test(value);
+    if (!isPeriod(data.current_release) || (data.prior_release != null && !isPeriod(data.prior_release)) ||
+        points.some(p => !p || !isPeriod(p.period))) {
+      throw new Error('Invalid STEO release or forecast period');
+    }
 
     // Nearest forecast period still ahead of (or equal to) the current
     // calendar month -- the most relevant single number for "what does the
@@ -1838,6 +2079,7 @@ async function fetchSteoCalibration() {
     const nowPeriod = new Date().toISOString().slice(0, 7);
     const nearest = points.find(p => p.period >= nowPeriod) || points[points.length - 1];
     const revision = findRevision(data.revisions, nearest.period);
+    document.getElementById('steo-period').textContent = nearest.period;
 
     document.getElementById('steo-release').textContent =
       data.current_release + (data.prior_release ? ` (vs ${data.prior_release})` : '');
@@ -1868,6 +2110,124 @@ async function fetchSteoCalibration() {
   }
 }
 
+// ── short-squeeze scanner panel (OA-191) ────────────────────────────────────
+// Renders the independently-maintained scanner's published `latest.json`
+// pointer (OwenTanzer/short-squeeze-scanner's squeeze_scanner/storage.py
+// `upload()`). This page never computes or re-derives a score -- it only
+// formats what the scanner already published, the same producer/display
+// boundary formatVwapRvol/formatMomentum draw for the collector's own
+// signals (shared.js). `pointer.candidates` is already the top 10
+// comparison-eligible (options-valid) rows, sorted by combined rank
+// ascending -- storage.py does that filtering/sorting/truncation before
+// publishing, not this page.
+const SQUEEZE_POLL_MS = 60_000; // Poll published state; never trigger acquisition.
+let squeezeSchedulePointer = null;
+let squeezeCalendar = null;
+let squeezeFetchVersion = 0;
+let squeezePointer = null; // parsed latest.json (last SUCCESSFUL run only)
+let squeezeAttemptPointer = null; // parsed latest-attempt.json (every attempt, success or not)
+let squeezeError = null;
+
+// Injectable clock (PR #105 review, finding 4): renderSqueezePanel calling
+// Date.now() directly made tests/squeeze_panel.test.js's fixed-date
+// fixtures assert fresh/stale against whatever day the suite happened to
+// run on, rather than the fixture's own intended "now." Same pattern this
+// file's LiveQuotePoller/TickerStateStore already use for nowFn, just as a
+// free variable instead of a constructor option since this panel has no
+// class of its own.
+function squeezeNow() { return Date.now(); }
+
+async function fetchSqueezeLatest() {
+  const version = ++squeezeFetchVersion;
+  try {
+    const base = `${BROWSER_DATA}/squeeze-scanner/v1/scheduled`;
+    const cacheBust = squeezeNow();
+    const urls = ['latest.json', 'latest-attempt.json', 'latest-schedule.json']
+      .map(name => `${base}/${name}?_=${cacheBust}`);
+    urls.push(`/squeeze-calendar.json?_=${cacheBust}`);
+    const values = await Promise.all(urls.map(async url => {
+      const response = await fetch(url, { cache: 'no-store' });
+      if (response.status === 404) return null;
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const value = await response.json();
+      if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid scanner response');
+      return value;
+    }));
+    const published = values[0];
+    if (published && (!['complete', 'empty'].includes(published.status) ||
+        !Array.isArray(published.candidates) || published.candidates.length > 10 ||
+        published.candidates.some(row => !row || typeof row.ticker !== 'string' || !row.scores ||
+          ['combined', 'factor', 'options'].some(key => row.scores[key] != null && !Number.isFinite(row.scores[key]))))) {
+      throw new Error('Invalid published shortlist');
+    }
+    if (version !== squeezeFetchVersion) return;
+    // Apply the complete poll together; JSON/network failures retain the last
+    // consistent set, and an older poll cannot replace a newer one.
+    [squeezePointer, squeezeAttemptPointer, squeezeSchedulePointer, squeezeCalendar] = values;
+    squeezeError = null;
+  } catch (e) {
+    if (version !== squeezeFetchVersion) return;
+    squeezeError = e.message || 'fetch failed';
+  }
+  renderSqueezePanel();
+}
+
+function renderSqueezePanel() {
+  const statusEl = document.getElementById('squeeze-status');
+  const warningEl = document.getElementById('squeeze-warning');
+  const tbody = document.getElementById('squeeze-tbody');
+
+  if (squeezeError) {
+    // Keep the last-rendered table rather than blanking it on a transient
+    // fetch error -- the same "don't paint over good data" rule
+    // renderBots' roster-error handling follows.
+    statusEl.textContent = `scanner unavailable — ${squeezeError} · showing last known`;
+    statusEl.dataset.state = 'stale';
+    return;
+  }
+
+  const status = formatSqueezeScheduleStatus(squeezePointer, squeezeAttemptPointer, squeezeSchedulePointer, squeezeCalendar, squeezeNow());
+  statusEl.textContent = status.text;
+  statusEl.dataset.state = status.state;
+
+  // PR #105 review, finding 1: latest.json only advances on a successful
+  // run, so a failed/partial attempt newer than the last success is
+  // otherwise invisible -- the old successful table would keep looking
+  // like nothing had gone wrong since.
+  const failureNotice = status.warning;
+  warningEl.textContent = failureNotice || '';
+  warningEl.classList.toggle('hidden', !failureNotice);
+
+  const rows = (squeezePointer && squeezePointer.candidates) || [];
+  if (!rows.length) {
+    tbody.innerHTML = squeezePointer ? '<tr><td colspan="6" class="squeeze-empty">No eligible candidates in the latest scan.</td></tr>' : '<tr><td colspan="6" class="squeeze-empty">No scan published yet.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = rows.map(row => {
+    const combined = row.scores.combined != null ? row.scores.combined.toFixed(3) : '—';
+    const factor = row.scores.factor != null ? row.scores.factor.toFixed(3) : '—';
+    const options = row.scores.options != null ? row.scores.options.toFixed(3) : 'unavailable';
+    const price = row.price != null ? `$${row.price.toFixed(2)}` : '—';
+    // PR #105 review round 2: renders the producer's real first-seen
+    // contract (short-squeeze-scanner#2) -- is_new alone decides the New
+    // label; first_seen_at (NY time) is shown either way when known, null
+    // renders "unavailable." formatSqueezeFirstSeen is a pure function of
+    // the row's own data, not tracked state, so it stays stable across
+    // any number of polls of the same run.
+    const firstSeen = formatSqueezeFirstSeen(row);
+    const currentDay = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date(squeezeNow()));
+    const firstSeenHtml = (firstSeen.isNew && squeezePointer.session_date === currentDay ? '<span class="squeeze-new-badge">New</span> ' : '') + escapeHtml(firstSeen.text);
+    return `<tr>
+      <td><a href="https://www.tradingview.com/symbols/${encodeURIComponent(row.ticker)}/" target="_blank" rel="noopener">${escapeHtml(row.ticker)}</a></td>
+      <td>${price}</td>
+      <td>${factor}</td>
+      <td>${options}</td>
+      <td>${combined}</td>
+      <td class="squeeze-first-seen">${firstSeenHtml}</td>
+    </tr>`;
+  }).join('');
+}
+
 // ── tab switching ────────────────────────────────────────────────────────────
 let historyLoaded = false;
 
@@ -1876,6 +2236,7 @@ const TABS = {
   live:    ['live-panel',    'tab-live'],
   history: ['history-panel', 'tab-history'],
   bots:    ['bots-panel',    'tab-bots'],
+  squeeze: ['squeeze-panel', 'tab-squeeze'],
 };
 
 function showTab(tab) {
@@ -2063,6 +2424,20 @@ function botsStatusLine(suffix) {
   return botsError ? `roster unavailable — ${botsError} · showing last known` : suffix;
 }
 
+// Display only: retain the original trade timestamp and financial history.
+const botTradeDateFormat = new Intl.DateTimeFormat('en-US', {
+  timeZone: 'America/New_York', year: 'numeric', month: 'short', day: 'numeric',
+  hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true,
+  timeZoneName: 'short',
+});
+function formatBotLastTrade(value) {
+  if (value == null || (typeof value === 'string' && !value.trim())) return 'Not recorded';
+  if (typeof value !== 'string' && typeof value !== 'number') return 'Invalid timestamp';
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return 'Invalid timestamp';
+  return `${botTradeDateFormat.format(date)} (New York)`;
+}
+
 function renderBots() {
   if (!botsData) {
     if (botsError) {
@@ -2121,13 +2496,14 @@ function renderBots() {
     return `<div class="bot-card${isLeader ? ' leader' : ''}">
       <h4><span>${escapeHtml(bot.alias)}</span><span class="bot-user">${escapeHtml(bot.username)}</span></h4>
       <div class="bot-strategy">${bot.strategy_id ? escapeHtml(bot.strategy_id) : 'no strategy recorded'}</div>
+      ${bot.account_closed ? '<div class="bot-strategy">Closed — trading stopped; history retained</div>' : ''}
       <div class="bot-equity">${complete ? `$${equity.toFixed(2)}` : '<span class="bot-unmarked">pending</span>'}</div>
       <div class="bot-pnl ${dir}">${complete
         ? `${fmtMoney(pnl)} (${pct >= 0 ? '+' : '−'}${Math.abs(pct).toFixed(2)}%)`
         : '<span class="bot-unmarked">awaiting marks</span>'}</div>
       <div class="bot-meta">
         Cash $${bot.balance_cash.toFixed(2)} · ${bot.trade_count} trade${bot.trade_count === 1 ? '' : 's'}
-        ${bot.last_trade_ts ? ` · last ${new Date(bot.last_trade_ts).toLocaleTimeString()}` : ''}
+        <br><span class="bot-last-trade">Last trade: ${escapeHtml(formatBotLastTrade(bot.last_trade_ts))}</span>
         ${unmarked ? `<br><span class="bot-unmarked">${unmarked} position${unmarked === 1 ? '' : 's'} without a mark — equity and PnL withheld, and this account is unranked</span>` : ''}
       </div>
       ${bot.positions.length
@@ -2146,6 +2522,7 @@ function renderBots() {
 // chain archive (raw/qqq_chain_{date}.csv, or raw/opex/qqq_chain_{date}.csv
 // for pre-pipeline seeded dates) instead of intraday/latest.json.
 let histManifestDates = [];
+let histRequest = 0;
 const histCsvCache = {};   // date 'YYYY-MM-DD' -> normalized rows
 
 function setHistStatus(text) {
@@ -2177,23 +2554,50 @@ function normalizeHistRow(r) {
   };
 }
 
+function validArchiveDate(value) {
+  if (typeof value !== 'string' || !/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(value)) return false;
+  const date = new Date(`${value}T00:00:00Z`);
+  return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value;
+}
+
+function resetHistoryView(message) {
+  document.getElementById('hist-heatmap-wrap').classList.add('hidden');
+  document.getElementById('hist-sidebar').classList.add('hidden');
+  document.getElementById('hist-no-data').classList.remove('hidden');
+  document.getElementById('hist-no-data').textContent = message;
+  document.getElementById('hist-price').textContent = '—';
+  document.getElementById('hist-tier-badge').style.display = 'none';
+  hideSimilarPopup();
+}
+
 async function loadHistoryManifest() {
+  ++histRequest;
+  histManifestDates = [];
+  const sel = document.getElementById('hist-date');
+  sel.innerHTML = '';
+  sel.disabled = true;
+  resetHistoryView('Loading archive index…');
   setHistStatus('Loading archive index…');
   try {
-    const resp = await fetch(`${R2}/manifest.json?_=${Date.now()}`);
+    const resp = await fetch(`${BROWSER_DATA}/manifest.json?_=${Date.now()}`);
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const m = await resp.json();
-    histManifestDates = (m.dates || []).slice().sort();
+    if (!m || !Array.isArray(m.dates) || !m.dates.every(validArchiveDate)) {
+      throw new Error('Invalid archive date index');
+    }
+    histManifestDates = [...new Set(m.dates)].sort();
     if (!histManifestDates.length) {
       setHistStatus('Archive is empty.');
+      resetHistoryView('No archived dates are available.');
       return;
     }
-    const sel = document.getElementById('hist-date');
+    sel.disabled = false;
     sel.innerHTML = histManifestDates.map(d => `<option value="${d}">${d}</option>`).join('');
     const latest = histManifestDates[histManifestDates.length - 1];
     sel.value = latest;
     await loadHistoryDate(latest);
   } catch (e) {
+    historyLoaded = false; // Reopening Historical retries a failed index.
     setHistStatus(`Failed to load archive index: ${e.message}`);
     document.getElementById('hist-no-data').textContent = 'Could not load historical archive.';
   }
@@ -2203,12 +2607,25 @@ async function loadHistoryManifest() {
 // Shared by the date-select flow and the sidebar widgets (intraday/daily/similarity),
 // which need other dates' chains besides the one currently on screen.
 async function fetchChainCsv(dateStr) {
+  if (!validArchiveDate(dateStr)) throw new Error('Invalid archive date');
   if (histCsvCache[dateStr]) return histCsvCache[dateStr];
   const key = dateStr.replace(/-/g, '');
-  let resp = await fetch(`${R2}/raw/qqq_chain_${key}.csv?_=${Date.now()}`);
-  if (!resp.ok) resp = await fetch(`${R2}/raw/opex/qqq_chain_${key}.csv?_=${Date.now()}`);
+  let resp = await fetch(`${BROWSER_DATA}/raw/qqq_chain_${key}.csv?_=${Date.now()}`);
+  if (resp.status === 404) resp = await fetch(`${BROWSER_DATA}/raw/opex/qqq_chain_${key}.csv?_=${Date.now()}`);
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-  const rows = parseCsv(await resp.text()).map(normalizeHistRow);
+  const raw = parseCsv(await resp.text());
+  // Name the first failing field so the panel says why a dated archive is unusable
+  // (e.g. a file with blank OpenInterest throughout must not render as zero OI).
+  const badField = r => !validArchiveDate(r.Expiration) ? 'Expiration'
+    : !['call', 'put'].includes(r.Type) ? 'Type'
+    : ['Strike', 'UnderlyingPrice', 'OpenInterest'].find(c => r[c] === '' || !Number.isFinite(+r[c])) ||
+      (+r.Strike <= 0 ? 'Strike' : +r.UnderlyingPrice <= 0 ? 'UnderlyingPrice' : +r.OpenInterest < 0 ? 'OpenInterest' : null);
+  const bad = raw.filter(badField);
+  if (bad.length) {
+    throw new Error(`Malformed chain archive: ${badField(bad[0])} invalid in ${bad.length} of ${raw.length} rows`);
+  }
+  if (!raw.length) throw new Error('Empty chain archive');
+  const rows = raw.map(normalizeHistRow);
   histCsvCache[dateStr] = rows;
   return rows;
 }
@@ -2221,11 +2638,12 @@ async function fetchChainCsv(dateStr) {
 // here — extending to other timeframes is a deliberate future step, not an
 // oversight.
 async function loadHistoryDate(dateStr) {
+  const request = ++histRequest;
   setHistStatus(`Loading ${dateStr}…`);
-  document.getElementById('hist-heatmap-wrap').classList.add('hidden');
-  document.getElementById('hist-no-data').classList.remove('hidden');
+  resetHistoryView(`Loading ${dateStr}…`);
   try {
     const rows = await fetchChainCsv(dateStr);
+    if (request !== histRequest) return;
     const sub = rows.filter(r => r.Expiration === dateStr);
     if (!sub.length) {
       setHistStatus(`No 0DTE chain found for ${dateStr}.`);
@@ -2235,10 +2653,18 @@ async function loadHistoryDate(dateStr) {
     const spot = sub[0].UnderlyingPrice || null;
     const tier = classifyTierSimple(dateStr);
     const ok = renderHistoryHeatmap({ rows: sub, underlying_price: spot, tier, expiration: dateStr, snapshot_time: dateStr });
-    if (ok) renderHistWidgets(sub, spot, tier, dateStr);
+    if (ok) {
+      document.getElementById('hist-sidebar').classList.remove('hidden');
+      renderHistWidgets(sub, spot, tier, dateStr);
+    }
   } catch (e) {
+    if (request !== histRequest) return;
     setHistStatus(`Error loading ${dateStr}: ${e.message}`);
-    document.getElementById('hist-no-data').textContent = `No archived chain for ${dateStr}.`;
+    document.getElementById('hist-no-data').textContent = e.message === 'HTTP 404'
+      ? `No archived chain for ${dateStr}.`
+      : /^(Malformed|Empty) chain archive/.test(e.message)
+        ? `The archived chain for ${dateStr} is unusable and is not shown.`
+        : `Could not load the archived chain for ${dateStr}.`;
   }
 }
 
@@ -2272,11 +2698,16 @@ function renderHistoryHeatmap(data) {
 const intradayCache = {};   // dateStr -> [{t,o,h,l,c}] 5-min bars
 
 async function loadIntradayPrices(dateStr) {
+  if (!validArchiveDate(dateStr)) throw new Error('Invalid archive date');
   if (intradayCache[dateStr]) return intradayCache[dateStr];
   const key = dateStr.replace(/-/g, '');
-  const resp = await fetch(`${R2}/prices/qqq_intraday_${key}.csv?_=${Date.now()}`);
+  const resp = await fetch(`${BROWSER_DATA}/prices/qqq_intraday_${key}.csv?_=${Date.now()}`);
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
   const rows = parseCsv(await resp.text());
+  if (!rows.length || rows.some(r => !r.datetime ||
+      ![r.open, r.high, r.low, r.close].every(v => v !== '' && Number.isFinite(+v)))) {
+    throw new Error('Malformed or empty intraday archive');
+  }
   const bars = rows
     .map(r => ({ t: r.datetime, o: +r.open, h: +r.high, l: +r.low, c: +r.close }))
     .filter(b => [b.o, b.h, b.l, b.c].every(Number.isFinite));
@@ -2634,21 +3065,30 @@ function renderTop5Widget(rows, spot) {
 }
 
 async function renderIntradayWidget(dateStr) {
+  const request = histRequest;
   document.getElementById('widget-intraday-label').textContent = dateStr;
   const canvas = document.getElementById('widget-intraday');
+  renderCandles(canvas, []);
   try {
-    renderCandles(canvas, await loadIntradayPrices(dateStr));
+    const bars = await loadIntradayPrices(dateStr);
+    if (request !== histRequest) return;
+    renderCandles(canvas, bars);
   } catch (e) {
+    if (request !== histRequest) return;
     renderCandles(canvas, []);
   }
 }
 
 async function renderDailyWidget(dateStr) {
+  const request = histRequest;
   const canvas = document.getElementById('widget-daily');
+  renderCandles(canvas, []);
   try {
     const { candles, centerIndex } = await loadDailyWindow(dateStr, 2);
+    if (request !== histRequest) return;
     renderCandles(canvas, candles, { highlightIndex: centerIndex >= 0 ? centerIndex : null, labels: true });
   } catch (e) {
+    if (request !== histRequest) return;
     renderCandles(canvas, []);
   }
 }
@@ -2679,10 +3119,12 @@ async function showSimilarPopup(e, dateStr) {
 // top-5 historically similar 0DTE sessions by cosine similarity of the bucketed OI
 // shape, each with its next-day % move and a hover popup of that day's intraday chart.
 async function renderSimilarWidget(dateStr) {
+  const request = histRequest;
   const listEl = document.getElementById('similar-list');
   listEl.innerHTML = '<div class="widget-empty">Loading…</div>';
   try {
     const matches = await queryTopSimilar(dateStr, 5);
+    if (request !== histRequest) return;
     if (!matches.length) {
       listEl.innerHTML = '<div class="widget-empty">Not enough historical sessions cached yet.</div>';
       return;
@@ -2703,6 +3145,7 @@ async function renderSimilarWidget(dateStr) {
       }).catch(() => { moveEl.textContent = '—'; });
     }
   } catch (e) {
+    if (request !== histRequest) return;
     listEl.innerHTML = '<div class="widget-empty">Similarity unavailable.</div>';
   }
 }
@@ -2719,6 +3162,8 @@ function renderHistWidgets(sub, spot, tier, dateStr) {
 // ── boot ──────────────────────────────────────────────────────────────────────
 (async function boot() {
   initPriceStrip();
+  renderChainTitle(chainSelection.symbol);
+  document.getElementById('underlying-select').onchange = (e) => selectUnderlying(e.target.value);
 
   // Show a cached last-known session instantly (display-only), then
   // hydrate the authoritative state from the server below.
@@ -2741,7 +3186,7 @@ function renderHistWidgets(sub, spot, tier, dateStr) {
       renderAuthGate();
       updateQuoteInterests();
       renderPaper();
-      if (lastData) renderHeatmap(lastData);
+      renderSelectedChain();
     } catch (error) {
       errorEl.textContent = error.message;
     } finally {
@@ -2757,24 +3202,25 @@ function renderHistWidgets(sub, spot, tier, dateStr) {
     session = null;
     try { localStorage.removeItem(SESSION_CACHE_KEY); } catch (e) {}
     renderAuthGate();
-    if (lastData) renderHeatmap(lastData);
+    renderSelectedChain();
   };
   document.getElementById('margin-call-continue').onclick = hideMarginCallScreen;
 
   document.getElementById('tab-live').onclick    = () => showTab('live');
   document.getElementById('tab-history').onclick = () => showTab('history');
   document.getElementById('tab-bots').onclick    = () => showTab('bots');
+  document.getElementById('tab-squeeze').onclick = () => showTab('squeeze');
   document.getElementById('hist-date').onchange  = (e) => loadHistoryDate(e.target.value);
 
   setStatus('', 'Loading calibration data…');
   await loadRanges();
 
   setStatus('', 'Fetching live snapshot…');
-  await Promise.all([fetchLatest(), fetchPrices(), refreshSessionFromServer()]);
+  await Promise.all([fetchLatest(), fetchPrices(), fetchSpyHealth(), refreshSessionFromServer()]);
   renderAuthGate();
   updateQuoteInterests();
   if (session) renderPaper();
-  if (lastData) renderHeatmap(lastData);
+  renderSelectedChain();
 
   liveQuotePoller = new LiveQuotePoller(liveQuotes);
   liveQuotePoller.subscribeHealth(renderQuoteHealth);
@@ -2793,12 +3239,18 @@ function renderHistWidgets(sub, spot, tier, dateStr) {
 
   // prices.json remains a fallback and retains its existing producer cadence.
   setInterval(fetchPrices, 60_000);
+  setInterval(fetchSpyHealth, 15_000);
 
   // eia_steo.json updates server-side every few hours at most (see
   // collector.py's EIA_STEO_POLL_SECS) -- polling once a minute is just
   // "pick up a change reasonably soon," not matched to its real cadence.
   fetchSteoCalibration();
   setInterval(fetchSteoCalibration, 60_000);
+
+  // Short-squeeze scanner panel (OA-191) -- an independent producer, polled
+  // the same "notice it eventually" way as eia_steo.json above.
+  fetchSqueezeLatest();
+  setInterval(fetchSqueezeLatest, SQUEEZE_POLL_MS);
 
   // Calibration data has no periodic retry of its own — safety net in case the
   // visibility handler above never fires (e.g. the tab was never backgrounded,

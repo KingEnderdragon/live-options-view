@@ -31,6 +31,9 @@ jobs:
       - name: Run reddit_sentiment_qqq ingestion suite
         working-directory: crassus
         run: python scripts/verify_reddit_ingestion.py
+      - name: Run Reddit failure-window and bounded acquisition regressions
+        working-directory: crassus
+        run: python scripts/verify_reddit_failure_window.py
       - name: Run trump_whisperer_qqq strategy suite
         working-directory: crassus
         run: python scripts/verify_trump_whisperer.py
@@ -40,9 +43,15 @@ jobs:
       - name: Run momentum_qqq strategy suite
         working-directory: crassus
         run: python scripts/verify_momentum_qqq.py
+      - name: Run momentum_puts_only_qqq strategy suite
+        working-directory: crassus
+        run: python scripts/verify_momentum_puts_only.py
       - name: Run VWAP/RVOL data contract and gate suite
         working-directory: crassus
         run: python scripts/verify_vwap_rvol.py
+      - name: Run Black-Scholes tool and shared buy-diagnostic suite
+        working-directory: crassus
+        run: python scripts/verify_black_scholes.py
       - name: Run canopus_down_day_14 strategy suite
         working-directory: crassus
         run: python scripts/verify_canopus_down_day.py
@@ -64,6 +73,18 @@ jobs:
       - name: Run runner/flatten attribution and crash-recovery suite
         working-directory: crassus
         run: python scripts/verify_runner_flatten_attribution.py
+      - name: Run snapshot lineage and recovery suite
+        working-directory: crassus
+        run: python scripts/verify_snapshot_lineage.py
+      - name: Run operational logging and cycle-completion suite
+        working-directory: crassus
+        run: python scripts/verify_observability.py
+      - name: Run runner reliability failure-injection suite
+        working-directory: crassus
+        run: python scripts/verify_reliability.py
+      - name: Run durable archive failure-boundary suite
+        working-directory: crassus
+        run: python scripts/verify_archive.py
 
   docker-build-smoke:
     # Builds the exact image Railway deploys from (see crassus/railway.toml's
@@ -81,3 +102,18 @@ jobs:
       - name: Build crassus Docker image (fails if Chromium can't launch inside it)
         working-directory: crassus
         run: docker build -t crassus-ci-smoke .
+      - name: Run real Chromium memory and fatal-driver regression
+        timeout-minutes: 10
+        run: docker run --name crassus-reliability-soak --network none --entrypoint python crassus-ci-smoke scripts/soak_reliability.py --cycles 30 --output /tmp/reliability-soak.json
+      - name: Verify real Chromium Reddit acquisition deadline and cleanup
+        timeout-minutes: 2
+        run: docker run --rm --network none --entrypoint python crassus-ci-smoke scripts/verify_reddit_acquisition_browser.py
+      - name: Extract measured soak evidence
+        if: always()
+        run: docker cp crassus-reliability-soak:/tmp/reliability-soak.json reliability-soak.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: crassus-reliability-soak
+          path: reliability-soak.json
+          if-no-files-found: warn

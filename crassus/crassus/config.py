@@ -21,8 +21,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # hides every bot added by a later PR.
 DEFAULT_ACCOUNTS_CATALOG = REPO_ROOT / "accounts.example.json"
 DEFAULT_ACCOUNTS_OVERRIDE = REPO_ROOT / "accounts.json"
-DEFAULT_LEDGER_DIR = REPO_ROOT / "logs"
-DEFAULT_STATE_DIR = REPO_ROOT / "state"
+DATA_ROOT = Path(os.environ.get("CRASSUS_DATA_ROOT", str(REPO_ROOT)))
+DEFAULT_LEDGER_DIR = DATA_ROOT / "logs"
+DEFAULT_STATE_DIR = DATA_ROOT / "state"
 
 BASE_URL = os.environ.get("CRASSUS_BASE_URL", "https://options.moopertonic.net")
 SNAPSHOT_URL = os.environ.get(
@@ -118,6 +119,20 @@ def load_accounts(
 
     Each entry may set "password_env" instead of "password" to pull the secret
     from the environment.
+
+    An entry may also set `"active": false` to stay in the tracked catalog
+    -- so it still satisfies the "every registered strategy has a
+    catalog-backed display card" CI gate (`verify_invariants.py`) and is
+    documented in place -- without being provisioned as a live account: its
+    password/password_env is never resolved, so it cannot abort startup for
+    a credential nobody has created yet. This is the release/activation
+    split MOO-161's fixed-window catalog entries need: added to the catalog
+    the moment the code lands, but only turned into a running bot once
+    Railway actually has its `CRASSUS_PW_*` variable and an operator flips
+    it on (either by editing this field or by overriding it back to active
+    in the ignored `accounts.json`, e.g. `{"username": ..., "active": true}`
+    alongside its password). An entry with no `"active"` key is active by
+    default, matching every catalog entry from before this field existed.
     """
     configured_path = path or (
         Path(os.environ["CRASSUS_ACCOUNTS_FILE"])
@@ -143,6 +158,8 @@ def load_accounts(
 
     accounts = []
     for entry in entries:
+        if entry.get("active", True) is False:
+            continue
         password = entry.get("password")
         if not password and entry.get("password_env"):
             password = os.environ.get(entry["password_env"])

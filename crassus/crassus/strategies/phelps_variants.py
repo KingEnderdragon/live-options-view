@@ -13,15 +13,47 @@ strategies, and are meant to run against the same accounts.example.json
 `reddit_sentiment_qqq` thresholds) so a side-by-side comparison isolates the
 effect of the hold-time floor and nothing else.
 
+`momentum_puts_only_qqq` (`momentum_puts_only.py`) gets the same treatment
+below, producing `momentum_puts_only_qqq_phelps`. It's listed separately
+from the four above because it isn't part of the original live roster this
+module started with -- it's a puts-only clone of `momentum_qqq` added
+specifically so a puts-only book has its own Phelps-vs-no-Phelps comparison
+pair (Persephone vs. Persephone Phelps in accounts.example.json), the same
+way Ankit vs. Ankit Phelps isolates the wrapper for `smoke_atm_roundtrip`.
+None of the four base twins above are directionally restricted, so this
+pair does not duplicate an existing comparison.
+
+The wrapper behavior is part of each variant's audit identity.  Its revision
+is therefore composed with the base strategy version below, so changing
+either layer creates a new strategy_version instead of mixing behavior under
+an existing ledger key.
+
 `oi_skew_qqq`, `max_pain_qqq`, and `put_call_ratio_qqq` are implemented but
 not currently running as live accounts (see `crassus/README.md`'s account
 table), so they have no Phelps twin here yet either -- add one the same way
 if/when they're deployed.
+
+MOO-161 adds a third family below: `*_fixed_window` variants of the same
+four strategies, run through `phelps.fixed_window_wrap` instead of
+`phelps_wrap`. Same entry/signal logic again, but the exit rule differs
+from the sanctuary-only twins above: after one Phelps window elapses, the
+position is force-closed unconditionally rather than merely released back
+to the base strategy's own judgment. See `phelps.fixed_window_wrap`'s
+docstring for the full rule and why it deliberately makes no
+structural-invalidation distinction.
+
+The fixed-window wrapper's own revision is composed into each variant's
+strategy_version the same way `PHELPS_WRAPPER_REVISION` is above -- the
+wrapper's behavior is part of the variant's audit identity, so a later
+change to `fixed_window_wrap` must be able to produce a new ledger key
+rather than silently mixing new behavior under an existing one.
 """
 
 from __future__ import annotations
 
-from ..phelps import phelps_wrap
+from ..phelps import fixed_window_wrap, phelps_wrap
+from .momentum_puts_only import STRATEGY_VERSION as _MOMENTUM_PUTS_ONLY_VERSION
+from .momentum_puts_only import momentum_puts_only_qqq as _momentum_puts_only_qqq
 from .momentum_qqq import STRATEGY_VERSION as _MOMENTUM_VERSION
 from .momentum_qqq import momentum_qqq as _momentum_qqq
 from .reddit_sentiment import STRATEGY_VERSION as _REDDIT_VERSION
@@ -32,11 +64,18 @@ from .trump_whisperer import STRATEGY_VERSION as _TRUMP_VERSION
 from .trump_whisperer import trump_whisperer_qqq as _trump_whisperer_qqq
 from ..strategy import register
 
+PHELPS_WRAPPER_REVISION = "2"
+
+
+def phelps_variant_version(base_version: str) -> str:
+    return f"{base_version}+phelps.{PHELPS_WRAPPER_REVISION}"
+
+
 smoke_atm_roundtrip_phelps = register(
     phelps_wrap(
         _smoke_atm_roundtrip,
         strategy_id="smoke_atm_roundtrip_phelps",
-        strategy_version=_SMOKE_VERSION,
+        strategy_version=phelps_variant_version(_SMOKE_VERSION),
     )
 )
 
@@ -44,7 +83,7 @@ reddit_sentiment_qqq_phelps = register(
     phelps_wrap(
         _reddit_sentiment_qqq,
         strategy_id="reddit_sentiment_qqq_phelps",
-        strategy_version=_REDDIT_VERSION,
+        strategy_version=phelps_variant_version(_REDDIT_VERSION),
     )
 )
 
@@ -52,7 +91,7 @@ trump_whisperer_qqq_phelps = register(
     phelps_wrap(
         _trump_whisperer_qqq,
         strategy_id="trump_whisperer_qqq_phelps",
-        strategy_version=_TRUMP_VERSION,
+        strategy_version=phelps_variant_version(_TRUMP_VERSION),
     )
 )
 
@@ -60,6 +99,53 @@ momentum_qqq_phelps = register(
     phelps_wrap(
         _momentum_qqq,
         strategy_id="momentum_qqq_phelps",
-        strategy_version=_MOMENTUM_VERSION,
+        strategy_version=phelps_variant_version(_MOMENTUM_VERSION),
+    )
+)
+
+momentum_puts_only_qqq_phelps = register(
+    phelps_wrap(
+        _momentum_puts_only_qqq,
+        strategy_id="momentum_puts_only_qqq_phelps",
+        strategy_version=phelps_variant_version(_MOMENTUM_PUTS_ONLY_VERSION),
+    )
+)
+
+FIXED_WINDOW_WRAPPER_REVISION = "1"
+
+
+def fixed_window_variant_version(base_version: str) -> str:
+    return f"{base_version}+fixed_window.{FIXED_WINDOW_WRAPPER_REVISION}"
+
+
+smoke_atm_roundtrip_fixed_window = register(
+    fixed_window_wrap(
+        _smoke_atm_roundtrip,
+        strategy_id="smoke_atm_roundtrip_fixed_window",
+        strategy_version=fixed_window_variant_version(_SMOKE_VERSION),
+    )
+)
+
+reddit_sentiment_qqq_fixed_window = register(
+    fixed_window_wrap(
+        _reddit_sentiment_qqq,
+        strategy_id="reddit_sentiment_qqq_fixed_window",
+        strategy_version=fixed_window_variant_version(_REDDIT_VERSION),
+    )
+)
+
+trump_whisperer_qqq_fixed_window = register(
+    fixed_window_wrap(
+        _trump_whisperer_qqq,
+        strategy_id="trump_whisperer_qqq_fixed_window",
+        strategy_version=fixed_window_variant_version(_TRUMP_VERSION),
+    )
+)
+
+momentum_qqq_fixed_window = register(
+    fixed_window_wrap(
+        _momentum_qqq,
+        strategy_id="momentum_qqq_fixed_window",
+        strategy_version=fixed_window_variant_version(_MOMENTUM_VERSION),
     )
 )

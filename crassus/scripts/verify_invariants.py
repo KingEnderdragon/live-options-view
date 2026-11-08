@@ -385,6 +385,51 @@ def scenario_strategy_contract(tmp: Path) -> None:
     long_ = smoke_atm_roundtrip(ctx_for(held))
     check("Long -> sells to close, completing the round trip", long_.action == "sell", long_.action)
 
+    drifted_symbol = "QQQ260722C00700000"
+    drifted_held = [{"sym": drifted_symbol, "side": "buy", "qty": 1, "price": 7.5}]
+    drifted_quotes = {
+        drifted_symbol: Quote(
+            drifted_symbol,
+            7.7,
+            7.8,
+            quote_ts=clock.iso_utc(),
+            server_ts=clock.iso_utc(),
+        )
+    }
+    drifted_ctx = StrategyContext(
+        snapshot=FakeSnapshot(),
+        account_state={},
+        book=Book(drifted_held),
+        now_et=clock.now_et(),
+        session_phase="open",
+        quotes=lambda syms: drifted_quotes,
+    )
+    drifted = smoke_atm_roundtrip(drifted_ctx)
+    check(
+        "ATM drift -> closes the actual held strike rather than buying the new ATM",
+        drifted.action == "sell" and drifted.symbol == drifted_symbol,
+        drifted.to_dict(),
+    )
+
+    multiple = [
+        {"sym": SYM, "side": "buy", "qty": 1, "price": 8.34},
+        {"sym": drifted_symbol, "side": "buy", "qty": 1, "price": 7.5},
+    ]
+    multiple_ctx = StrategyContext(
+        snapshot=FakeSnapshot(),
+        account_state={},
+        book=Book(multiple),
+        now_et=clock.now_et(),
+        session_phase="open",
+        quotes=lambda syms: fresh,
+    )
+    guarded = smoke_atm_roundtrip(multiple_ctx)
+    check(
+        "Multiple open positions -> stands down instead of opening or closing arbitrarily",
+        guarded.action == "no_trade" and "more than one" in guarded.reason,
+        guarded.to_dict(),
+    )
+
     stale = {SYM: Quote(SYM, 8.2, 8.34, quote_ts="2026-07-22T12:00:00+00:00", server_ts="2026-07-22T13:00:00+00:00")}
     ctx = StrategyContext(snapshot=FakeSnapshot(), account_state={}, book=Book([]), now_et=clock.now_et(),
                           session_phase="open", quotes=lambda syms: stale)
@@ -611,6 +656,10 @@ def scenario_strategy_config_validation(tmp: Path) -> None:
     # A stale ignored accounts.json used to replace the tracked example
     # wholesale, which is exactly how newer bots disappeared. It is now an
     # overlay: catalog bots remain, while matching local fields still win.
+    # An "active": false catalog entry (MOO-161's FW roster, pending
+    # CRASSUS_PW_*_FW provisioning) is deliberately excluded here too --
+    # see the next block for that gate specifically.
+    active_entries = [e for e in raw["accounts"] if e.get("active", True)]
     stale_override = tmp / "accounts.json"
     stale_override.write_text(json.dumps({
         "accounts": [{
@@ -628,11 +677,41 @@ def scenario_strategy_config_validation(tmp: Path) -> None:
         merged = load_accounts(catalog_path=example, override_path=stale_override)
     check(
         "a stale private override cannot hide newly cataloged bots",
-        {a.username for a in merged} == {entry["username"] for entry in raw["accounts"]},
+        {a.username for a in merged} == {entry["username"] for entry in active_entries},
     )
     check(
         "private fields still override their matching catalog account",
         merged[0].alias == "Local Override" and merged[0].password == "local-password",
+    )
+
+    # MOO-161 release/activation split: a catalog entry marked "active":
+    # false still counts toward the catalog-backed-card gate above, but
+    # must not be able to abort startup for a credential nobody has
+    # provisioned yet -- deliberately not clearing os.environ here, so an
+    # unset CRASSUS_PW_*_FW proves nothing was ever looked up for it.
+    inactive_entries = [e for e in raw["accounts"] if not e.get("active", True)]
+    check("the catalog has at least one inactive (pending-activation) entry to exercise", bool(inactive_entries))
+    with patch.dict(os.environ, password_env, clear=True):
+        active_only = load_accounts(catalog_path=example, override_path=tmp / "accounts.json.does-not-exist")
+    check(
+        "inactive catalog entries are skipped without their password_env ever being required",
+        {a.username for a in active_only}.isdisjoint({e["username"] for e in inactive_entries}),
+    )
+
+    # Activation flips the same catalog entry to a real account once its
+    # credential exists -- via the ignored accounts.json override, exactly
+    # like any other private field override above.
+    activated_username = inactive_entries[0]["username"]
+    activated_password_env = inactive_entries[0]["password_env"]
+    activation_override = tmp / "accounts.activated.json"
+    activation_override.write_text(json.dumps({
+        "accounts": [{"username": activated_username, "active": True}]
+    }))
+    with patch.dict(os.environ, {**password_env, activated_password_env: "fw-password"}, clear=True):
+        with_activation = load_accounts(catalog_path=example, override_path=activation_override)
+    check(
+        "an override flipping 'active' to true turns a pending catalog entry into a real account",
+        activated_username in {a.username for a in with_activation},
     )
 
     with Mock():

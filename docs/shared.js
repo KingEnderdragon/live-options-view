@@ -234,6 +234,151 @@ function formatMomentum(underlyingMarket, nowMs = Date.now()) {
   return { text, state: um.freshness === 'live' ? 'live' : 'stale' };
 }
 
+// -- short-squeeze scanner panel formatting (OA-191) -------------------------
+// Pure formatting/tracking for docs/index.html's squeeze panel, which
+// displays the independently-maintained scanner's published `latest.json`
+// pointer (OwenTanzer/short-squeeze-scanner's squeeze_scanner/storage.py
+// `upload()`). Same producer/display split as formatVwapRvol/formatMomentum
+// above: this page never computes a score, only formats what was published.
+// Legacy manual formatter retained for compatibility and acquisition-time labels.
+// The live panel uses formatSqueezeScheduleStatus for freshness decisions.
+const SQUEEZE_SCAN_STALE_AFTER_MS = 6 * 60 * 60 * 1000;
+
+// PR #105 review, finding 2: freshness must be judged against ACQUISITION
+// time (when the scan actually ran), not `published_at` (when the pointer
+// file happened to be written to R2) -- those can differ by a day if an
+// upload is delayed, and `published_at` alone would render a September 22
+// scan uploaded September 23 as fresh ("live"). `finished_at` (falling back
+// to `started_at`) is the acquisition-time field; `published_at` is never
+// used for the age/staleness judgment here anymore.
+function formatSqueezeScanStatus(pointer, nowMs = Date.now()) {
+  if (!pointer) return { text: 'No scan published yet', state: 'fallback' };
+  const acquiredMs = Date.parse(pointer.finished_at || pointer.started_at || '');
+  const dateText = Number.isFinite(acquiredMs)
+    ? new Date(acquiredMs).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/New_York' })
+    : 'unknown date';
+  const timeText = Number.isFinite(acquiredMs)
+    ? new Date(acquiredMs).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' })
+    : 'unknown time';
+  // A prior-day scan is explicitly stale regardless of raw age in ms -- a
+  // 9pm run is under SQUEEZE_SCAN_STALE_AFTER_MS old at 11pm the same
+  // night, but is still yesterday's data once a new session has started.
+  const todayKey = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date(nowMs));
+  const scanDateKey = Number.isFinite(acquiredMs)
+    ? new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date(acquiredMs))
+    : null;
+  const priorDay = scanDateKey != null && scanDateKey !== todayKey;
+  const label = priorDay ? `${dateText}, ${timeText}` : timeText;
+
+  if (pointer.status === 'empty') {
+    return { text: `Scan complete ${label} ET — no eligible candidates`, state: 'stale' };
+  }
+  const ageMs = Number.isFinite(acquiredMs) ? nowMs - acquiredMs : null;
+  const stale = priorDay || ageMs == null || ageMs > SQUEEZE_SCAN_STALE_AFTER_MS;
+  return { text: `Scan ${label} ET${stale ? ' (stale)' : ''}`, state: stale ? 'stale' : 'live' };
+}
+
+// Calendar slots are exported from the producer's XNYS calendar and activation
+// configuration. An expired/unavailable calendar never implies a fresh scan.
+function formatSqueezeScheduleStatus(pointer, attempt, schedule, calendar, nowMs = Date.now()) {
+  const label = formatSqueezeScanStatus(pointer, nowMs).text.replace(' (stale)', '');
+  const result = (warning, state = 'stale', suffix = '') => ({ text: label + suffix, state, warning });
+  const validFrom = Date.parse(calendar?.valid_from || '');
+  const validUntil = Date.parse(calendar?.valid_until || '');
+  if (calendar?.schema_version !== 1 || calendar?.calendar !== 'XNYS' ||
+      calendar?.timezone !== 'America/New_York' || !Array.isArray(calendar?.slots) ||
+      !Number.isFinite(validFrom) || !Number.isFinite(validUntil) ||
+      nowMs < validFrom || nowMs >= validUntil) {
+    return result('Schedule calendar unavailable or outside its coverage. Freshness is unconfirmed.');
+  }
+  const slots = calendar.slots.map(value => Date.parse(value));
+  if (slots.some((value, i) => !Number.isFinite(value) || value < validFrom ||
+      value >= validUntil || (i && value <= slots[i - 1]))) {
+    return result('Schedule calendar is invalid. Freshness is unconfirmed.');
+  }
+  const due = slots.filter(value => value <= nowMs).at(-1);
+  if (due == null) return result('Waiting for the first scheduled scan.', 'fallback');
+  const slotLabel = new Date(due).toLocaleString('en-US', {
+    month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York',
+  }) + ' ET';
+  const matching = Date.parse(schedule?.scheduled_for || '') === due;
+  if (matching && ['missed', 'interrupted'].includes(schedule.status)) {
+    return result(`Scheduled scan ${slotLabel}: ${schedule.status}. Showing the last successful result, if available.`);
+  }
+  if (matching && schedule.status === 'claimed') {
+    return result(nowMs - due <= 40 * 60_000
+      ? `Scheduled scan ${slotLabel} is acquiring or awaiting publication. Previous results remain below.`
+      : `Scheduled scan ${slotLabel} has no confirmed completion. Previous results remain below.`);
+  }
+  const failure = describeSqueezeAcquisitionFailure(pointer, attempt);
+  if (failure) return result(failure);
+  if (matching && schedule.status === 'finished' && !['complete', 'empty'].includes(schedule.acquisition_status)) {
+    return result(`Scheduled scan ${slotLabel} did not complete: ${schedule.acquisition_status || 'unknown'}. Showing the last successful result, if available.`);
+  }
+  const started = Date.parse(pointer?.started_at || '');
+  const finished = Date.parse(pointer?.finished_at || '');
+  const current = pointer?.sampling_mode === 'scheduled' && Date.parse(pointer?.scheduled_for || '') === due &&
+    ['complete', 'empty'].includes(pointer?.status) && Number.isFinite(started) && Number.isFinite(finished) &&
+    started >= due && started <= due + 10 * 60_000 && finished >= started && finished <= nowMs &&
+    matching && schedule.status === 'finished' && schedule.run_id === pointer.run_id &&
+    schedule.acquisition_status === pointer.status;
+  if (current) {
+    const nyDay = ms => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date(ms));
+    const priorSession = nyDay(due) !== nyDay(nowMs);
+    return result(null, priorSession ? 'stale' : 'live', priorSession ? ' — previous session' : ' — latest scheduled scan');
+  }
+  if (matching && schedule.status === 'finished') {
+    return result(`Scheduled scan ${slotLabel} finished, but its published result is not yet confirmed. Showing the last successful result, if available.`);
+  }
+  return result(nowMs - due <= 10 * 60_000
+    ? `Scheduled refresh due ${slotLabel}; waiting for the scan.`
+    : `No confirmed schedule status for ${slotLabel}. Results may be stale.`);
+}
+
+// PR #105 review, finding 1: `latest.json` only ever advances on a
+// successful (complete/empty) run -- storage.py's `upload()` always
+// advances `latest-attempt.json` regardless of outcome. Without checking
+// the attempt pointer too, a failed or partial noon scan is invisible: the
+// morning's successful result keeps showing as if nothing had gone wrong
+// since. `successPointer`/`attemptPointer` are the parsed latest.json /
+// latest-attempt.json bodies (either may be null if nothing was ever
+// published to that path yet).
+function describeSqueezeAcquisitionFailure(successPointer, attemptPointer) {
+  if (!attemptPointer) return null;
+  if (attemptPointer.status === 'complete' || attemptPointer.status === 'empty') return null; // the attempt succeeded
+  const attemptIsNewer = !successPointer ||
+    Date.parse(attemptPointer.started_at || '') > Date.parse(successPointer.started_at || '');
+  if (!attemptIsNewer) return null; // the failure is older than the successful result already shown
+  const startedMs = Date.parse(attemptPointer.started_at || '');
+  const time = Number.isFinite(startedMs)
+    ? new Date(startedMs).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' })
+    : 'unknown time';
+  return successPointer
+    ? `Most recent scan (started ${time} ET) did not complete: ${attemptPointer.status}. Showing the last successful result below.`
+    : `No successful scan yet. Most recent attempt (started ${time} ET): ${attemptPointer.status}.`;
+}
+
+// PR #105 review round 2: renders the "First seen today" column against
+// the real producer contract (short-squeeze-scanner#2's
+// docs/archive-contract.md, "Display contract v1: canonical first
+// appearance") -- `first_seen_at` (UTC write-attempt timestamp, null if
+// unknown) and `is_new` (true only for the run that first introduces the
+// ticker; false for a known existing candidate, including a reappearance;
+// null if unknown/legacy). The round-1 placeholder
+// (`row.first_seen_at ? 'New' : 'unavailable'`) treated ANY non-null
+// first_seen_at as New and never rendered the time itself -- both an
+// incumbent (is_new=false) and a genuine newcomer (is_new=true) rendered
+// identically as bare "New" text. `is_new` alone decides the New label;
+// first_seen_at (New York time) is shown either way when known.
+function formatSqueezeFirstSeen(row) {
+  if (row.first_seen_at == null || row.is_new == null) return { text: 'unavailable', isNew: false };
+  const seenMs = Date.parse(row.first_seen_at);
+  const time = Number.isFinite(seenMs)
+    ? new Date(seenMs).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' })
+    : 'unknown time';
+  return { text: time, isNew: row.is_new === true };
+}
+
 // EIA STEO crude calibration panel formatting (docs/index.html's
 // fetchSteoCalibration). Pure, DOM-free -- same rationale as
 // formatVwapRvol/formatMomentum above: testable directly, no fixture DOM
@@ -769,11 +914,103 @@ function buildHeatmapRows(tbody, data, ranges, opts = {}) {
   return true;
 }
 
+// ── chain underlying selection (#121) ───────────────────────────────────────
+// QQQ keeps its original artifact; SPY has its own tree (see
+// SPY_COLLECTION.md). Anything not listed is unsupported -- never mapped
+// onto QQQ's file.
+const CHAIN_UNDERLYINGS = ['QQQ', 'SPY'];
+const CHAIN_LATEST_PATHS = { QQQ: 'intraday/latest.json', SPY: 'intraday/spy/latest.json' };
+
+function chainLatestPath(symbol) {
+  return Object.hasOwn(CHAIN_LATEST_PATHS, symbol) ? CHAIN_LATEST_PATHS[symbol] : null;
+}
+
+function occRoot(occSymbol) {
+  const match = /^([A-Z]+)/.exec(String(occSymbol || '').replace(/\s+/g, ''));
+  return match ? match[1] : '';
+}
+
+// Rejects a payload that doesn't prove it belongs to `symbol`, so a QQQ
+// snapshot (or a mixed one) can never be rendered under a SPY heading or
+// vice versa. Pre-#121 QQQ payloads carry no top-level symbol; they're only
+// accepted when QQQ itself was requested.
+function validateChainPayload(data, symbol) {
+  if (!CHAIN_UNDERLYINGS.includes(symbol)) return { ok: false, reason: `${symbol} is not a supported underlying` };
+  if (!data || typeof data !== 'object' || !Array.isArray(data.rows)) return { ok: false, reason: 'snapshot is malformed' };
+  const declared = data.symbol ?? (symbol === 'QQQ' ? 'QQQ' : null);
+  if (declared !== symbol) return { ok: false, reason: `snapshot is labeled ${declared ?? 'without a symbol'}, not ${symbol}` };
+  const marketSymbol = data.underlying_market?.symbol;
+  if (marketSymbol != null && marketSymbol !== symbol) return { ok: false, reason: `underlying readings belong to ${marketSymbol}` };
+  if (data.rows.some(row => occRoot(row?.OptionSymbol) !== symbol)) return { ok: false, reason: `snapshot contains non-${symbol} contracts` };
+  return { ok: true, reason: null };
+}
+
+// Tracks which underlying is on screen. Every request takes a token; a
+// response is applied only if its token is still current, so a slow reply
+// for the previous selection can't overwrite (or be labeled as) the new one.
+class ChainSelection {
+  constructor(symbol = 'QQQ') {
+    this.symbol = CHAIN_UNDERLYINGS.includes(symbol) ? symbol : 'QQQ';
+    this.generation = 0;
+  }
+  select(symbol) {
+    if (!CHAIN_UNDERLYINGS.includes(symbol)) return false;
+    if (symbol !== this.symbol) { this.symbol = symbol; this.generation++; }
+    return true;
+  }
+  token() { return { symbol: this.symbol, generation: this.generation }; }
+  accepts(token) { return !!token && token.symbol === this.symbol && token.generation === this.generation; }
+}
+
+// OIranges.csv is calibrated on QQQ's history only. For another underlying
+// there is no calibration yet, so heat levels are relative to this snapshot's
+// own nonzero OI distribution (p25/p50/p75/p90) -- labeled as such in the UI.
+// Returns the same shape parseRangesCsv() produces, for getThresh().
+function relativeOiRanges(rows, display = DISPLAY) {
+  const values = (rows || []).map(r => parseInt(r?.OpenInterest ?? 0) || 0).filter(v => v > 0).sort((a, b) => a - b);
+  if (!values.length) return null;
+  const q = p => values[Math.min(values.length - 1, Math.floor(p * (values.length - 1)))];
+  const thresholds = [q(0.25), q(0.5), q(0.75), q(0.9)];
+  const regular = {};
+  for (let o = -display; o <= display; o++) regular[o] = { call: thresholds, put: thresholds };
+  return { '0DTE_Regular': regular };
+}
+
+function summarizeSpyHealth(payload, nowMs = Date.now()) {
+  const spy = payload?.spy;
+  if (!spy) return { state: 'unavailable', text: 'SPY: unavailable', detail: 'SPY health has not been published' };
+  const updated = Date.parse(payload.updated_at);
+  if (!Number.isFinite(updated) || nowMs - updated > 45_000 || nowMs - updated < -30_000) {
+    return { state: 'stale', text: 'SPY: stale', detail: 'SPY health update is old or untimed' };
+  }
+  if (spy.collection_status !== 'collecting') {
+    const status = spy.collection_status || 'unavailable';
+    return { state: 'unavailable', text: `SPY: ${status.replaceAll('_', ' ')}`, detail: spy.reason || status };
+  }
+  const snapshotAt = Date.parse(spy.last_snapshot_upload_time);
+  if (!Number.isFinite(snapshotAt)) {
+    const started = Date.parse(payload.process_start_time);
+    if (Number.isFinite(started) && nowMs - started > 180_000) {
+      return { state: 'unavailable', text: 'SPY: unavailable', detail: 'No SPY snapshot uploaded' };
+    }
+    return { state: 'connecting', text: 'SPY: warming up', detail: 'No SPY snapshot uploaded yet' };
+  }
+  if (nowMs - snapshotAt > 180_000 || nowMs - snapshotAt < -30_000 || spy.spot?.status === 'stale') {
+    return { state: 'stale', text: 'SPY: stale', detail: 'SPY snapshot or spot is stale' };
+  }
+  if (spy.spot?.status !== 'live') {
+    return { state: 'unavailable', text: 'SPY: unavailable', detail: 'SPY spot has no current provider observation' };
+  }
+  return { state: 'live', text: 'SPY: live', detail: 'SPY snapshot and spot are current' };
+}
+
 if (typeof module !== 'undefined') {
   module.exports = {
+    CHAIN_UNDERLYINGS, chainLatestPath, occRoot, validateChainPayload, ChainSelection, relativeOiRanges,
+    summarizeSpyHealth,
     LiveQuoteService, LiveQuotePoller, TickerStateStore, tickerSessionState,
     SHARE_QUOTE_MAX_AGE_MS, freshShareQuote, formatVwapRvol, formatMomentum,
-    fmtSteoDelta, findRevision,
+    fmtSteoDelta, findRevision, formatSqueezeScheduleStatus, formatSqueezeScanStatus, describeSqueezeAcquisitionFailure, formatSqueezeFirstSeen,
     parseRetryAfter, normalizePaperOrder, normalizeShareOrder,
     isTradeableShareSymbol, computeAtmWindow,
   };

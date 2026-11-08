@@ -1,4 +1,29 @@
 const R2_ORIGIN = "https://pub-4d5c916b8cb74ffb8c0abd7dfadb02cf.r2.dev";
+// Only these public artifacts are exposed to the browser through this route.
+// Never use the private bucket binding or a caller-provided destination.
+const BROWSER_DATA_ORIGIN = 'https://live-options-view.otmooper12.workers.dev';
+const BROWSER_DATA_PREFIX = '/browser-data/';
+const BROWSER_DATA_KEYS = new Set([
+  'intraday/latest.json',
+  'intraday/spy/latest.json',
+  'intraday/prices.json',
+  'intraday/health.json',
+  'derived/OIranges.csv',
+  'macro/eia_steo.json',
+  'manifest.json',
+  'squeeze-scanner/v1/scheduled/latest.json',
+  'squeeze-scanner/v1/scheduled/latest-attempt.json',
+  'squeeze-scanner/v1/scheduled/latest-schedule.json',
+]);
+// Only the three QQQ archive filename families consumed by Historical.
+// Validate calendar dates, not just eight arbitrary digits. No prefix proxying.
+function isPublicArchiveKey(key) {
+  const match = /^(?:raw\/(?:opex\/)?qqq_chain_|prices\/qqq_intraday_)([0-9]{4})([0-9]{2})([0-9]{2})\.csv$/.exec(key);
+  if (!match) return false;
+  const date = `${match[1]}-${match[2]}-${match[3]}`;
+  const parsed = new Date(`${date}T00:00:00Z`);
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === date;
+}
 const ALLOWED_ORIGINS = ['https://options.moopertonic.net', 'http://localhost:8787'];
 const MAX_BODY_BYTES = 16 * 1024; // a trade record is a few hundred bytes; this leaves ample headroom
 const MAX_QUOTE_AGE_MS = 15 * 1000;
@@ -13,16 +38,23 @@ const SESSION_TTL_SECONDS = 60 * 60 * 24 * 30; // 30 days
 const PBKDF2_ITERATIONS = 100_000;
 export const STARTING_BALANCE = 10_000;
 export const USERNAME_RE = /^[A-Za-z0-9_]{3,20}$/;
+export const BOT_USERNAME_RE = /^[A-Za-z0-9_]{3,40}$/;
 export const STRATEGY_ID_RE = /^[a-z0-9_]{1,40}$/;
 export const MIN_PASSWORD_LEN = 8;
 export const MAX_PASSWORD_LEN = 256;
 const MAX_KV_WRITE_ATTEMPTS = 5;
 const SETTLEMENT_ID_PREFIX = 'settle';
 export const EXECUTION_RESERVATION_LEASE_MS = 30 * 1000;
+export const BOT_INDEX_KEY = 'system/bot-membership-v1.json';
+const MAX_BOT_INDEX_MEMBERS = 500;
 
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+
+    if (url.pathname === '/browser-data' || url.pathname.startsWith(BROWSER_DATA_PREFIX)) {
+      return handleBrowserData(request, url);
+    }
 
     // Same-origin passthrough to the R2 bucket, fetched edge-to-edge by
     // Cloudflare rather than over the client's own network. Exists so
@@ -57,6 +89,10 @@ export default {
 
     if (request.method === 'POST' && url.pathname === '/api/bot-metadata') {
       return handleBotMetadata(request, env);
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/bot-index/reconcile') {
+      return handleBotIndexReconcile(request, env);
     }
 
     if (request.method === 'GET' && url.pathname === '/api/me') {
@@ -100,6 +136,46 @@ export default {
   async scheduled(event, env, ctx) {
     ctx.waitUntil(settleAllBots(env));
   },
+}
+
+async function handleBrowserData(request, url) {
+  const origin = request.headers.get('Origin');
+  if (url.origin !== BROWSER_DATA_ORIGIN ||
+      (origin !== null && origin !== BROWSER_DATA_ORIGIN)) {
+    return new Response('Forbidden', { status: 403 });
+  }
+  if (request.method !== 'GET') {
+    return new Response('Method not allowed', { status: 405, headers: { Allow: 'GET' } });
+  }
+  const key = url.pathname.slice(BROWSER_DATA_PREFIX.length);
+  if (!BROWSER_DATA_KEYS.has(key) && !isPublicArchiveKey(key)) return new Response('Not found', { status: 404 });
+  // Accept only the existing numeric cache-buster, never arbitrary query data.
+  if (url.search && !/^\?_=[0-9]{1,20}$/.test(url.search)) {
+    return new Response('Invalid query', { status: 400 });
+  }
+  try {
+    const upstream = await fetch(`${R2_ORIGIN}/${key}${url.search}`, {
+      method: 'GET',
+      headers: {},
+      credentials: 'omit',
+      redirect: 'manual',
+      cf: { cacheTtl: 0, cacheEverything: false },
+    });
+    // Preserve status and stream bytes without parsing. Limit response headers
+    // so upstream cookies/auth cannot affect this origin, and Location cannot
+    // make the browser follow a redirect that the Worker refused to follow.
+    const headers = new Headers();
+    for (const name of ['Content-Type', 'Content-Encoding', 'Content-Length',
+      'Cache-Control', 'ETag', 'Last-Modified', 'Retry-After']) {
+      const value = upstream.headers.get(name);
+      if (value !== null) headers.set(name, value);
+    }
+    return new Response(upstream.body, {
+      status: upstream.status, statusText: upstream.statusText, headers,
+    });
+  } catch {
+    return new Response('Public data upstream unavailable', { status: 502 });
+  }
 }
 
 async function handleLiveQuotes(url, env) {
@@ -155,14 +231,140 @@ function userKey(username) {
   return `user:${username.toLowerCase()}`;
 }
 
-// Membership index for the public /api/bots roster. Bot accounts are marked
-// here at registration by an operator holding BOT_REGISTRATION_KEY -- the
-// roster is driven off this index rather than off a `crassus_` username
-// prefix, because usernames are self-chosen: anyone could register
-// `crassus_whatever` and publish their own balance. Nothing a client sends
-// can put a record in this index.
+// Legacy membership markers are retained for migration and rollback. The R2
+// index holds the same public bot identifiers; account records remain authoritative.
 function botKey(username) {
   return `bot:${username.toLowerCase()}`;
+}
+
+function validateBotIndex(value) {
+  if (!value || value.schema_version !== 1 || typeof value.ready !== 'boolean' ||
+      !Array.isArray(value.members) || value.members.length > MAX_BOT_INDEX_MEMBERS ||
+      value.members.some(n => typeof n !== 'string' || !BOT_USERNAME_RE.test(n) || n !== n.toLowerCase()) ||
+      new Set(value.members).size !== value.members.length) {
+    throw new Error('Invalid bot membership index');
+  }
+  return value;
+}
+
+async function loadBotIndex(env) {
+  const object = await env.PAPER_TRADES.get(BOT_INDEX_KEY);
+  return object ? { value: validateBotIndex(await object.json()), etag: object.etag } : null;
+}
+
+// Conditional writes protect against lost membership when separate Workers
+// register bots concurrently. An absent index is explicitly NOT migration-ready.
+export async function updateBotIndex(env, additions, { ready = false, sleeper = sleep } = {}) {
+  const names = additions.map(n => n.toLowerCase());
+  if (names.some(n => !BOT_USERNAME_RE.test(n))) throw new Error('Invalid bot membership');
+  for (let attempt = 0; attempt < MAX_KV_WRITE_ATTEMPTS; attempt++) {
+    const current = await loadBotIndex(env);
+    const members = [...new Set([...(current?.value.members || []), ...names])].sort();
+    const next = validateBotIndex({ schema_version: 1, ready: ready || current?.value.ready || false, members });
+    if (current && JSON.stringify(current.value) === JSON.stringify(next)) return next;
+    try {
+      const stored = await env.PAPER_TRADES.put(BOT_INDEX_KEY, JSON.stringify(next), {
+        onlyIf: current ? { etagMatches: current.etag } : { etagDoesNotMatch: '*' },
+        httpMetadata: { contentType: 'application/json', cacheControl: 'no-store' },
+      });
+      if (stored) return next;
+    } catch (error) {
+      const rateLimited = Number(error?.status) === 429 ||
+        [429, 10058].includes(Number(error?.code)) ||
+        /\b(?:429|10058|TooManyRequests)\b/i.test(`${error?.name} ${error?.message}`);
+      if (!rateLimited || attempt === MAX_KV_WRITE_ATTEMPTS - 1) throw error;
+    }
+    // Both a conditional conflict and R2's same-object write throttle require
+    // a fresh read/merge. Wait beyond the one-second write window first.
+    if (attempt < MAX_KV_WRITE_ATTEMPTS - 1) await sleeper(1100);
+  }
+  throw new Error('Bot membership update conflicted; retry');
+}
+
+// Only migration/reconciliation and the explicit staged rollout mode enumerate
+// KV. Never fall back to listing on an ordinary index read failure.
+async function listMigrationKeys(env, prefix) {
+  const names = [];
+  let cursor;
+  for (let page = 0; page < 5; page++) {
+    const result = await env.USERS.list({ prefix, limit: 100, ...(cursor ? { cursor } : {}) });
+    names.push(...result.keys.map(k => k.name));
+    if (names.length > MAX_BOT_INDEX_MEMBERS) throw new Error('Bot migration scan limit exceeded');
+    if (result.list_complete === true) return names;
+    if (!result.cursor || result.cursor === cursor) throw new Error('Incomplete bot migration scan');
+    cursor = result.cursor;
+  }
+  throw new Error('Bot migration scan limit exceeded');
+}
+
+async function botUsernames(env) {
+  if (env.BOT_INDEX_READS === 'legacy') {
+    return (await listMigrationKeys(env, 'bot:')).map(k => k.slice(4));
+  }
+  if (env.BOT_INDEX_READS && env.BOT_INDEX_READS !== 'r2') throw new Error('Invalid bot index mode');
+  const current = await loadBotIndex(env);
+  if (!current?.value.ready) throw new Error('Bot membership migration is not ready');
+  return current.value.members;
+}
+
+export async function repairLegacyBotMarker(env, username, sleeper = sleep) {
+  const key = botKey(username);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const raw = await env.USERS.get(key);
+    let marker;
+    try { marker = raw ? JSON.parse(raw) : null; } catch { marker = null; }
+    if (typeof marker?.username === 'string' &&
+        marker.username.toLowerCase() === username.toLowerCase()) return;
+    try {
+      await env.USERS.put(key, JSON.stringify({ username }));
+      return;
+    } catch (error) {
+      // A competing repair or an eventually consistent stale read can still
+      // cause a same-key PUT. Retry only rate limits, outside the one-second
+      // write window, and re-read so a completed competing repair is a no-op.
+      const rateLimited = error?.status === 429 || /\b429\b/.test(String(error?.message));
+      if (!rateLimited || attempt === 2) throw error;
+      await sleeper(1100);
+    }
+  }
+}
+
+async function syncBotMembership(env, username) {
+  // Keep the legacy marker during rollout/rollback. The account already exists;
+  // login and metadata sync retry this sequence after any interrupted write.
+  await repairLegacyBotMarker(env, username);
+  await updateBotIndex(env, [username]);
+}
+
+export async function handleBotIndexReconcile(request, env) {
+  if (!env.BOT_REGISTRATION_KEY || request.headers.get('X-Bot-Registration-Key') !== env.BOT_REGISTRATION_KEY) {
+    return jsonResponse({ error: 'Invalid bot registration key' }, 403);
+  }
+  try {
+    // Scan account records, not just bot: markers, to repair interrupted legacy
+    // registrations. A bounded, fully paginated scan must finish before publish.
+    const keys = await listMigrationKeys(env, 'user:');
+    const members = [];
+    for (const key of keys) {
+      const raw = await env.USERS.get(key);
+      if (!raw) throw new Error('Migration account unavailable; retry');
+      const record = JSON.parse(raw);
+      if (record.is_bot === true) {
+        if (typeof record.username !== 'string' || userKey(record.username) !== key) {
+          throw new Error('Migration account identity mismatch');
+        }
+        members.push(record.username);
+      }
+    }
+    // Union with the newest version: a registration during scanning must survive.
+    // Closed bots retain identity/history; reconciliation never prunes on KV misses.
+    const index = await updateBotIndex(env, members, { ready: true });
+    console.log(JSON.stringify({ event: 'bot_index_reconciled', scanned: keys.length, members: index.members.length }));
+    return jsonResponse({ ready: index.ready, scanned: keys.length, members: index.members.length }, 200);
+  } catch (error) {
+    console.error('bot_index_reconciliation_failed');
+    return jsonResponse({ error: 'Bot index reconciliation failed; retry or inspect storage' }, 503);
+  }
 }
 
 function sessionKey(token) {
@@ -311,8 +513,8 @@ async function handleRegister(request, env) {
     return jsonResponse({ error: 'strategy_id must be 1-40 chars: lowercase letters, numbers, underscore' }, 400);
   }
 
-  if (typeof username !== 'string' || !USERNAME_RE.test(username)) {
-    return jsonResponse({ error: 'Username must be 3-20 characters: letters, numbers, underscore' }, 400);
+  if (typeof username !== 'string' || !(isBot ? BOT_USERNAME_RE : USERNAME_RE).test(username)) {
+    return jsonResponse({ error: `Username must be 3-${isBot ? 40 : 20} characters: letters, numbers, underscore` }, 400);
   }
   if (typeof password !== 'string' || password.length < MIN_PASSWORD_LEN || password.length > MAX_PASSWORD_LEN) {
     return jsonResponse({ error: `Password must be ${MIN_PASSWORD_LEN}-${MAX_PASSWORD_LEN} characters` }, 400);
@@ -342,7 +544,10 @@ async function handleRegister(request, env) {
   await env.USERS.put(key, JSON.stringify(record));
   // Index after the record exists, so the roster can never point at a
   // username that has no account behind it.
-  if (isBot) await env.USERS.put(botKey(username), JSON.stringify({ username }));
+  if (isBot) {
+    try { await syncBotMembership(env, username); }
+    catch { return jsonResponse({ error: 'Bot membership update failed; login to retry' }, 503); }
+  }
 
   return startSession(request, env, record, 201);
 }
@@ -367,6 +572,11 @@ async function handleLogin(request, env) {
     return jsonResponse({ error: 'Invalid username or password' }, 401);
   }
 
+  if (record.is_bot === true) {
+    try { await syncBotMembership(env, record.username); }
+    catch { return jsonResponse({ error: 'Bot membership update failed; retry login' }, 503); }
+  }
+
   return startSession(request, env, record, 200);
 }
 
@@ -381,7 +591,9 @@ async function handleMe(request, env) {
   const session = await requireSession(request, env);
   if (!session) return jsonResponse({ error: 'Not logged in' }, 401);
   return jsonResponse(
-    { username: session.username, balance_cash: session.record.balance_cash, trades: session.record.trades },
+    { username: session.username, balance_cash: session.record.balance_cash, trades: session.record.trades,
+      account_closed: session.record.account_closed === true,
+      closed_at: session.record.closed_at ?? null, closure_reason: session.record.closure_reason ?? null },
     200,
   );
 }
@@ -408,7 +620,7 @@ export async function handleBotMetadata(request, env) {
   if (bodyResult.error) return bodyResult.error;
   const { username, strategy_id, alias } = bodyResult.body || {};
 
-  if (typeof username !== 'string' || !USERNAME_RE.test(username)) {
+  if (typeof username !== 'string' || !BOT_USERNAME_RE.test(username)) {
     return jsonResponse({ error: 'username must be a valid username' }, 400);
   }
   if (strategy_id !== undefined && strategy_id !== null &&
@@ -424,7 +636,9 @@ export async function handleBotMetadata(request, env) {
     const next = { ...record };
     if (strategy_id !== undefined) next.strategy_id = strategy_id;
     if (alias !== undefined) next.alias = alias;
-    return { record: next, result: { strategy_id: next.strategy_id, alias: next.alias } };
+    const result = { strategy_id: next.strategy_id, alias: next.alias };
+    if (next.strategy_id === record.strategy_id && next.alias === record.alias) return { result };
+    return { record: next, result };
   });
 
   if (outcome.error === 'not_found') return jsonResponse({ error: 'No such account' }, 404);
@@ -433,16 +647,10 @@ export async function handleBotMetadata(request, env) {
   if (outcome.error === 'not_a_bot') return jsonResponse({ error: 'Not a bot account' }, 409);
   if (outcome.error) return jsonResponse({ error: 'Metadata could not be updated, try again' }, 503);
 
-  // Repair the roster index, idempotently.
-  //
-  // Registration writes the user record and the `bot:` index as two separate
-  // KV puts with no transaction between them. If the second fails, the account
-  // exists and is flagged is_bot but is missing from the roster -- and the
-  // runner cannot recover by re-registering, because the username is taken, so
-  // it logs in instead and this endpoint is the only code that runs again.
-  // Writing the index here unconditionally turns the every-startup metadata
-  // sync into the repair path for that window.
-  await env.USERS.put(botKey(username), JSON.stringify({ username }));
+  // Repair both membership representations after an interrupted registration.
+  // Authenticated bot login also retries this operation.
+  try { await syncBotMembership(env, username); }
+  catch { return jsonResponse({ error: 'Bot membership update failed; retry metadata sync' }, 503); }
 
   return jsonResponse({ username, ...outcome.result }, 200);
 }
@@ -452,8 +660,8 @@ export async function handleBotMetadata(request, env) {
 // are paper-money bots whose whole purpose is to be observed. Two invariants
 // hold it safe to expose:
 //
-//   1. Only accounts in the `bot:` index appear. Human accounts are never in
-//      it (see botKey), so no real user's balance is ever published here.
+//   1. Only indexed accounts whose record is still marked is_bot appear.
+//      Membership alone can never publish a human account.
 //   2. Only the whitelisted fields below are returned. `salt`, `hash`,
 //      `iterations` and session state never leave this function -- a
 //      spread-the-record-and-delete-secrets approach would leak any field a
@@ -463,32 +671,39 @@ export async function handleBotMetadata(request, env) {
 // against the same live quotes the paper panel already polls, so the roster
 // and the single-account view can never disagree about the mark.
 export async function handleBots(request, env) {
-  const index = await env.USERS.list({ prefix: 'bot:' });
-  const usernames = index.keys.map(k => k.name.slice('bot:'.length));
+  try {
+    const usernames = await botUsernames(env);
 
-  const bots = [];
-  for (const name of usernames) {
-    const raw = await env.USERS.get(`user:${name}`);
-    if (!raw) continue;              // liquidated out from under the index
-    const record = JSON.parse(raw);
-    if (!record.is_bot) continue;    // index and record disagree -- trust the record
-    const trades = Array.isArray(record.trades) ? record.trades : [];
-    bots.push({
-      username: record.username,
-      alias: record.alias || record.username,
-      strategy_id: record.strategy_id ?? null,
-      balance_cash: record.balance_cash,
-      starting_balance: record.starting_balance ?? STARTING_BALANCE,
-      trade_count: trades.length,
-      first_trade_ts: trades.length ? trades[0].ts : null,
-      last_trade_ts: trades.length ? trades[trades.length - 1].ts : null,
-      positions: netPositions(trades),
-      created_at: record.createdAt ?? null,
-    });
+    const bots = [];
+    for (const name of usernames) {
+      const raw = await env.USERS.get(`user:${name}`);
+      if (!raw) throw new Error('Indexed bot account unavailable');
+      const record = JSON.parse(raw);
+      if (!record.is_bot) continue;    // index and record disagree -- trust the record
+      const trades = Array.isArray(record.trades) ? record.trades : [];
+      bots.push({
+        username: record.username,
+        alias: record.alias || record.username,
+        strategy_id: record.strategy_id ?? null,
+        balance_cash: record.balance_cash,
+        starting_balance: record.starting_balance ?? STARTING_BALANCE,
+        account_closed: record.account_closed === true,
+        closed_at: record.closed_at ?? null,
+        closure_reason: record.closure_reason ?? null,
+        trade_count: trades.length,
+        first_trade_ts: trades.length ? trades[0].ts : null,
+        last_trade_ts: trades.length ? trades[trades.length - 1].ts : null,
+        positions: netPositions(trades),
+        created_at: record.createdAt ?? null,
+      });
+    }
+
+    bots.sort((a, b) => a.alias.localeCompare(b.alias));
+    return jsonResponse({ bots, as_of: new Date().toISOString() }, 200);
+  } catch {
+    console.error('bot_roster_read_failed');
+    return jsonResponse({ error: 'Bot roster temporarily unavailable' }, 503);
   }
-
-  bots.sort((a, b) => a.alias.localeCompare(b.alias));
-  return jsonResponse({ bots, as_of: new Date().toISOString() }, 200);
 }
 
 // Projects the account's position book into the roster's wire shape.
@@ -627,8 +842,30 @@ async function handlePaperTrade(request, env) {
       return jsonResponse({ error: 'execution_request_id conflicts with a different trade intent' }, 409);
     }
     if (storedOutcome.status === 'pending') {
+      // Closure and its exact rejected intent are retained together in KV.
+      // Recover a crash after closure but before R2 outcome finalization,
+      // without obtaining a new quote or attempting another account mutation.
+      const closure = session.record.closure_execution;
+      if (session.record.account_closed && closure?.execution_request_id === executionId) {
+        try {
+          const recovered = await finalizeExecutionRequest(env.PAPER_TRADES, key, closure, etag);
+          return existingExecutionResponse(recovered.outcome, body);
+        } catch (error) {
+          return jsonResponse({ error: 'Closed-account rejection could not be recovered' }, 503);
+        }
+      }
       const appliedTrade = session.record.trades.find(t => t.execution_request_id === executionId);
       if (!appliedTrade) {
+        if (session.record.account_closed) {
+          try {
+            const recovered = await finalizeExecutionRequest(env.PAPER_TRADES, key,
+              { ...storedOutcome, status: 'rejected', http_status: 403,
+                error: 'Account closed', account_closed: true }, etag);
+            return existingExecutionResponse(recovered.outcome, body);
+          } catch (error) {
+            return jsonResponse({ error: 'Closed-account pending intent could not be recovered' }, 503);
+          }
+        }
         return jsonResponse({
           error: 'Execution is already pending',
           order_id: executionId,
@@ -658,6 +895,7 @@ async function handlePaperTrade(request, env) {
         storedOutcome.username !== session.username ||
         !executionIntentMatches(storedOutcome, body) ||
         storedOutcome.status !== 'pending' ||
+        session.record.account_closed ||
         appliedTrade ||
         !executionReservationExpired(storedOutcome)
       ) {
@@ -676,6 +914,11 @@ async function handlePaperTrade(request, env) {
     }
   } catch (error) {
     return jsonResponse({ error: 'Execution state unavailable' }, 503);
+  }
+
+  if (session.record.account_closed) {
+    return jsonResponse({ error: 'Account closed', account_closed: true,
+      closure_reason: session.record.closure_reason }, 403);
   }
 
   let quotePayload;
@@ -779,7 +1022,15 @@ async function handlePaperTrade(request, env) {
     if (existingTrade) {
       return { result: { trade: existingTrade, balance_cash: record.balance_cash } };
     }
+    if (record.account_closed) return { error: 'account_closed' };
     if (trade.side === 'buy' && -cashDelta > record.balance_cash) {
+      if (record.is_bot) {
+        const rejection = { ...common, error: 'Insufficient balance', status: 'rejected',
+          http_status: 400, account_closed: true };
+        return { record: { ...record, account_closed: true, closed_at: executedAt.toISOString(),
+          closure_reason: 'insufficient_balance', closure_execution: rejection },
+          result: { balance_rejection: rejection } };
+      }
       return { error: 'insufficient_balance' };
     }
     if ((trade.instrument_type ?? 'option') === 'share' && trade.side === 'sell') {
@@ -793,8 +1044,8 @@ async function handlePaperTrade(request, env) {
     };
   });
 
-  if (kvOutcome.error === 'insufficient_balance') {
-    const rejection = Object.freeze({
+  if (kvOutcome.error === 'insufficient_balance' || kvOutcome.result?.balance_rejection) {
+    const rejection = Object.freeze(kvOutcome.result?.balance_rejection ?? {
       ...common,
       error: 'Insufficient balance',
       status: 'rejected',
@@ -805,6 +1056,16 @@ async function handlePaperTrade(request, env) {
       return responseForStoredOutcome(finalized.outcome, finalized.etag);
     } catch (error) {
       return jsonResponse({ error: 'Balance rejection could not be recorded' }, 503);
+    }
+  }
+  if (kvOutcome.error === 'account_closed') {
+    const rejection = { ...common, error: 'Account closed', account_closed: true,
+      status: 'rejected', http_status: 403 };
+    try {
+      const finalized = await finalizeExecutionRequest(env.PAPER_TRADES, key, rejection, reserved.etag);
+      return responseForStoredOutcome(finalized.outcome, finalized.etag);
+    } catch (error) {
+      return jsonResponse({ error: 'Account closure rejection could not be recorded' }, 503);
     }
   }
   if (kvOutcome.error === 'insufficient_position') {
@@ -903,6 +1164,8 @@ export function validateSettleRequest(body) {
 // a logged-in user's does, just without a session to key off of.
 async function settleAccount(env, username, as_of, spot_marks) {
   return withUserRecord(env, username, (record) => {
+    if (record.account_closed) return { result: { settled: [], balance_cash: record.balance_cash,
+      account_closed: true, liquidated: false } };
     const book = computeBookFromTrades(record.trades);
     const expired = Object.entries(book).filter(([, b]) =>
       b.instrument_type === 'option' && b.pos !== 0 && b.exp && b.exp < as_of);
@@ -965,6 +1228,15 @@ async function settleAccount(env, username, as_of, spot_marks) {
 // that token in hand, so SESSIONS.delete on a token that was never passed
 // is a harmless no-op rather than an attempt to clear a specific session.
 async function liquidateAccount(env, username, token) {
+  const raw = await env.USERS.get(userKey(username));
+  if (raw && JSON.parse(raw).is_bot) {
+    const outcome = await withUserRecord(env, username, (record) => ({
+      record: { ...record, account_closed: true, closed_at: record.closed_at ?? new Date().toISOString(),
+        closure_reason: record.closure_reason ?? 'insolvent_settlement' }, result: { closed: true },
+    }));
+    if (outcome.error) throw new Error('Bot closure could not be persisted');
+    return; // Retain identity and history; never auto-provision a wiped bot.
+  }
   await env.USERS.delete(userKey(username));
   // Drop the roster index entry too, or a liquidated bot leaves a pointer to
   // an account that no longer exists. handleBots tolerates the dangling case,
@@ -1030,17 +1302,16 @@ async function fetchSpotMarkForDate(dateStr) {
 // archived chain data, independent of whether anyone's dashboard is open.
 export async function settleAllBots(env, now = new Date()) {
   const asOf = settlementAsOfNY(now);
-  const index = await env.USERS.list({ prefix: 'bot:' });
-  const usernames = index.keys.map(k => k.name.slice('bot:'.length));
+  const usernames = await botUsernames(env);
 
   const pendingByUsername = new Map();
   const neededExpirations = new Set();
 
   for (const username of usernames) {
     const raw = await env.USERS.get(userKey(username));
-    if (!raw) continue;
+    if (!raw) throw new Error('Indexed settlement account unavailable');
     const record = JSON.parse(raw);
-    if (!record.is_bot) continue;
+    if (!record.is_bot || record.account_closed) continue;
     const book = computeBookFromTrades(record.trades);
     const expired = Object.entries(book).filter(([, b]) =>
       b.instrument_type === 'option' && b.pos !== 0 && b.exp && b.exp < asOf);
@@ -1087,6 +1358,10 @@ async function handleSettle(request, env) {
 
   if (kvOutcome.error === 'insolvent') {
     await liquidateAccount(env, session.username, session.token);
+    if (session.record.is_bot) {
+      return jsonResponse({ settled: [], account_closed: true,
+        closure_reason: 'insolvent_settlement', balance_cash: session.record.balance_cash }, 200);
+    }
     return jsonResponse(
       { error: 'account_liquidated', reason: 'A settlement obligation exceeded the account balance' },
       410,

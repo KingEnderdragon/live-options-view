@@ -1,0 +1,1412 @@
+import gzip
+import json
+import sys
+import tempfile
+import unittest
+from unittest import mock
+from collections import Counter
+from datetime import date
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+
+import oa203_return_scanner as scanner  # noqa: E402
+from oa203_returns import (  # noqa: E402
+    ContractInfo,
+    Observation,
+    QualifiedPolicy,
+    ReturnPolicy,
+    contract_metrics,
+    first_to_max,
+    open_to_close,
+    rank,
+    trade_bar_metrics,
+    trough_to_peak,
+)
+
+T0 = 1_790_343_000_000  # an arbitrary session-time epoch ms
+MIN = 60_000
+
+
+def obs(i, bid, ask, age_s=0, spot=100.0):
+    t = T0 + i * 5 * MIN
+    return Observation(t=t, bid=bid, ask=ask, bid_ms=t - age_s * 1000, ask_ms=t - age_s * 1000,
+                       underlying_price=spot)
+
+
+def info(symbol="X260928C00100000", option_type="call", strike=100.0, ok_sweeps=None):
+    return ContractInfo(symbol=symbol, underlying="X", option_type=option_type, strike=strike,
+                        expiration="2026-09-28", chain_ok_sweeps=ok_sweeps or 0)
+
+
+class ChronologicalReturns(unittest.TestCase):
+    def test_first_to_max_ignores_peaks_before_entry(self):
+        leg = first_to_max([None, 2.0, 1.0, 3.0], [9.0, 2.0, 1.0, 3.0])
+        self.assertEqual((leg.entry_index, leg.exit_index), (1, 3))
+        self.assertAlmostEqual(leg.pct, 0.5)
+
+    def test_high_before_low_is_a_loss_not_a_gain(self):
+        # An unordered daily high/low ratio would call this +900%.
+        leg = first_to_max([10.0, 1.0], [10.0, 1.0])
+        self.assertAlmostEqual(leg.pct, -0.9)
+        self.assertLess(trough_to_peak([10.0, 1.0], [10.0, 1.0]).pct, 0)
+
+    def test_trough_to_peak_pairs_only_later_exits(self):
+        leg = trough_to_peak([5, 1, 4, 0.5, 1.5], [5, 1, 4, 0.5, 1.5])
+        self.assertEqual((leg.entry_index, leg.exit_index), (1, 2))
+        self.assertAlmostEqual(leg.pct, 3.0)
+
+    def test_single_observation_has_no_return(self):
+        self.assertIsNone(first_to_max([1.0], [1.0]))
+        self.assertIsNone(open_to_close([1.0], [1.0]))
+        self.assertIsNone(trough_to_peak([1.0], [1.0]))
+
+    def test_open_to_close_uses_last_valid(self):
+        leg = open_to_close([None, 1.0, 2.0, None], [None, 1.0, 2.0, None])
+        self.assertEqual((leg.entry_index, leg.exit_index), (1, 2))
+
+
+class QuoteBases(unittest.TestCase):
+    def test_crossed_and_one_sided_quotes_have_no_mid(self):
+        self.assertIsNone(Observation(0, 1.2, 1.0).mid)
+        self.assertIsNone(Observation(0, 0.0, 0.05).mid)
+        self.assertEqual(Observation(0, 1.0, 1.2).mid, 1.1)
+
+    def test_exec_basis_buys_ask_sells_bid(self):
+        path = [obs(0, 1.0, 1.2), obs(1, 2.0, 2.2), obs(2, 1.5, 1.7)]
+        row = contract_metrics(info(ok_sweeps=3), path)
+        self.assertAlmostEqual(row["exec_first_to_max_entry"], 1.2)
+        self.assertAlmostEqual(row["exec_first_to_max_exit"], 2.0)
+        self.assertAlmostEqual(row["mid_first_to_max_pct"], 2.1 / 1.1 - 1, places=6)
+        self.assertTrue(row["clean"])
+        self.assertAlmostEqual(row["mid_first_to_max_abs_change_per_contract"], 100.0)
+
+    def test_flags_are_reported_not_dropped(self):
+        path = [obs(0, 0.01, 0.03), obs(1, 0.02, 0.04), obs(2, 0.9, 1.1), obs(3, 0.03, 0.05)]
+        row = contract_metrics(info(ok_sweeps=4), path)
+        self.assertIn("tiny_entry", row["mid_first_to_max_flags"])
+        self.assertIn("exit_isolated_spike", row["mid_first_to_max_flags"])
+        self.assertFalse(row["clean"])
+        self.assertIsNotNone(row["mid_first_to_max_pct"])
+
+    def test_stale_and_low_coverage(self):
+        path = [obs(0, 1.0, 1.2, age_s=4000), obs(1, 1.5, 1.7)]
+        row = contract_metrics(info(ok_sweeps=10), path, ReturnPolicy(stale_quote_s=1800))
+        self.assertIn("entry_stale", row["mid_first_to_max_flags"])
+        self.assertIn("low_coverage", row["contract_flags"])
+
+    def test_strike_vs_spot_at_entry(self):
+        row = contract_metrics(info(strike=105.0, ok_sweeps=2), [obs(0, 1, 1.2), obs(1, 2, 2.2)])
+        self.assertAlmostEqual(row["strike_vs_spot_pct"], 0.05)
+
+
+class QualifiedQuotes(unittest.TestCase):
+    key = "qualified_first_ask_to_later_bid"
+
+    def q(self, i, bid=1.0, ask=1.1, **changes):
+        t = T0 + i * MIN
+        values = dict(t=t, bid=bid, ask=ask, bid_ms=t, ask_ms=t,
+                      bid_size=2, ask_size=2, volume=1,
+                      chain_ok_sweeps_so_far=i + 1)
+        values.update(changes)
+        return Observation(**values)
+
+    def row(self, path, **policy):
+        policy.setdefault("min_samples", 2)
+        return contract_metrics(info(ok_sweeps=len(path)), path,
+                                qualified_policy=QualifiedPolicy(**policy))
+
+    def test_later_entry_and_negative_return_keep_legacy_numbers(self):
+        path = [self.q(0, volume=0), self.q(1), self.q(2, bid=0.8, ask=0.9)]
+        row = self.row(path)
+        self.assertEqual(row[self.key + "_status"], "eligible")
+        self.assertLess(row[self.key + "_pct"], 0)
+        self.assertEqual(row[self.key + "_entry_delay_s"], 60)
+        self.assertEqual(row[self.key + "_entry_observed_volume"], 1)
+        self.assertEqual(row["exec_first_to_max_entry_ms"], T0)
+        self.assertTrue(row["clean"])
+
+    def test_entry_never_uses_later_volume(self):
+        path = [self.q(0, volume=0), self.q(1, volume=0), self.q(2, volume=100)]
+        row = self.row(path)
+        self.assertNotEqual(row[self.key + "_status"], "eligible")
+        self.assertIn("no_strictly_later_qualified_exit", row[self.key + "_reasons"])
+
+    def test_bad_prices_times_sizes_and_missing_evidence(self):
+        cases = [
+            ({"bid": None}, "unknown", "entry_bid_missing"),
+            ({"ask": 0}, "excluded", "entry_ask_nonpositive"),
+            ({"bid": 2}, "excluded", "entry_crossed"),
+            ({"ask": 1}, "excluded", "entry_locked"),
+            ({"bid": float("nan")}, "excluded", "entry_bid_nonfinite"),
+            ({"ask": float("inf")}, "excluded", "entry_ask_nonfinite"),
+            ({"bid_ms": None}, "unknown", "entry_bid_timestamp_missing"),
+            ({"ask_ms": T0 + 100 * MIN}, "excluded", "entry_ask_timestamp_future"),
+            ({"bid_ms": T0 - 2_000_000}, "excluded", "entry_bid_timestamp_stale"),
+            ({"ask_size": None}, "unknown", "entry_ask_size_missing"),
+            ({"ask_size": 0}, "excluded", "entry_ask_size_insufficient"),
+        ]
+        for changes, status, reason in cases:
+            with self.subTest(changes=changes):
+                row = self.row([self.q(0, **changes), self.q(1, **changes), self.q(2, **changes)])
+                self.assertEqual(row[self.key + "_status"], status)
+                self.assertIn(reason, row[self.key + "_reasons"])
+
+    def test_exit_qualifies_independently_and_must_be_strictly_later(self):
+        path = [self.q(0), self.q(0, bid=9, ask=9.1),
+                self.q(1, bid=2, bid_size=0), self.q(2, bid=0.8, ask=0.9)]
+        row = self.row(path)
+        self.assertEqual(row[self.key + "_exit_ms"], T0 + 2 * MIN)
+        self.assertEqual(row[self.key + "_exit"], 0.8)
+        self.assertLess(row[self.key + "_pct"], 0)
+
+    def test_exit_missing_zero_stale_future_and_size_evidence(self):
+        for changes, status, reason in (
+            ({"bid": None}, "unknown", "exit_bid_missing"),
+            ({"bid": 0}, "excluded", "exit_bid_nonpositive"),
+            ({"ask": 0}, "excluded", "exit_ask_nonpositive"),
+            ({"bid_ms": None}, "unknown", "exit_bid_timestamp_missing"),
+            ({"ask_ms": T0 + 100 * MIN}, "excluded", "exit_ask_timestamp_future"),
+            ({"bid_ms": T0 - 2_000_000}, "excluded", "exit_bid_timestamp_stale"),
+            ({"bid_size": None}, "unknown", "exit_bid_size_missing"),
+            ({"bid_size": 0}, "excluded", "exit_bid_size_insufficient"),
+        ):
+            with self.subTest(changes=changes):
+                row = self.row([self.q(0), self.q(1), self.q(2, **changes), self.q(3, **changes)])
+                self.assertEqual(row[self.key + "_status"], status)
+                self.assertIn(reason, row[self.key + "_reasons"])
+
+    def test_coverage_and_sample_gate(self):
+        self.assertIn("entry_insufficient_samples_so_far", self.row([self.q(0), self.q(1)], min_samples=3)[self.key + "_reasons"])
+        row = self.row([self.q(i, chain_ok_sweeps_so_far=20) for i in range(3)])
+        self.assertIn("entry_insufficient_coverage_so_far", row[self.key + "_reasons"])
+
+    def test_lagged_oi_optional_but_explicit_when_configured(self):
+        row = self.row([self.q(i) for i in range(3)], min_open_interest=10)
+        self.assertEqual(row[self.key + "_status"], "unknown")
+        self.assertIn("open_interest_missing_lagged", row[self.key + "_reasons"])
+
+    def test_issue_125_synthetic_controls_keep_legacy_classification(self):
+        # Shapes mirror issue #125; raw Sep 29/Oct 1 contract paths are not in repo.
+        for bid, ask, late_ask in ((0.04, 0.16, 2.50), (0.03, 0.15, 2.30)):
+            path = [self.q(0, bid, ask), self.q(1, bid, ask),
+                    self.q(2, 0.04, late_ask), self.q(3, 0.04, late_ask)]
+            row = self.row(path)
+            self.assertTrue(row["clean"])
+            self.assertGreater(row["mid_first_to_max_pct"], 11)
+            self.assertLess(row["exec_first_to_max_pct"], -0.7)
+            self.assertEqual(row[self.key + "_status"], "excluded")
+            self.assertIn("entry_spread", row[self.key + "_reasons"])
+        for symbol in ("GS261002P00600000", "GS261009C01160000", "GS261009C00940000"):
+            row = contract_metrics(info(symbol=symbol, ok_sweeps=3),
+                                   [self.q(0), self.q(1, bid=2), self.q(2)])
+            self.assertFalse(row["clean"])
+            self.assertIn("crossed_quotes_seen", row["contract_flags"])
+        for symbol in ("MU261002C00100000", "SPCX261002C00100000"):
+            row = contract_metrics(info(symbol=symbol, ok_sweeps=3),
+                                   [self.q(0, 1, 1.05), self.q(1, 1.1, 1.15),
+                                    self.q(2, 1.2, 1.25), self.q(3, 1.3, 1.35)])
+            self.assertTrue(row["clean"])
+            self.assertEqual(row[self.key + "_status"], "eligible")
+
+    def test_prefix_entry_does_not_use_future_sample_or_coverage(self):
+        path = [self.q(i, 1 + i * .1, 1.1 + i * .1) for i in range(4)]
+        short = contract_metrics(info(ok_sweeps=3), path[:3])
+        full = contract_metrics(info(ok_sweeps=4), path)
+        extended = contract_metrics(info(ok_sweeps=6), path + [self.q(4), self.q(5)])
+        self.assertIsNone(short[self.key + "_pct"])
+        self.assertEqual(full[self.key + "_entry_ms"], T0 + 2 * MIN)
+        self.assertEqual(full[self.key + "_entry_delay_s"], 120)
+        self.assertEqual(extended[self.key + "_entry_ms"], full[self.key + "_entry_ms"])
+
+    def test_missing_coverage_is_unknown_but_definite_bad_entry_is_excluded(self):
+        path = [self.q(i, chain_ok_sweeps_so_far=None) for i in range(4)]
+        row = contract_metrics(info(ok_sweeps=0), path)
+        self.assertEqual(row[self.key + "_status"], "unknown")
+        self.assertIn("entry_chain_coverage_missing", row[self.key + "_reasons"])
+        bad = [self.q(i, ask_size=0, bid_ms=None) for i in range(4)]
+        row = contract_metrics(info(ok_sweeps=4), bad)
+        self.assertEqual(row[self.key + "_status"], "excluded")
+        self.assertIn("entry_bid_timestamp_missing", row[self.key + "_reasons"])
+        self.assertIn("entry_ask_size_insufficient", row[self.key + "_reasons"])
+
+    def test_policy_constructor_rejects_nonfinite_and_wrong_gate_types(self):
+        for field in ("min_ask_size", "min_bid_size", "min_entry_volume", "min_samples"):
+            for value in (float("nan"), float("inf"), True, "2"):
+                with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+                    QualifiedPolicy(**{field: value})
+
+    def test_build_with_missing_or_zero_success_manifest_stays_unknown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            day = Path(tmp)
+            (day / "sweeps").mkdir()
+            for i in range(4):
+                o = self.q(i)
+                row = dict(sweep=i + 1, t=o.t, underlying="X", symbol="X261002C00100000",
+                           type="call", strike=100, expiration="2026-10-02", bid=o.bid,
+                           ask=o.ask, bid_ms=o.bid_ms, ask_ms=o.ask_ms,
+                           bid_size=o.bid_size, ask_size=o.ask_size, volume=o.volume, oi=10)
+                with gzip.open(day / "sweeps" / f"sweep_{i + 1:04d}.jsonl.gz", "wt") as out:
+                    out.write(json.dumps(row) + "\n")
+            def built():
+                return scanner.build_contract_rows(day, ReturnPolicy())[0]
+            self.assertEqual(built()[self.key + "_status"], "unknown")
+            manifest = day / "sweeps" / "manifest.jsonl"
+            manifest.write_text("".join(json.dumps({"sweep": i + 1,
+                "chains": {"X": {"status": "error"}}}) + "\n" for i in range(4)))
+            self.assertEqual(built()[self.key + "_status"], "unknown")
+            manifest.write_text("".join(json.dumps({"sweep": i + 1,
+                "chains": {"X": {"status": "ok"}}}) + "\n" for i in range(4)))
+            good = built()
+            self.assertEqual(good[self.key + "_status"], "eligible")
+            self.assertEqual(good[self.key + "_entry_ms"], T0 + 2 * MIN)
+            manifest.write_text("".join(json.dumps({"sweep": i + 1,
+                "chains": {"X": {"status": "ok"}}}) + "\n" for i in (0, 2, 3)))
+            self.assertEqual(built()[self.key + "_status"], "unknown")
+
+
+class TradeBars(unittest.TestCase):
+    def test_same_bar_low_and_high_are_not_paired(self):
+        bars = [
+            {"timestamp": 1, "open": 1.0, "high": 1.1, "low": 0.9, "volume": 5},
+            {"timestamp": 2, "open": 1.0, "high": 5.0, "low": 0.1, "volume": 5},
+            {"timestamp": 3, "open": 0.12, "high": 0.15, "low": 0.11, "volume": 5},
+        ]
+        out = trade_bar_metrics(bars)
+        # The 0.1 low and 5.0 high share a bar: the trough-to-peak entry must be earlier.
+        self.assertAlmostEqual(out["trade_1min_trough_to_peak_entry"], 0.9)
+        self.assertAlmostEqual(out["trade_1min_trough_to_peak_exit"], 5.0)
+        self.assertAlmostEqual(out["trade_1min_first_to_max_pct"], 4.0)
+
+    def test_no_bars(self):
+        self.assertIsNone(trade_bar_metrics([])["trade_1min_first_to_max_pct"])
+
+
+class Ranking(unittest.TestCase):
+    def test_ranks_all_and_clean_within_type_and_keeps_undefined(self):
+        rows = [
+            {"symbol": "A", "option_type": "call", "mid_first_to_max_pct": 3.0, "clean": False},
+            {"symbol": "B", "option_type": "put", "mid_first_to_max_pct": 2.0, "clean": True},
+            {"symbol": "C", "option_type": "call", "mid_first_to_max_pct": 1.0, "clean": True},
+            {"symbol": "D", "option_type": "call", "mid_first_to_max_pct": None, "clean": False},
+        ]
+        by = {r["symbol"]: r for r in rank(rows)}
+        self.assertEqual([by[s]["rank"] for s in "ABCD"], [1, 2, 3, None])
+        self.assertEqual(by["C"]["rank_in_type"], 2)
+        self.assertEqual(by["B"]["clean_rank"], 1)
+        self.assertEqual(by["C"]["clean_rank_in_type"], 1)
+        self.assertIsNone(by["A"]["clean_rank"])
+        self.assertEqual(len(by), 4)
+
+    def test_qualified_winner_outside_legacy_shortlist(self):
+        rows = [{"symbol": f"X261002C{i:08d}", "option_type": "call", "underlying": "X",
+                 "clean": True, "mid_first_to_max_pct": 500 - i,
+                 "qualified_first_ask_to_later_bid_status": "eligible",
+                 "qualified_first_ask_to_later_bid_pct": 2 if i == 201 else -0.1,
+                 "qualified_first_ask_to_later_bid_reasons": []}
+                for i in range(1, 202)]
+        ranked = rank(rows)
+        winner = next(r for r in ranked if r["symbol"].endswith("00000201"))
+        self.assertEqual(winner["rank"], 201)
+        self.assertEqual(winner["clean_rank"], 201)
+        self.assertEqual(winner["qualified_first_ask_to_later_bid_rank"], 1)
+        with tempfile.TemporaryDirectory() as tmp:
+            scanner.write_outputs(Path(tmp), ranked)
+            with open(Path(tmp) / "leaderboard.csv", newline="") as src:
+                self.assertNotIn(winner["symbol"], src.read())
+            with open(Path(tmp) / "qualified_ask_bid_v1.csv", newline="") as src:
+                self.assertIn(winner["symbol"], src.read())
+
+
+OCC = (
+    "quantity,underlying,symbol,actype,porc,exchange,actdate\n"
+    "100,SPY,1SPY,C,C,CBOE,09/24/2026\n"
+    "100,SPY,1SPY,M,C,CBOE,09/24/2026\n"
+    "40,SPY,1SPY,C,P,ISE,09/24/2026\n"
+    "40,SPY,1SPY,M,P,ISE,09/24/2026\n"
+    "30,ABC,1ABC,F,C,CBOE,09/24/2026\n"
+    "30,ABC,1ABC,M,C,CBOE,09/24/2026\n"
+    "999,OLD,1OLD,C,C,CBOE,09/23/2026\n"
+)
+
+
+class OccVolume(unittest.TestCase):
+    def test_halves_two_sided_counts_and_filters_date(self):
+        vol = scanner.parse_occ_volume(OCC.encode(), date(2026, 9, 24))
+        self.assertEqual(vol["SPY"], {"contracts": 140, "calls": 100, "puts": 40})
+        self.assertNotIn("OLD", vol)
+        self.assertEqual([u for u, _ in scanner.rank_underlyings(vol)], ["SPY", "ABC"])
+
+    def test_refuses_missing_date_or_error_page(self):
+        with self.assertRaises(RuntimeError):
+            scanner.parse_occ_volume(OCC.encode(), date(2026, 9, 25))
+        with self.assertRaises(RuntimeError):
+            scanner.parse_occ_volume(b"Symbol is required.\n", date(2026, 9, 24))
+
+
+class FakeClient:
+    def __init__(self, expirations=None, chains=None, fail=()):
+        self.expirations_map = expirations or {}
+        self.chains_map = chains or {}
+        self.fail = set(fail)
+        self.stats = Counter()
+        self.sweep = 0
+
+    def expirations(self, symbol):
+        if symbol in self.fail:
+            raise RuntimeError("boom")
+        return self.expirations_map.get(symbol, [])
+
+    def quotes(self, symbols):
+        return {s: {"symbol": s, "bid": 99.9, "ask": 100.1, "bid_date": T0, "ask_date": T0}
+                for s in symbols}
+
+    def chain(self, symbol, expiration):
+        if symbol in self.fail:
+            raise RuntimeError("chain down")
+        return self.chains_map[symbol](self.sweep)
+
+    def timesales(self, symbol, day):
+        return [{"timestamp": 1, "open": 1.0, "high": 1.5, "low": 0.9, "volume": 3},
+                {"timestamp": 2, "open": 1.4, "high": 3.0, "low": 1.3, "volume": 3}]
+
+
+class UniverseSelection(unittest.TestCase):
+    def test_second_chain_sweep_is_separate_and_nearest_preserved(self):
+        class Client:
+            def quotes(self, symbols):
+                return {}
+
+            def chain(self, symbol, expiration):
+                return [{"symbol": f"SPY{expiration}C", "expiration_date": expiration,
+                         "root_symbol": symbol, "option_type": "call", "strike": 100,
+                         "bid": 1, "ask": 1.1}]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "sweeps").mkdir()
+            path = Path(tmp) / "sweeps" / "sweep_0001.jsonl.gz"
+            manifest = scanner.run_sweep(Client(), [{"underlying": "SPY", "expiration": "2026-10-16",
+                                                     "additional_expiration": "2026-10-23"}], 1, path, 1, 1)
+            self.assertEqual(manifest["chains"]["SPY"]["status"], "ok")
+            self.assertEqual(manifest["additional_chains"]["SPY"]["2026-10-23"]["status"], "ok")
+            self.assertEqual(manifest["rows"], 2)
+            self.assertEqual(len(list(scanner.iter_rows(Path(tmp)))), 2)
+            self.assertEqual(len(list(scanner._contract_paths(Path(tmp), None, None))), 1)
+
+    def test_bounded_spy_qqq_friday_cohort_survives_weekend(self):
+        dates = ["2026-10-16", "2026-10-19", "2026-10-20", "2026-10-23", "2026-10-30"]
+        client = FakeClient(expirations={s: dates for s in ("SPY", "QQQ", "IWM")})
+        ranked = [(s, {}) for s in ("SPY", "QQQ", "IWM")]
+        friday = scanner.select_universe(client, ranked, date(2026, 10, 16), 3, 1, True)
+        monday = scanner.select_universe(client, ranked, date(2026, 10, 19), 3, 1, True)
+        self.assertEqual([(x["underlying"], x.get("additional_expiration")) for x in friday["selected"]],
+                         [("SPY", "2026-10-23"), ("QQQ", "2026-10-23"), ("IWM", None)])
+        self.assertEqual([(x["underlying"], x.get("additional_expiration")) for x in monday["selected"]],
+                         [("SPY", "2026-10-23"), ("QQQ", "2026-10-23"), ("IWM", None)])
+        self.assertEqual(len(friday["selected"]), 3)
+        self.assertTrue(all(sum(bool(x.get(k)) for k in ("expiration", "additional_expiration")) <= 2
+                            for x in friday["selected"]))
+
+    def test_holiday_friday_keeps_next_listed_friday(self):
+        dates = ["2027-03-25", "2027-03-29", "2027-04-02"]  # Good Friday 2027-03-26
+        client = FakeClient(expirations={"SPY": dates})
+        thursday = scanner.select_universe(client, [("SPY", {})], date(2027, 3, 25), 1, 1, True)
+        monday = scanner.select_universe(client, [("SPY", {})], date(2027, 3, 29), 1, 1, True)
+        self.assertEqual(thursday["selected"][0]["additional_expiration"], "2027-04-02")
+        self.assertEqual(monday["selected"][0]["additional_expiration"], "2027-04-02")
+
+    def test_fills_from_later_ranks_and_records_skips(self):
+        ranked = [(s, {"contracts": 10 - i, "calls": 0, "puts": 0}) for i, s in enumerate("ABCDE")]
+        client = FakeClient(expirations={"A": ["2026-09-25", "2026-09-28"], "C": ["2026-09-24"],
+                                         "D": ["2026-10-02"], "E": ["2026-09-26"]}, fail={"B"})
+        u = scanner.select_universe(client, ranked, date(2026, 9, 25), target=3)
+        self.assertEqual([r["underlying"] for r in u["selected"]], ["A", "D", "E"])
+        self.assertEqual(u["selected"][0]["expiration"], "2026-09-25")  # same-day counts
+        self.assertEqual(u["skip_counts"], {"provider_error": 1, "no_unexpired_expiration": 1})
+        self.assertEqual(u["shortfall"], 0)
+
+    def test_shortfall_when_candidates_run_out(self):
+        client = FakeClient(expirations={"A": ["2026-09-28"]})
+        u = scanner.select_universe(client, [("A", {}), ("B", {})], date(2026, 9, 25), target=5)
+        self.assertEqual(u["shortfall"], 4)
+        self.assertEqual(u["skip_counts"], {"no_listed_expirations": 1})
+
+
+class FakeResponse:
+    def __init__(self, status, available=100, expiry=0.0):
+        self.status_code = status
+        self.headers = {"X-Ratelimit-Available": str(available),
+                        "X-Ratelimit-Expiry": str(int(expiry * 1000))}
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(self.status_code)
+
+    def json(self):
+        return {"expirations": {"date": "2026-09-28"}}
+
+
+class FakeSession:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.headers = {}
+
+    def request(self, *args, **kwargs):
+        return self.responses.pop(0)
+
+
+class RetryBackoff(unittest.TestCase):
+    def check_retry(self, transport, failures, attempts=3, recover=False):
+        clock = {"t": 1000.0}
+        slept = []
+        outcomes = list(failures)
+        if recover:
+            outcomes.append(FakeResponse(200))
+        session = mock.Mock(headers={})
+
+        def request(*args, **kwargs):
+            clock["t"] += 0.25
+            outcome = outcomes.pop(0)
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+        def sleep(seconds):
+            slept.append(seconds)
+            clock["t"] += seconds
+
+        session.request.side_effect = request
+        client = scanner.Tradier("test", session=session,
+                                 clock=lambda: clock["t"], sleep=sleep)
+        with mock.patch.object(scanner, "log"):
+            if recover:
+                self.assertEqual(client.request("GET", "/test", attempts=attempts),
+                                 FakeResponse(200).json())
+            else:
+                expected = type(failures[-1]) if transport else RuntimeError
+                with self.assertRaises(expected) as caught:
+                    client.request("GET", "/test", attempts=attempts)
+                if transport:
+                    self.assertIs(caught.exception, failures[-1])
+                else:
+                    self.assertEqual(str(caught.exception),
+                                     f"HTTP {failures[-1].status_code} on /test")
+        calls = len(failures) + int(recover)
+        self.assertEqual(session.request.call_count, calls)
+        self.assertEqual(outcomes, [])
+        self.assertEqual(session.request.call_args_list,
+                         [mock.call("GET", f"{scanner.API}/test", params=None,
+                                    data=None, timeout=(5.0, 20.0))] * calls)
+        self.assertEqual(slept, [2 ** i for i in range(calls - 1)])
+        self.assertEqual(client.inflight, 0)
+        self.assertEqual(client.stats, Counter(
+            requests=calls, request_seconds=0.25 * calls,
+            max_request_seconds=0.25,
+            **{"transport_errors" if transport else "server_errors": len(failures)}))
+
+    def test_5xx_recovery_preserves_intermediate_backoff(self):
+        self.check_retry(False, [FakeResponse(500), FakeResponse(504)], recover=True)
+
+    def test_5xx_exhaustion_skips_final_backoff(self):
+        self.check_retry(False, [FakeResponse(500), FakeResponse(502), FakeResponse(504)])
+
+    def test_5xx_single_attempt_has_no_backoff(self):
+        self.check_retry(False, [FakeResponse(504)], attempts=1)
+
+    def test_transport_recovery_preserves_intermediate_backoff(self):
+        self.check_retry(True, [scanner.requests.Timeout("first"),
+                                scanner.requests.ConnectionError("second")], recover=True)
+
+    def test_transport_exhaustion_skips_final_backoff(self):
+        for error_type in (scanner.requests.Timeout, scanner.requests.ConnectionError):
+            with self.subTest(error_type=error_type):
+                self.check_retry(True, [error_type(str(i)) for i in range(3)])
+
+    def test_transport_single_attempt_has_no_backoff(self):
+        for error_type in (scanner.requests.Timeout, scanner.requests.ConnectionError):
+            with self.subTest(error_type=error_type):
+                self.check_retry(True, [error_type("only")], attempts=1)
+
+    def test_spent_sweep_budget_stops_retries(self):
+        for first in (FakeResponse(504), scanner.requests.Timeout("slow"), FakeResponse(429)):
+            with self.subTest(first=first):
+                clock = {"t": 1000.0}
+                session = mock.Mock(headers={})
+
+                def request(*args, **kwargs):
+                    clock["t"] += 20  # a request that used its whole read timeout
+                    if isinstance(first, Exception):
+                        raise first
+                    return first
+
+                session.request.side_effect = request
+                client = scanner.Tradier("test", session=session, clock=lambda: clock["t"],
+                                         sleep=lambda s: clock.__setitem__("t", clock["t"] + s))
+                client.budget_deadline = 1010.0
+                with mock.patch.object(scanner, "log"), self.assertRaises(Exception):
+                    client.request("GET", "/test")
+                self.assertEqual(session.request.call_count, 1)
+                self.assertEqual(client.stats["retries_skipped_budget"], 1)
+
+    def test_configured_timeout_reaches_session(self):
+        session = FakeSession([FakeResponse(200)])
+        session.request = mock.Mock(return_value=FakeResponse(200))
+        client = scanner.Tradier("test", session=session, timeout=(3.0, 7.5))
+        client.expirations("SPY")
+        self.assertEqual(session.request.call_args.kwargs["timeout"], (3.0, 7.5))
+
+
+class RateLimiter(unittest.TestCase):
+    def test_concurrent_workers_share_one_dispatch_schedule(self):
+        from concurrent.futures import ThreadPoolExecutor
+        client, clock, _ = self.make([])
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            list(pool.map(lambda _: client._acquire(), range(20)))
+        sent = list(client.sent)
+        self.assertEqual(len(sent), 20)
+        self.assertTrue(all(b - a >= 0.6 - 1e-8 for a, b in zip(sent, sent[1:])))
+
+    def test_available_budget_is_spent_before_reset(self):
+        client, clock, _ = self.make([])
+        client.budget_expiry, client.available = 1030, 11
+        client._acquire()
+        self.assertEqual(client.available, 10)
+        client._acquire()
+        self.assertGreaterEqual(clock["t"], 1030)
+
+    def test_smooth_pacing_and_sleep_without_lock(self):
+        client, clock, slept = self.make([FakeResponse(200)] * 4)
+        original_sleep = client.sleep
+        def sleep(seconds):
+            self.assertTrue(client.lock.acquire(blocking=False))
+            client.lock.release()
+            original_sleep(seconds)
+        client.sleep = sleep
+        starts = []
+        for _ in range(4):
+            client.expirations("SPY")
+            starts.append(clock["t"])
+        for a, b in zip(starts, starts[1:]):
+            self.assertAlmostEqual(b - a, 0.6)
+
+    def test_out_of_order_headers_do_not_replenish_budget(self):
+        client, clock, _ = self.make([])
+        client.inflight = 3
+        client._observe(FakeResponse(200, available=12, expiry=1030).headers)
+        self.assertEqual(client.available, 10)
+        client._observe(FakeResponse(200, available=50, expiry=1030).headers)
+        self.assertEqual(client.available, 10)
+        client._observe(FakeResponse(200, available=100, expiry=1020).headers)
+        self.assertEqual(client.budget_expiry, 1030)
+        self.assertEqual(client.available, 10)
+
+    def test_provider_lower_limit_adjusts_pacing(self):
+        response = FakeResponse(200, available=55, expiry=1060)
+        response.headers["X-Ratelimit-Allowed"] = "60"
+        client, clock, _ = self.make([response, FakeResponse(200)])
+        client.expirations("SPY")
+        client.expirations("SPY")
+        self.assertEqual(client.effective_rpm, 50)
+        self.assertAlmostEqual(clock["t"], 1001.2)
+
+    def test_retry_after_numeric_and_http_date(self):
+        from email.utils import formatdate
+        for retry in ("90", formatdate(1090, usegmt=True)):
+            response = FakeResponse(429)
+            response.headers["Retry-After"] = retry
+            client, clock, _ = self.make([response, FakeResponse(200)])
+            client.expirations("SPY")
+            self.assertGreaterEqual(clock["t"], 1090)
+
+    def test_deadline_stops_rate_wait_before_dispatch(self):
+        client, clock, _ = self.make([FakeResponse(200)] * 2)
+        client.deadline = 1000.3
+        client.expirations("SPY")
+        with self.assertRaises(scanner.SamplingDeadline):
+            client.expirations("SPY")
+        self.assertEqual(client.stats["requests"], 1)
+        self.assertAlmostEqual(clock["t"], 1000.3)
+
+    def test_unsafe_configuration_rejected(self):
+        with self.assertRaises(ValueError):
+            scanner.Tradier("test", max_rpm=120, reserve=10)
+
+    def make(self, responses, max_rpm=100):
+        clock = {"t": 1000.0}
+        slept = []
+
+        def sleep(s):
+            slept.append(s)
+            clock["t"] += s
+        client = scanner.Tradier("tok", max_rpm=max_rpm, reserve=10, session=FakeSession(responses),
+                                 clock=lambda: clock["t"], sleep=sleep)
+        return client, clock, slept
+
+    def test_pauses_when_token_budget_is_low(self):
+        client, clock, slept = self.make([FakeResponse(200, available=5, expiry=1030.0),
+                                          FakeResponse(200)])
+        self.assertEqual(client.expirations("SPY"), ["2026-09-28"])
+        client.expirations("SPY")
+        self.assertGreaterEqual(clock["t"], 1030.0)
+
+    def test_retries_429_after_waiting(self):
+        client, clock, slept = self.make([FakeResponse(429), FakeResponse(200)])
+        self.assertEqual(client.expirations("SPY"), ["2026-09-28"])
+        self.assertEqual(client.stats["rate_limited"], 1)
+        self.assertGreaterEqual(clock["t"], 1060.0)
+
+    def test_local_cap_spreads_requests(self):
+        client, clock, slept = self.make([FakeResponse(200)] * 3, max_rpm=2)
+        for _ in range(3):
+            client.expirations("SPY")
+        self.assertGreaterEqual(clock["t"], 1060.0)
+
+
+class SlowClient(FakeClient):
+    """A provider whose every chain request takes ``latency`` seconds."""
+
+    def __init__(self, names, latency):
+        super().__init__(chains={n: chain_for(n, [1.0]) for n in names})
+        self.clock = {"t": 0.0}
+        self.latency = latency
+        self.quote_calls = 0
+        self.sweep = 1
+
+    def now(self):
+        return self.clock["t"]
+
+    def quotes(self, symbols):
+        self.quote_calls += 1
+        return super().quotes(symbols)
+
+    def chain(self, symbol, expiration):
+        self.clock["t"] += self.latency
+        return super().chain(symbol, expiration)
+
+
+class SlowProviderSweep(unittest.TestCase):
+    NAMES = [f"S{i}" for i in range(10)]
+
+    def sweep(self, client, budget_s, universe=None):
+        universe = universe or [{"underlying": n, "expiration": "2026-09-28"} for n in self.NAMES]
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "sweeps").mkdir()
+            return scanner.run_sweep(client, universe, 1, Path(tmp) / "sweeps" / "sweep_0001.jsonl.gz",
+                                     block_size=4, workers=1, budget_s=budget_s, clock=client.now)
+
+    def test_unbudgeted_sweep_stretches_with_provider_latency(self):
+        client = SlowClient(self.NAMES, latency=100)
+        entry = self.sweep(client, None)
+        self.assertEqual(client.now(), 1000)  # the pre-repair behavior
+        self.assertFalse(entry["budget_exhausted"])
+        self.assertEqual(entry["status_counts"], {"ok": 10})
+
+    def test_budget_bounds_sweep_and_records_every_skipped_chain(self):
+        client = SlowClient(self.NAMES, latency=100)
+        entry = self.sweep(client, 250)
+        # No request starts after 250 s; the last in-flight one ends by 300 s.
+        self.assertLessEqual(client.now(), 250 + client.latency)
+        self.assertTrue(entry["budget_exhausted"])
+        self.assertEqual(entry["budget_s"], 250)
+        self.assertEqual(entry["status_counts"], {"ok": 3, "skipped_budget": 7})
+        self.assertEqual(set(entry["chains"]), set(self.NAMES))  # denominators keep every name
+        self.assertTrue(all(s["fetched_ms"] is None for s in entry["chains"].values()
+                            if s["status"] == "skipped_budget"))
+        self.assertEqual(client.quote_calls, 1)  # skipped blocks spend no requests
+
+    def test_budget_skips_additional_expiry_explicitly(self):
+        client = SlowClient(["SPY", "QQQ"], latency=100)
+        universe = [{"underlying": n, "expiration": "2026-09-28", "additional_expiration": "2026-10-02"}
+                    for n in ("SPY", "QQQ")]
+        entry = self.sweep(client, 150, universe)
+        extras = {n: e["2026-10-02"]["status"] for n, e in entry["additional_chains"].items()}
+        self.assertEqual(entry["chains"]["SPY"]["status"], "ok")
+        self.assertIn("skipped_budget", extras.values())
+        self.assertEqual(set(extras), {"SPY", "QQQ"})
+
+    def test_healthy_provider_is_unaffected_by_budget(self):
+        client = SlowClient(self.NAMES, latency=1)
+        entry = self.sweep(client, 600)
+        self.assertFalse(entry["budget_exhausted"])
+        self.assertEqual(entry["status_counts"], {"ok": 10})
+
+
+class ScriptedProvider:
+    """Tradier HTTP stand-in on a fake clock: each chain call runs a script step
+    (advance the clock to an absolute time, then answer), and every dispatch
+    time is recorded so tests can assert nothing starts after the budget."""
+
+    def __init__(self, steps):
+        self.clock = {"t": 0.0}
+        self.steps = {k: list(v) for k, v in steps.items()}
+        self.dispatched = []
+        self.headers = {}
+
+    def now(self):
+        return self.clock["t"]
+
+    def sleep(self, seconds):
+        self.clock["t"] += seconds
+
+    def request(self, method, url, params=None, data=None, timeout=None):
+        self.dispatched.append((self.clock["t"], url.rsplit("/", 1)[-1], (params or {}).get("symbol")))
+        if url.endswith("/markets/quotes"):
+            return ScriptedResponse(200, {"quotes": {"quote": []}})
+        at, status, headers = self.steps[params["symbol"]].pop(0)
+        self.clock["t"] = max(self.clock["t"], at)
+        body = {"options": {"option": [{"symbol": params["symbol"] + "260928C00001000", "option_type": "call",
+                                        "strike": 1.0, "bid": 1.0, "ask": 1.1, "expiration_date": "2026-09-28"}]}}
+        return ScriptedResponse(status, body, headers)
+
+
+class ScriptedResponse:
+    def __init__(self, status, body, headers=None):
+        self.status_code, self.body, self.headers = status, body, dict(headers or {})
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(self.status_code)
+
+    def json(self):
+        return self.body
+
+
+class BudgetAtDispatch(unittest.TestCase):
+    """Review of 07d61d0 (P1): the sweep budget holds through the real
+    Tradier limiter/backoff path, not only at the sweep's own checks."""
+
+    def sweep(self, steps, names=("S0", "S1")):
+        provider = ScriptedProvider(steps)
+        client = scanner.Tradier("tok", session=provider, clock=provider.now, sleep=provider.sleep)
+        universe = [{"underlying": n, "expiration": "2026-09-28"} for n in names]
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(scanner, "log"):
+            (Path(tmp) / "sweeps").mkdir()
+            entry = scanner.run_sweep(client, universe, 1, Path(tmp) / "sweeps" / "sweep_0001.jsonl.gz",
+                                      block_size=len(names), workers=1, budget_s=600, clock=provider.now)
+        self.assertTrue(all(t < 600 for t, _, _ in provider.dispatched), provider.dispatched)
+        self.assertLessEqual(provider.now(), 600)
+        self.assertIsNone(client.budget_deadline)
+        return entry, client, provider
+
+    def test_429_retry_after_past_budget_is_not_dispatched(self):
+        # Before: 429 at t=599 with Retry-After=120 retried at t=719.
+        entry, client, provider = self.sweep({"S0": [(599, 429, {"Retry-After": "120"})]})
+        self.assertEqual([s for _, _, s in provider.dispatched], [None, "S0"])
+        self.assertEqual(entry["chains"]["S0"]["status"], "error")  # requested once, retry cut
+        self.assertEqual(entry["chains"]["S1"]["status"], "skipped_budget")
+        self.assertIsNone(entry["chains"]["S1"]["fetched_ms"])
+        self.assertTrue(entry["budget_exhausted"])
+        self.assertEqual(client.stats["retries_skipped_budget"], 1)
+
+    def test_queued_first_request_past_budget_is_skipped(self):
+        # Before: a provider budget reset at t=720 let a queued first request dispatch then.
+        low = {"X-Ratelimit-Available": "5", "X-Ratelimit-Expiry": str(720 * 1000)}
+        entry, client, provider = self.sweep({"S0": [(590, 200, low)], "S1": [(700, 200, {})]})
+        self.assertEqual(entry["chains"]["S0"]["status"], "ok")
+        self.assertEqual(entry["chains"]["S1"]["status"], "skipped_budget")
+        self.assertEqual(entry["status_counts"], {"ok": 1, "skipped_budget": 1})
+        self.assertEqual(client.stats["dispatch_skipped_budget"], 1)
+        self.assertEqual(provider.steps["S1"], [(700, 200, {})])  # never requested
+
+    def test_5xx_backoff_past_budget_is_not_dispatched(self):
+        # Before: a 504 at t=599.5 retried at t=600.5.
+        entry, client, provider = self.sweep({"S0": [(599.5, 504, {})]}, names=("S0",))
+        self.assertEqual(entry["chains"]["S0"]["status"], "error")
+        self.assertEqual(len(provider.dispatched), 2)  # quotes + one chain attempt
+        self.assertEqual(client.stats["retries_skipped_budget"], 1)
+        self.assertEqual(provider.now(), 600)  # backoff capped at the budget
+
+    def test_retry_inside_budget_still_recovers(self):
+        entry, client, provider = self.sweep({"S0": [(100, 504, {}), (101.5, 200, {})]}, names=("S0",))
+        self.assertEqual(entry["chains"]["S0"]["status"], "ok")
+        self.assertFalse(entry["budget_exhausted"])
+
+
+class ActiveCadence(unittest.TestCase):
+    # Observed 2026-10-13 sweep durations (s): nine degraded, then healthy.
+    OCT13 = [485.9, 812.7, 669.3, 856.1, 661.0, 635.8, 942.9, 1001.0, 597.7] + [305.6] * 20
+    EXPECTED_S = 306.0
+
+    def triggers(self, durations, due):
+        t, last, fired = 0.0, 0.0, []
+        for sweep, seconds in enumerate(durations, 1):
+            t += seconds
+            if due(sweep, t, last):
+                fired.append((sweep, t))
+                last = t
+        return fired
+
+    def test_six_sweep_rule_reproduces_the_57_8_minute_gap(self):
+        fired = self.triggers(self.OCT13, lambda sweep, t, last: sweep % 6 == 0)
+        gap = fired[1][1] - fired[0][1]
+        self.assertAlmostEqual(gap / 60, 57.6, delta=0.5)
+
+    def test_elapsed_time_rule_bounds_refresh_during_degradation(self):
+        due = lambda sweep, t, last: scanner.active_snapshot_due(int(t * 1000), int(last * 1000), self.EXPECTED_S)
+        fired = self.triggers(self.OCT13, due)
+        times = [0.0] + [t for _, t in fired]
+        gaps = [b - a for a, b in zip(times, times[1:])]
+        self.assertTrue(all(g <= scanner.ACTIVE_INTERVAL_S + max(self.OCT13) for g in gaps), gaps)
+        self.assertLess(max(gaps), 2700)  # vs 3,459 s under the six-sweep rule
+        self.assertEqual([s for s, _ in fired], [3, 6, 8, 13, 19, 25])
+
+    def test_healthy_cadence_still_fires_every_six_sweeps(self):
+        due = lambda sweep, t, last: scanner.active_snapshot_due(int(t * 1000), int(last * 1000), self.EXPECTED_S)
+        fired = self.triggers([305.6] * 30, due)
+        self.assertEqual([s for s, _ in fired], [6, 12, 18, 24, 30])
+
+    def test_cadence_report_labels_late_refresh_and_degradation(self):
+        manifest = [{"sweep": s, "started_ms": 0, "ended_ms": int(d * 1000),
+                     "budget_exhausted": d > 600,
+                     "request_stats_delta": {"server_errors": 10, "transport_errors": 1}}
+                    for s, d in enumerate([305.6, 942.9, 1001.0, 597.7], 1)]
+        self.assertEqual(scanner.cadence_report(manifest, {"sweep": 1}, 2700.0)["status"], "on_time")
+        report = scanner.cadence_report(manifest, {"sweep": 1}, 2700.1)
+        self.assertEqual(report["status"], "late")
+        self.assertEqual(report["sweeps"], 3)
+        self.assertEqual(report["max_sweep_s"], 1001.0)
+        self.assertEqual(report["budget_exhausted_sweeps"], 2)
+        self.assertEqual(report["server_errors"], 30)
+        self.assertEqual(scanner.cadence_report(manifest, None, None)["status"], "first")
+        self.assertEqual(scanner.cadence_report(manifest, {"sweep": 3}, 1836.0)["status"], "on_time")
+
+
+def chain_for(symbol, mids):
+    def make(sweep):
+        out = []
+        for kind, mid in (("call", mids[sweep - 1]), ("put", 1.0)):
+            out.append({"symbol": f"{symbol}260928{kind[0].upper()}00100000", "root_symbol": symbol,
+                        "option_type": kind, "strike": 100.0, "expiration_date": "2026-09-28",
+                        "bid": mid - 0.05, "ask": mid + 0.05, "bid_date": T0, "ask_date": T0,
+                        "volume": 10, "open_interest": 50, "contract_size": 100})
+        return out
+    return make
+
+
+class EndToEnd(unittest.TestCase):
+    def test_sample_archive_build_backfill_and_assess(self):
+        universe = {"shortfall": 0, "selected": [
+            {"underlying": "AAA", "expiration": "2026-09-28"},
+            {"underlying": "BBB", "expiration": "2026-09-28"},
+            {"underlying": "CCC", "expiration": "2026-09-28"}]}
+        client = FakeClient(chains={"AAA": chain_for("AAA", [1.0, 3.0, 2.0]),
+                                    "BBB": chain_for("BBB", [1.0, 1.2, 1.1])}, fail={"CCC"})
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = scanner.DayArchive(Path(tmp), date(2026, 9, 25), "oa203/scanner", upload=False)
+            for sweep in (1, 2, 3):
+                client.sweep = sweep
+                name = f"sweeps/sweep_{sweep:04d}.jsonl.gz"
+                entry = scanner.run_sweep(client, universe["selected"], sweep, archive.path(name),
+                                          block_size=2, workers=2)
+                archive.append_manifest(entry)
+            manifest = archive.manifest()
+            self.assertEqual(manifest[0]["chains"]["CCC"]["status"], "error")
+            self.assertEqual(manifest[0]["status_counts"], {"ok": 2, "error": 1})
+
+            cfg = scanner.Config(upload=False, backfill_top=1, workers=1)
+            summary = scanner.finalize(archive, client, cfg, universe, None, None)
+            rows = scanner.build_contract_rows(archive.dir, cfg.policy)
+            top = next(r for r in rows if r["rank"] == 1)
+            self.assertEqual(top["symbol"], "AAA260928C00100000")
+            self.assertAlmostEqual(top["mid_first_to_max_pct"], 2.0)
+            self.assertAlmostEqual(top["trade_1min_first_to_max_pct"], 2.0)
+            self.assertEqual(top["backfill_status"], "ok")
+            self.assertEqual(len(rows), 4)  # non-winners are kept
+            self.assertEqual(summary["assessment"]["status"], "partial")
+            self.assertTrue(any(r.startswith("chain_success_rate") for r in summary["assessment"]["reasons"]))
+            with gzip.open(archive.path("contracts.csv.gz"), "rt") as src:
+                self.assertEqual(len(src.read().strip().splitlines()), 5)
+            detail = scanner.inspect_contract(archive.dir, "AAA260928C00100000", cfg.policy)
+            self.assertEqual([p["mid"] for p in detail["path"]], [1.0, 3.0, 2.0])
+            text = scanner.readout([archive.dir], top=10, clean_only=False)
+            self.assertIn("| AAA |", text)
+
+
+UNIVERSE_500 = {"shortfall": 0, "selected": [{"underlying": f"S{i}"} for i in range(500)]}
+EXPECTED_MS = 306_000  # 500 chains + 10 quote batches at 100/min
+
+
+class Assessment(unittest.TestCase):
+    def entry(self, start_min, end_min, ok=500, total=500, truncated=False):
+        chains = {f"S{i}": {"status": "ok" if i < ok else "error"} for i in range(total)}
+        return {"started_ms": T0 + start_min * MIN, "ended_ms": T0 + end_min * MIN,
+                "truncated": truncated, "status_counts": {"ok": ok, "error": total - ok},
+                "chains": chains}
+
+    def assess(self, manifest, universe=UNIVERSE_500, pending=(), backfill=None, interruptions=None):
+        return scanner.assess_session(universe, manifest, T0, T0 + 390 * MIN, list(pending),
+                                      backfill, {}, EXPECTED_MS, interruptions)
+
+    def test_complete_session(self):
+        manifest = [self.entry(i * 5, i * 5 + 5) for i in range(78)]
+        out = self.assess(manifest, backfill={"errors": 0})
+        self.assertEqual(out["status"], "complete", out["reasons"])
+        self.assertEqual(out["universe_coverage"], 1.0)
+
+    def test_failed_additional_expiry_cannot_hide_behind_nearest_chains(self):
+        universe = {**UNIVERSE_500, "selected": [
+            {**u, **({"additional_expiration": "2026-10-23"} if u["underlying"] == "S0" else {})}
+            for u in UNIVERSE_500["selected"]]}
+        manifest = [self.entry(i * 5, i * 5 + 5) for i in range(78)]
+        for entry in manifest:
+            entry["additional_chains"] = {"S0": {"2026-10-23": {
+                "status": "error", "expiration": "2026-10-23"}}}
+        out = self.assess(manifest, universe=universe, backfill={"errors": 0})
+        self.assertEqual(out["status"], "partial")
+        self.assertEqual(out["chain_fetches"], 78 * 501)
+        self.assertLess(out["chain_success_rate"], 1.0)
+        self.assertEqual(out["additional_chain_expected"], 78)
+        self.assertEqual(out["additional_chain_success_rate"], 0.0)
+        self.assertEqual(out["additional_expiry_coverage"], 0.0)
+        self.assertIn("additional_chain_failures:78", out["reasons"])
+        self.assertIn("additional_expiry_coverage:0.0000", out["reasons"])
+
+    def test_missing_extra_status_and_zero_row_ok_are_failures(self):
+        universe = {**UNIVERSE_500, "selected": [
+            {**u, **({"additional_expiration": "2026-10-23"} if u["underlying"] == "S0" else {})}
+            for u in UNIVERSE_500["selected"]]}
+        manifest = [self.entry(i * 5, i * 5 + 5) for i in range(78)]
+        manifest[0]["additional_chains"] = {"S0": {"2026-10-23": {
+            "status": "ok", "expiration": "2026-10-23", "rows": 0}}}
+        out = self.assess(manifest, universe=universe, backfill={"errors": 0})
+        self.assertEqual(out["additional_chain_expected"], 78)
+        self.assertEqual(out["additional_chain_statuses_recorded"], 1)
+        self.assertEqual(out["additional_chain_successes"], 0)
+        self.assertIn("additional_chain_failures:78", out["reasons"])
+
+    def test_successful_extra_chain_can_still_be_complete(self):
+        universe = {**UNIVERSE_500, "selected": [
+            {**u, **({"additional_expiration": "2026-10-23"} if u["underlying"] == "S0" else {})}
+            for u in UNIVERSE_500["selected"]]}
+        manifest = [self.entry(i * 5, i * 5 + 5) for i in range(78)]
+        for entry in manifest:
+            entry["additional_chains"] = {"S0": {"2026-10-23": {
+                "status": "ok", "expiration": "2026-10-23", "rows": 1}}}
+        out = self.assess(manifest, universe=universe, backfill={"errors": 0})
+        self.assertEqual(out["status"], "complete", out["reasons"])
+        self.assertEqual(out["additional_chain_success_rate"], 1.0)
+
+    def test_gap_and_late_stop_are_partial(self):
+        manifest = [self.entry(0, 5), self.entry(5, 10), self.entry(60, 65)]
+        out = self.assess(manifest, universe={**UNIVERSE_500, "shortfall": 3})
+        self.assertEqual(out["status"], "partial")
+        joined = " ".join(out["reasons"])
+        for reason in ("universe_shortfall:3", "sweep_gaps", "stopped_before_close", "backfill_not_run"):
+            self.assertIn(reason, joined)
+
+    def test_late_start_truncated_only_session_is_partial(self):
+        # Review regression: one truncated sweep near the close with a single
+        # successful chain used to report complete with no reasons.
+        manifest = [self.entry(385, 390, ok=1, total=1, truncated=True)]
+        out = self.assess(manifest, backfill={"errors": 0})
+        self.assertEqual(out["status"], "partial")
+        joined = " ".join(out["reasons"])
+        for reason in ("no_complete_sweep", "late_start", "universe_coverage:0.0020"):
+            self.assertIn(reason, joined)
+        self.assertIsNone(out["typical_sweep_s"])
+
+    def test_truncated_only_on_time_start_still_checks_coverage(self):
+        manifest = [self.entry(0, 2, ok=100, total=100, truncated=True)]
+        out = self.assess(manifest, backfill={"errors": 0})
+        joined = " ".join(out["reasons"])
+        for reason in ("no_complete_sweep", "universe_coverage:0.2000", "stopped_before_close"):
+            self.assertIn(reason, joined)
+        self.assertNotIn("late_start", joined)
+
+    def test_degraded_sweeps_are_visible_despite_healthy_median(self):
+        manifest = [self.entry(i * 5, i * 5 + 5) for i in range(70)]
+        manifest[3] = {**self.entry(15, 32), "budget_exhausted": True}  # 17-minute sweep
+        out = self.assess(manifest, backfill={"errors": 0})
+        self.assertEqual(out["typical_sweep_s"], 300.0)
+        self.assertEqual(out["max_sweep_s"], 1020.0)
+        self.assertEqual(out["slow_sweeps"], 1)
+        self.assertEqual(out["budget_exhausted_sweeps"], 1)
+        self.assertIn("sweeps_over_budget:1", out["reasons"])
+
+    def test_pending_uploads_and_interruptions_are_partial(self):
+        manifest = [self.entry(i * 5, i * 5 + 5) for i in range(78)]
+        out = self.assess(manifest, pending=["sweeps/sweep_0001.jsonl.gz"], backfill={"errors": 0},
+                          interruptions=[{"reason": "signal"}])
+        self.assertIn("uploads_pending:1", out["reasons"])
+        self.assertIn("interrupted:1", out["reasons"])
+
+
+class RecordingUploader:
+    """Stands in for R2: verifies nothing remotely, but records what it got."""
+
+    def __init__(self, fail=()):
+        self.fail = set(fail)
+        self.uploaded = {}
+        self.bodies = {}
+        self.calls = []
+
+    def __call__(self, path, key, content_type):
+        name = key.split("/", 3)[-1]
+        if name in self.fail or "*" in self.fail:
+            raise RuntimeError("R2 unavailable")
+        body = path.read_bytes()
+        digest = scanner.hashlib.sha256(body).hexdigest()
+        self.uploaded[key] = digest
+        self.bodies[key] = body
+        self.calls.append(key)
+        return {"key": key, "bytes": len(body), "sha256": digest}
+
+
+DAY = date(2026, 9, 25)
+SESSION = (scanner.datetime(2026, 9, 25, 9, 30, tzinfo=scanner.ET),
+           scanner.datetime(2026, 9, 25, 16, 0, tzinfo=scanner.ET))
+
+
+class UploadRecovery(unittest.TestCase):
+    def test_outage_restart_recovery(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            outage = RecordingUploader(fail={"sweeps/sweep_0001.jsonl.gz", "universe.json"})
+            first = scanner.DayArchive(root, DAY, "oa203/scanner", upload=True, uploader=outage)
+            first.write_json("universe.json", {"selected": []})
+            first.path("sweeps/sweep_0001.jsonl.gz").write_bytes(gzip.compress(b"{}\n"))
+            first.append_manifest({"sweep": 1})
+            self.assertFalse(first.push("universe.json"))
+            self.assertFalse(first.push("sweeps/sweep_0001.jsonl.gz"))
+            self.assertTrue(first.push("sweeps/manifest.jsonl"))
+
+            # A new process over the same spool still knows what is owed.
+            down = scanner.DayArchive(root, DAY, "oa203/scanner", upload=True,
+                                      uploader=RecordingUploader(fail={"*"}))
+            self.assertEqual(down.reconcile(), ["sweeps/sweep_0001.jsonl.gz", "universe.json",
+                                                 scanner.UPLOAD_JOURNAL])
+
+            healthy = RecordingUploader()
+            restarted = scanner.DayArchive(root, DAY, "oa203/scanner", upload=True, uploader=healthy)
+            self.assertEqual(restarted.reconcile(), [])
+            self.assertIn("oa203/scanner/2026-09-25/sweeps/sweep_0001.jsonl.gz", healthy.uploaded)
+            self.assertIn("oa203/scanner/2026-09-25/universe.json", healthy.uploaded)
+            self.assertNotIn("oa203/scanner/2026-09-25/sweeps/manifest.jsonl", healthy.uploaded)
+
+            # Content that changes after upload is owed again.
+            restarted.append_manifest({"sweep": 2})
+            self.assertEqual(restarted.pending_uploads(), ["sweeps/manifest.jsonl"])
+
+    def test_journal_upload_failure_recovers_without_recursive_uploads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            uploader = RecordingUploader(fail={scanner.UPLOAD_JOURNAL})
+            archive = scanner.DayArchive(Path(tmp), DAY, "oa203/scanner", True, uploader)
+            archive.write_json("universe.json", {"selected": []})
+            self.assertEqual(archive.reconcile(), [scanner.UPLOAD_JOURNAL])
+            healthy = RecordingUploader()
+            restarted = scanner.DayArchive(Path(tmp), DAY, "oa203/scanner", True, healthy)
+            self.assertEqual(restarted.reconcile(), [])
+            self.assertEqual(healthy.calls, [f"{archive.prefix}/{scanner.UPLOAD_JOURNAL}"])
+            journal = json.loads(healthy.bodies[healthy.calls[0]])
+            self.assertEqual(set(journal), {"universe.json"})
+            self.assertEqual(journal["universe.json"]["sha256"],
+                             scanner._sha256_file(archive.path("universe.json")))
+            self.assertEqual(journal["universe.json"]["bytes"], archive.path("universe.json").stat().st_size)
+            self.assertEqual(restarted.reconcile(), [])
+            self.assertEqual(len(healthy.calls), 1)
+            self.assertNotIn(scanner.UPLOAD_RECEIPT, restarted.artifacts())
+
+    def test_changed_artifact_republishes_journal_last(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            uploader = RecordingUploader()
+            archive = scanner.DayArchive(Path(tmp), DAY, "oa203/scanner", True, uploader)
+            archive.write_json("universe.json", {"version": 1})
+            self.assertEqual(archive.reconcile(), [])
+            archive.write_json("universe.json", {"version": 2})
+            self.assertEqual(archive.reconcile(), [])
+            self.assertEqual(uploader.calls[-2:], [f"{archive.prefix}/universe.json",
+                                                   f"{archive.prefix}/{scanner.UPLOAD_JOURNAL}"])
+            journal = json.loads(uploader.bodies[uploader.calls[-1]])
+            self.assertEqual(journal["universe.json"]["sha256"],
+                             scanner.hashlib.sha256(uploader.bodies[uploader.calls[-2]]).hexdigest())
+
+    def test_failed_summary_upload_is_not_claimed_by_remote_journal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            uploader = RecordingUploader(fail={scanner.SUMMARY})
+            archive = scanner.DayArchive(Path(tmp), DAY, "oa203/scanner", True, uploader)
+            archive.write_json("universe.json", {"selected": []})
+            archive.write_json(scanner.SUMMARY, {"final": True})
+            self.assertEqual(archive.reconcile(), [scanner.SUMMARY])
+            journal_key = f"{archive.prefix}/{scanner.UPLOAD_JOURNAL}"
+            self.assertNotIn(scanner.SUMMARY, json.loads(uploader.bodies[journal_key]))
+            uploader.fail.clear()
+            self.assertEqual(archive.reconcile(), [])
+            self.assertEqual(json.loads(uploader.bodies[journal_key])[scanner.SUMMARY]["sha256"],
+                             uploader.uploaded[f"{archive.prefix}/{scanner.SUMMARY}"])
+
+    def test_normal_recovery_publishes_legacy_finalized_journal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = scanner.Config(spool_dir=Path(tmp), upload=True)
+            uploader = RecordingUploader()
+            archive = scanner.DayArchive(cfg.spool_dir, DAY, cfg.r2_prefix, True, uploader)
+            archive.write_json("universe.json", {"selected": []})
+            archive.write_json(scanner.SUMMARY, {"final": True})
+            archive.push("universe.json")
+            archive.push(scanner.SUMMARY)
+            before = archive.path(scanner.SUMMARY).read_bytes()
+            uploader.calls.clear()
+            scanner.recover_days(cfg, FakeClient(), date(2026, 9, 28),
+                                 scanner.datetime(2026, 9, 28, 8, 45, tzinfo=scanner.ET),
+                                 lambda day: SESSION, uploader)
+            self.assertEqual(uploader.calls, [f"{archive.prefix}/{scanner.UPLOAD_JOURNAL}"])
+            self.assertEqual(archive.path(scanner.SUMMARY).read_bytes(), before)
+            self.assertEqual(archive.pending_uploads(), [])
+
+    def test_local_only_mode_does_not_publish_journal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            uploader = RecordingUploader()
+            archive = scanner.DayArchive(Path(tmp), DAY, "oa203/scanner", False, uploader)
+            archive.write_json("universe.json", {"selected": []})
+            self.assertEqual(archive.reconcile(), [])
+            self.assertEqual(uploader.calls, [])
+
+    def test_final_journal_failure_stays_pending_after_summary_upload(self):
+        class FailFinalJournal(RecordingUploader):
+            journal_attempts = 0
+
+            def __call__(self, path, key, content_type):
+                if path.name == scanner.UPLOAD_JOURNAL:
+                    self.journal_attempts += 1
+                    if self.journal_attempts == 2:
+                        raise RuntimeError("final journal upload interrupted")
+                return super().__call__(path, key, content_type)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = scanner.Config(spool_dir=Path(tmp), upload=True)
+            uploader = FailFinalJournal()
+            archive = scanner.DayArchive(cfg.spool_dir, DAY, cfg.r2_prefix, True, uploader)
+            universe = {"selected": [], "selected_count": 0}
+            archive.write_json("universe.json", universe)
+            with mock.patch.object(scanner, "log") as log:
+                scanner.finalize(archive, FakeClient(), cfg, universe, T0, T0 + MIN)
+            self.assertTrue(archive.finalized())
+            self.assertEqual(archive.pending_uploads(), [scanner.UPLOAD_JOURNAL])
+            finalized = [c.kwargs for c in log.call_args_list if c.args[0] == "oa203_session_finalized"]
+            self.assertEqual(finalized[0]["pending_uploads"], [scanner.UPLOAD_JOURNAL])
+            restarted = scanner.DayArchive(cfg.spool_dir, DAY, cfg.r2_prefix, True, uploader)
+            self.assertEqual(restarted.reconcile(), [])
+            journal = json.loads(uploader.bodies[f"{archive.prefix}/{scanner.UPLOAD_JOURNAL}"])
+            self.assertEqual(journal[scanner.SUMMARY]["sha256"],
+                             uploader.uploaded[f"{archive.prefix}/{scanner.SUMMARY}"])
+
+
+def fake_sweep(stop_after=None):
+    calls = {"n": 0}
+
+    def sweep_fn(client, selected, sweep, out_path, block_size, workers, deadline=None, budget_s=None):
+        calls["n"] += 1
+        entry = scanner.run_sweep(client, selected, sweep, out_path, block_size, workers)
+        if stop_after is not None and calls["n"] >= stop_after:
+            scanner.STOP = True
+        return entry
+    return sweep_fn
+
+
+class StopAndRecover(unittest.TestCase):
+    def setUp(self):
+        scanner.STOP = False
+        self.addCleanup(setattr, scanner, "STOP", False)
+
+    def test_stop_during_collection_then_restart_after_close_finalizes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = scanner.Config(spool_dir=Path(tmp), upload=True, workers=1, backfill_top=1)
+            uploader = RecordingUploader()
+            archive = scanner.DayArchive(cfg.spool_dir, DAY, cfg.r2_prefix, True, uploader)
+            selected = [{"underlying": "AAA", "expiration": "2026-09-28"}]
+            archive.write_json("universe.json", {"shortfall": 0, "selected": selected,
+                                                 "selected_count": 1})
+            client = FakeClient(chains={"AAA": chain_for("AAA", [1.0, 2.0, 3.0])})
+            client.sweep = 1
+
+            during = lambda: scanner.datetime(2026, 9, 25, 10, 0, tzinfo=scanner.ET)
+            rc = scanner.run_day(cfg, client=client, now=during, bounds_for=lambda d: SESSION,
+                                 sleep_until=lambda when: None, sweep_fn=fake_sweep(stop_after=2),
+                                 uploader=uploader)
+            self.assertEqual(rc, 0)
+            self.assertFalse(archive.finalized())
+            self.assertFalse(archive.path("summary.json").exists())
+            self.assertEqual(len(archive.interruptions()), 1)
+            self.assertEqual(len(archive.manifest()), 2)
+
+            # Restart after the close: the scheduled command now finalizes the day.
+            scanner.STOP = False
+            after = lambda: scanner.datetime(2026, 9, 25, 16, 30, tzinfo=scanner.ET)
+            rc = scanner.run_day(cfg, client=client, now=after, bounds_for=lambda d: SESSION,
+                                 sleep_until=lambda when: None, uploader=uploader)
+            self.assertEqual(rc, 0)
+            self.assertTrue(archive.finalized())
+            summary = json.loads(archive.path("summary.json").read_text())
+            self.assertEqual(summary["assessment"]["status"], "partial")
+            self.assertIn("interrupted:1", summary["assessment"]["reasons"])
+            self.assertEqual(summary["assessment"]["pending_uploads"], [])
+            self.assertTrue(archive.path("leaderboard.csv").exists())
+            self.assertIn("oa203/scanner/2026-09-25/interruptions.jsonl", uploader.uploaded)
+            self.assertIn("oa203/scanner/2026-09-25/summary.json", uploader.uploaded)
+            journal_key = f"{archive.prefix}/{scanner.UPLOAD_JOURNAL}"
+            journal = json.loads(uploader.bodies[journal_key])
+            self.assertEqual(uploader.calls[-1], journal_key)
+            self.assertEqual(journal[scanner.SUMMARY]["sha256"],
+                             scanner.hashlib.sha256(uploader.bodies[f"{archive.prefix}/summary.json"]).hexdigest())
+            self.assertEqual(archive.pending_uploads(), [])
+
+    def test_next_morning_run_recovers_unfinished_day_and_pending_uploads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = scanner.Config(spool_dir=Path(tmp), upload=True, workers=1, backfill_top=1)
+            broken = RecordingUploader(fail={"*"})
+            archive = scanner.DayArchive(cfg.spool_dir, DAY, cfg.r2_prefix, True, broken)
+            archive.write_json("universe.json", {"shortfall": 0, "selected": [], "selected_count": 0})
+            archive.append_manifest({"sweep": 1, "started_ms": T0, "ended_ms": T0 + MIN,
+                                     "truncated": False, "status_counts": {}, "chains": {}})
+            # Crash during finalization: no summary was written.
+            healthy = RecordingUploader()
+            monday = lambda: scanner.datetime(2026, 9, 28, 8, 45, tzinfo=scanner.ET)
+            recovered = scanner.recover_days(cfg, FakeClient(), date(2026, 9, 28), monday(),
+                                             lambda d: SESSION if d == DAY else None, healthy)
+            self.assertEqual(recovered, {"recovered": ["2026-09-25"], "failed": []})
+            self.assertTrue(archive.finalized())
+            self.assertIn("oa203/scanner/2026-09-25/universe.json", healthy.uploaded)
+            # A later run finds it finalized and does not rebuild it.
+            self.assertEqual(scanner.recover_days(cfg, FakeClient(), date(2026, 9, 28), monday(),
+                                                  lambda d: SESSION, healthy),
+                             {"recovered": [], "failed": []})
+
+
+
+def session_for(day):
+    return (scanner.datetime(day.year, day.month, day.day, 9, 30, tzinfo=scanner.ET),
+            scanner.datetime(day.year, day.month, day.day, 16, 0, tzinfo=scanner.ET))
+
+
+def truncate(path):
+    """Simulate a crash mid-write: keep only the first half of the bytes."""
+    data = path.read_bytes()
+    path.write_bytes(data[: len(data) // 2])
+
+
+class InterruptedWrites(unittest.TestCase):
+    """Review regressions: partially written artifacts must not stop recovery or today."""
+
+    MONDAY = date(2026, 9, 28)
+
+    def setUp(self):
+        scanner.STOP = False
+        self.addCleanup(setattr, scanner, "STOP", False)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.cfg = scanner.Config(spool_dir=Path(self.tmp.name), upload=True, workers=1, backfill_top=2)
+        self.uploader = RecordingUploader()
+        self.selected = [{"underlying": "AAA", "expiration": "2026-09-28"}]
+
+    def friday_with_sweeps(self, sweeps=3):
+        archive = scanner.DayArchive(self.cfg.spool_dir, DAY, self.cfg.r2_prefix, True, self.uploader)
+        archive.write_json("universe.json", {"shortfall": 0, "selected": self.selected, "selected_count": 1})
+        client = FakeClient(chains={"AAA": chain_for("AAA", [1.0, 2.0, 3.0, 2.5])})
+        for sweep in range(1, sweeps + 1):
+            client.sweep = sweep
+            name = f"sweeps/sweep_{sweep:04d}.jsonl.gz"
+            in_session = T0 + sweep * 5 * MIN  # T0 is 09:30 ET on DAY
+            with mock.patch.object(scanner, "now_ms", return_value=in_session):
+                archive.append_manifest(scanner.run_sweep(client, self.selected, sweep,
+                                                          archive.path(name), 50, 1))
+        return archive
+
+    def run_monday(self, stop_after=1, hour=10):
+        client = FakeClient(chains={"AAA": chain_for("AAA", [1.0, 1.1, 1.2, 1.3])})
+        client.sweep = 1
+        at = lambda: scanner.datetime(2026, 9, 28, hour, 0, tzinfo=scanner.ET)
+        rc = scanner.run_day(self.cfg, client=client, now=at, bounds_for=session_for,
+                             sleep_until=lambda when: None, sweep_fn=fake_sweep(stop_after=stop_after),
+                             uploader=self.uploader)
+        scanner.STOP = False
+        return rc, scanner.DayArchive(self.cfg.spool_dir, self.MONDAY, self.cfg.r2_prefix, True, self.uploader)
+
+    def monday_universe(self):
+        monday = scanner.DayArchive(self.cfg.spool_dir, self.MONDAY, self.cfg.r2_prefix, True, self.uploader)
+        monday.write_json("universe.json", {"shortfall": 0, "selected": self.selected, "selected_count": 1})
+
+    def test_truncated_raw_sweep_and_manifest_line_are_salvaged_and_today_runs(self):
+        friday = self.friday_with_sweeps()
+        truncate(friday.path("sweeps/sweep_0002.jsonl.gz"))
+        with friday.path("sweeps/manifest.jsonl").open("a", encoding="utf-8") as out:
+            out.write('{"sweep": 4, "chains": {"AAA"')  # crash mid-append
+        with self.assertRaises(EOFError):
+            with gzip.open(friday.path("sweeps/sweep_0002.jsonl.gz"), "rt") as src:
+                src.read()
+        self.monday_universe()
+
+        rc, monday = self.run_monday()
+        self.assertEqual(rc, 0)
+        self.assertTrue(friday.finalized())
+        summary = json.loads(friday.path("summary.json").read_text())
+        self.assertIn("damaged_artifacts:2", summary["assessment"]["reasons"])
+        files = {d["file"] for d in summary["damaged_artifacts"]}
+        self.assertEqual(summary["contracts"], 2)  # rows from the intact sweeps survive
+        self.assertEqual(files, {"sweeps/sweep_0002.jsonl.gz", "sweeps/manifest.jsonl"})
+        self.assertTrue(friday.path("leaderboard.csv").exists())
+        self.assertEqual(len(monday.manifest()), 1)  # today's collection still ran
+
+    def test_truncated_backfill_is_replaced_during_recovery(self):
+        friday = self.friday_with_sweeps()
+        friday.path("backfill_timesales.jsonl.gz").write_bytes(
+            gzip.compress(b'{"symbol": "AAA260928C00100000", "bars": []}\n' * 50))
+        truncate(friday.path("backfill_timesales.jsonl.gz"))
+        self.monday_universe()
+
+        rc, monday = self.run_monday()
+        self.assertEqual(rc, 0)
+        summary = json.loads(friday.path("summary.json").read_text())
+        self.assertEqual(summary["backfill"], {"requested": 2, "errors": 0})
+        self.assertEqual(summary["damaged_artifacts"], [])
+        with gzip.open(friday.path("backfill_timesales.jsonl.gz"), "rt") as src:
+            self.assertTrue(all(json.loads(line)["bars"] for line in src))
+        self.assertEqual(len(monday.manifest()), 1)
+
+    def test_failed_recovery_is_isolated_and_stays_visibly_pending(self):
+        friday = self.friday_with_sweeps()
+        friday.path("universe.json").write_text('{"selected": [', encoding="utf-8")  # unreadable
+        self.monday_universe()
+
+        rc, monday = self.run_monday()
+        self.assertEqual(rc, 0)
+        self.assertFalse(friday.finalized())
+        errors = friday.path("recovery_errors.jsonl").read_text().splitlines()
+        self.assertEqual(len(errors), 1)
+        self.assertIn("JSONDecodeError", json.loads(errors[0])["error"])
+        self.assertEqual(len(monday.manifest()), 1)
+
+        # Monday's own finalization reports the earlier day as still unfinalized,
+        # and the failure keeps being retried rather than dropped.
+        rc, monday = self.run_monday(hour=17)
+        summary = json.loads(monday.path("summary.json").read_text())
+        self.assertEqual(summary["unfinalized_earlier_days"], ["2026-09-25"])
+        self.assertEqual(len(friday.path("recovery_errors.jsonl").read_text().splitlines()), 2)
+
+    def test_crash_mid_sweep_publishes_nothing(self):
+        class Crash(BaseException):
+            pass
+
+        class CrashingClient(FakeClient):
+            def chain(self, symbol, expiration):
+                raise Crash()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "sweep_0001.jsonl.gz"
+            with self.assertRaises(Crash):
+                scanner.run_sweep(CrashingClient(), self.selected, 1, out, 50, 1)
+            self.assertEqual(list(Path(tmp).iterdir()), [])
+
+    def test_published_files_are_complete_or_absent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "x.jsonl.gz"
+            target.write_bytes(gzip.compress(b"old\n"))
+            with self.assertRaises(RuntimeError):
+                with scanner.published(target) as partial, gzip.open(partial, "wt") as out:
+                    out.write("new, half written")
+                    raise RuntimeError("crash")
+            with gzip.open(target, "rt") as src:
+                self.assertEqual(src.read(), "old\n")  # previous complete version kept
+            self.assertEqual(sorted(p.name for p in Path(tmp).iterdir()), ["x.jsonl.gz"])
+
+
+if __name__ == "__main__":
+    unittest.main()

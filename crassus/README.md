@@ -95,6 +95,7 @@ Kill switch: `Ctrl-C`, `SIGTERM`, or `touch state/STOP`.
 | `crassus/strategies/` | Strategy implementations |
 | `crassus/strategies/phelps_variants.py` | Phelps-wrapped twins of the four live strategies (`smoke_atm_roundtrip_phelps`, `reddit_sentiment_qqq_phelps`, `trump_whisperer_qqq_phelps`, `momentum_qqq_phelps`) -- same entries, exits deferred one Phelps window |
 | `crassus/strategies/phelps_pure.py` | `phelps_pure_qqq` -- entry *and* exit both derived from Guideline Phelps directly (short-window displacement trigger, hold-until-invalidation-or-window-elapses exit), rather than wrapping another strategy's signal |
+| `crassus/strategies/momentum_puts_only.py` | `momentum_puts_only_qqq` -- `momentum_qqq` with the call side removed entirely: a bullish or neutral trailing return is treated identically (no entry, close if held), a bearish one opens/holds a put. Its Phelps-wrapped twin, `momentum_puts_only_qqq_phelps`, lives in `phelps_variants.py` alongside the other four |
 | `crassus/runner.py` | The loop |
 | `Dockerfile` | Railway's deploy image (`railway.toml`'s `builder = "DOCKERFILE"`) -- bakes a version-matched Chromium in for `reddit_sentiment_qqq`'s browser fallback |
 | `scripts/p0_smoke.py` | P0 deployment smoke test |
@@ -106,6 +107,7 @@ Kill switch: `Ctrl-C`, `SIGTERM`, or `touch state/STOP`.
 | `scripts/verify_trump_whisperer.py` | Hermetic checks for `trump_whisperer_qqq`'s aggregation math and decision logic -- no network access required |
 | `scripts/verify_trump_ingestion.py` | Hermetic checks for `trump_whisperer_qqq`'s feed ingestion layer -- no network access required |
 | `scripts/verify_phelps.py` | Hermetic checks for `phelps_wrap()`'s defer/release/invalidation-clearing logic and `phelps_pure_qqq`'s entry/exit decision logic -- no network access required |
+| `scripts/verify_momentum_puts_only.py` | Hermetic checks for `momentum_puts_only_qqq`'s decision logic -- registration (including its Phelps twin), the never-a-call guarantee, and the puts-only position-management edge cases -- no network access required |
 
 ## Integrity invariants
 
@@ -150,18 +152,21 @@ The UI has no bot or strategy whitelist, and the ignored `accounts.json` is only
 The six accounts above are the eventual P3 mapping's -- see below for what
 each runs today instead. Six additional base accounts are dedicated to other
 strategies: **TrumpWhisperer**, **Newton**, **Max Pain**, **OI Skew**,
-**Put-Call Ratio**, and **Canopus**. Nine more catalog accounts form the
-Phelps comparison block: eight twins of the original accounts plus **Bowman**.
+**Put-Call Ratio**, and **Canopus**. A seventh, **Persephone**, runs the
+puts-only `momentum_qqq` clone described below. Ten more catalog accounts
+form the Phelps comparison block: nine twins of the original accounts (the
+original eight plus Persephone) plus **Bowman**.
 
-Thirteen strategies are implemented today: the eight base strategies
+Fourteen strategies are implemented today: the nine base strategies
 `smoke_atm_roundtrip`, `reddit_sentiment_qqq`, `trump_whisperer_qqq`,
-`momentum_qqq`, `max_pain_qqq`, `oi_skew_qqq`, `put_call_ratio_qqq`, and
-`canopus_down_day_14`; four wrapped Phelps variants; and `phelps_pure_qqq`.
-The catalog keeps the original six accounts split three/three between smoke
-and Reddit sentiment, assigns one account to every other base strategy, and
-adds the Phelps comparison accounts described below. The runner validates
-every configured `strategy_id` at startup, and CI requires every registered
-strategy to have at least one catalog-backed account.
+`momentum_qqq`, `momentum_puts_only_qqq`, `max_pain_qqq`, `oi_skew_qqq`,
+`put_call_ratio_qqq`, and `canopus_down_day_14`; five wrapped Phelps
+variants; and `phelps_pure_qqq`. The catalog keeps the original six accounts
+split three/three between smoke and Reddit sentiment, assigns one account to
+every other base strategy, and adds the Phelps comparison accounts described
+below. The runner validates every configured `strategy_id` at startup, and
+CI requires every registered strategy to have at least one catalog-backed
+account.
 
 Strategy-level rules — max 3 positions, 2:50pm flatten, the 4-of-5 green-day
 rule, daily loss limits — are **configuration, not platform invariants**, and
@@ -186,18 +191,18 @@ its own signal stops supporting the position), so `phelps_wrap` intercepts
 a proposed close, holds it until `ctx.params["phelps_minutes"]` (default
 `phelps.PHELPS_MINUTES_DEFAULT`, the guideline's 25-30m band's midpoint)
 has elapsed since entry, then releases it. `crassus/strategies/phelps_variants.py`
-applies this to the four live strategies, producing `smoke_atm_roundtrip_phelps`,
-`reddit_sentiment_qqq_phelps`, `trump_whisperer_qqq_phelps`, and
-`momentum_qqq_phelps`.
+applies this to the five live strategies, producing `smoke_atm_roundtrip_phelps`,
+`reddit_sentiment_qqq_phelps`, `trump_whisperer_qqq_phelps`,
+`momentum_qqq_phelps`, and `momentum_puts_only_qqq_phelps`.
 
-`accounts.example.json`'s **Phelps test bots** are exact copies of the eight
+`accounts.example.json`'s **Phelps test bots** are exact copies of the nine
 live accounts (Ankit, Bob, Doktor Freuding, Luigi, Jesus, Doris,
-TrumpWhisperer, Newton) -- same alias root plus " Phelps", same params where
-the original has any -- moved onto the corresponding `_phelps` strategy_id.
-Comparing e.g. Ankit vs. Ankit Phelps isolates the effect of the hold-time
-floor with nothing else changed.
+TrumpWhisperer, Newton, Persephone) -- same alias root plus " Phelps", same
+params where the original has any -- moved onto the corresponding `_phelps`
+strategy_id. Comparing e.g. Ankit vs. Ankit Phelps isolates the effect of
+the hold-time floor with nothing else changed.
 
-A ninth account, **Bowman** (named for Bob Bowman, Michael Phelps's coach --
+A tenth account, **Bowman** (named for Bob Bowman, Michael Phelps's coach --
 "Phelps" itself is reserved for the guideline), runs `phelps_pure_qqq`
 (`crassus/strategies/phelps_pure.py`), which is not a wrapper: both its
 entry (a short-window, ~5-minute displacement trigger -- see that module's
@@ -211,6 +216,33 @@ not just as an exit-timing floor.
 
 See `scripts/verify_phelps.py` for hermetic coverage of both the wrapper
 and the standalone strategy.
+
+### The puts-only pair: Persephone / Persephone Phelps
+
+None of the account pairs above are directionally restricted -- every base
+strategy they run can open either a call or a put, so their Phelps twin
+isolates the hold-time floor's effect on a two-sided book. To get the same
+isolation on a book that only ever expresses a bearish view, this PR adds
+`crassus/strategies/momentum_puts_only.py`: `momentum_qqq` with the call
+side removed entirely. A bullish or neutral trailing return closes any held
+put and opens nothing; only a bearish reading (past `bearish_threshold`,
+same default magnitude as `momentum_qqq`'s own) opens or holds one put.
+Position management, ATM selection, staleness handling, and OCC-symbol
+parsing are otherwise identical to `momentum_qqq` -- see that module's
+strategy for the shared reasoning, and `momentum_puts_only.py`'s own
+docstring for exactly what differs and why a directionally-restricted base
+strategy earns its own file rather than a `calls_allowed=False` param on the
+existing one (an explicit puts-only mandate, not a momentum bot that merely
+tends bearish).
+
+**Persephone** runs `momentum_puts_only_qqq` bare; **Persephone Phelps**
+runs the identical strategy/params through `phelps_wrap()`, registered as
+`momentum_puts_only_qqq_phelps` in `phelps_variants.py` alongside the other
+four twins. Comparing the two isolates exactly one variable -- the Phelps
+hold-time floor -- on a puts-only book, the same way Ankit vs. Ankit Phelps
+isolates it for `smoke_atm_roundtrip`. Named for Persephone's seasonal
+descent, matching the strategy's one-directional (bearish) mandate. See
+`scripts/verify_momentum_puts_only.py` for hermetic coverage.
 
 ## `reddit_sentiment_qqq`
 
@@ -252,21 +284,20 @@ User-Agent as a courtesy to Reddit (a generic default is used otherwise):
 export REDDIT_USER_AGENT="crassus-reddit-sentiment/1.0 by u/yourname"
 ```
 
-Ingestion has two layers, tried per subreddit in order (see
-`crassus/sentiment.py`): a plain scrape of the public `new.json` listing,
-and -- only when that fails -- a real headless Chromium tab (Playwright)
-that loads the rendered `/new/` page instead. The second layer exists
-because Reddit has been observed serving a same-origin JS proof-of-work
-page ("Please wait for verification") in place of the JSON body, which no
-plain HTTP client can solve; a real browser engine executes that challenge
-itself, the same way it would for a human visitor. Verified in practice: on
-a network where the JSON layer returns HTTP 403 for every request, the
-browser fallback still gets through to real `<shreddit-post>` content, but
-only once the headless launch also masks `navigator.webdriver` and sets a
-realistic UA/viewport/locale (`_default_browser_factory`) -- a stock
-Playwright headless launch hits the same challenge page indefinitely, since
-the challenge appears to key off exactly that automation fingerprint rather
-than anything in the request headers.
+The public JSON path is attempted first. HTTP 401/403, 429, stale HTTP
+responses, malformed JSON and invalid post shapes fail closed. They do not
+trigger an alternate-transport attempt. Transport/server failures may use an
+ordinary headless Chromium fallback to read rendered posts; there is no
+identity masking, challenge-solving path or in-window crash relaunch.
+
+Production retrieval runs in a disposable process with a **20-second total
+acquisition deadline**, including HTTP, browser launch, navigation, extraction
+and graceful cleanup, followed by at most a **one-second child-reap wait**.
+This reuses the old 20-second navigation allowance as a whole-acquisition
+budget against the documented 300-second runner cadence. The runner and its
+supervisor are not restarted on a Reddit timeout. Linux process-tree visibility
+is required to identify detached browser children safely; unavailable process
+isolation fails closed. Injected fixture transports run in-process for testing.
 
 The browser fallback needs the Chromium binary and its Linux shared
 libraries, neither of which `pip install -r requirements.txt` provides on
@@ -294,24 +325,14 @@ the fallback raises `RedditFetchError` (declines, doesn't crash) rather
 than failing to import -- the JSON layer alone still works wherever Reddit
 isn't blocking it.
 
-A 429 from the JSON layer is treated separately from a JS-challenge/HTTP
-failure: it means Reddit itself is asking for backoff, so
-`RedditSentimentReader` starts a cooldown (from the response's
-`Retry-After` header when present, else a conservative default) shared
-across every subreddit and every future cycle until it expires, and
-declines outright rather than falling through to the browser -- retrying
-the same rate limit through a different transport would only compound it,
-unlike the JS-challenge case the fallback exists for. The browser fallback
-also recovers if the shared Chromium process itself crashes or disconnects
-mid-run (checked via `browser.is_connected()`): the dead context is torn
-down and relaunched exactly once, rather than staying cached as a
-permanently-failing fallback until the whole bot process restarts. Every
-Playwright call in `_fetch_listing_browser` -- including opening the page
-and the cleanup `finally` block, not just navigation -- is wrapped so a raw
-Playwright exception can never bypass `_fetch_listing`'s
-`except RedditFetchError` and skip that recovery; cleanup failures are
-swallowed rather than allowed to override whatever real error triggered
-them.
+The shared reader serializes reads and caches both successes and failures.
+A failure is retained for the existing `min_interval_s` (300 seconds), or
+longer when `Retry-After` requires it. Waiting/sequential accounts receive the
+same unavailable reason without another acquisition. Expiry automatically
+allows a fresh attempt, including recovery from a failed browser launch.
+`force=True` cannot bypass an active failure window. A failed refresh discards
+any old success. No account thresholds, scoring configuration, entry/exit
+logic, Phelps timing or account selection changes.
 
 The strategy declines every cycle (`no_trade`, reason cites the fetch
 error) rather than raising if a scrape fails -- consistent with the
@@ -362,27 +383,22 @@ And, non-hermetically, that the deployed image itself can launch Chromium
 docker build -t crassus-smoke .  # fails if Chromium can't launch inside it
 ```
 
-**Known gaps**, in the same spirit as the section below: it only reads
-submissions, not comments, so it can undercount chatter relative to the
-reference pipeline, which scores comments. `_reader` in
-`crassus/strategies/reddit_sentiment.py` is a module-level singleton, so
-every account configured with this strategy in one runner process already
-shares one `min_interval_s` cache and one 429 cooldown -- but there is
-still no cross-*process* coordination if this ever ran outside a single
-runner, and the `min_interval_s` default (300s) is tuned by assumption, not
-measured against Reddit's actual unauthenticated budget. The browser
-fallback shares one Chromium instance and one browser context across every
-subreddit and every poll cycle for the life of the process (launching
-fresh per subreddit or per cycle would multiply an already-expensive
-fallback for no benefit), so one account running this strategy holds one
-background Chromium process open for as long as it's configured this way
--- fine for a handful of accounts, worth revisiting if this strategy is
-ever assigned to many. The stealth measures in `_default_browser_factory`
-(masking `navigator.webdriver`, a realistic UA/viewport/locale) are the
-minimum verified to work as of this writing; Reddit is free to tighten its
-challenge in a way that defeats them without notice, same as it could
-tighten or remove the plain `new.json` endpoint this exists to fall back
-from.
+**Known limits:** only submissions are read, not comments. Sharing remains
+within one runner process and one reader configuration, not across independent
+processes. A successful fetch is not proof that posts are recent: there is no
+approved maximum post-age policy in the existing Reddit strategy. This repair
+rejects stale HTTP `Age`/`Date` evidence using the existing retrieval window
+and never refreshes an expired cached snapshot after failure; it does not
+invent a post-age cutoff or call insufficient samples a healthy signal.
+Source-access restoration and a post-age policy require separate decisions
+within OA-133 before healthy-feed acceptance. See
+[OA-133 evidence and acceptance](../docs/oa-133-reddit-ingestion.md).
+
+```bash
+.venv/bin/python scripts/verify_reddit_failure_window.py
+# Real process-tree / Chromium boundary, no external network:
+docker run --rm --network none --entrypoint python crassus-smoke scripts/verify_reddit_acquisition_browser.py
+```
 
 ## `trump_whisperer_qqq`
 
