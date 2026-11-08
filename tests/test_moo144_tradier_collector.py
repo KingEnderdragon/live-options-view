@@ -1,9 +1,11 @@
 import contextlib
 import gzip
 import hashlib
+import importlib
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import threading
@@ -34,8 +36,12 @@ except ModuleNotFoundError:
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
+sys.path.insert(0, str(SCRIPTS.parent))
 sys.path.insert(0, str(SCRIPTS))
 import moo144_tradier_collector as collector  # noqa: E402
+from collectors.tradier import config as collector_config  # noqa: E402
+from collectors.tradier import lease as collector_lease  # noqa: E402
+from collectors.tradier import run as collector_run  # noqa: E402
 
 
 ET = ZoneInfo("America/New_York")
@@ -288,7 +294,7 @@ class LeaseHeartbeatTests(unittest.TestCase):
             calls["n"] += 1
             raise TimeoutError("simulated network timeout")
 
-        with patch.object(collector, "renew_lease", side_effect=flaky_renew):
+        with patch.object(collector_lease, "renew_lease", side_effect=flaky_renew):
             stop = threading.Event()
             lease_lost = threading.Event()
             confirmed_until_ref = {"value": datetime(2026, 9, 8, 12, 0, tzinfo=timezone.utc)}
@@ -320,7 +326,7 @@ class LeaseHeartbeatTests(unittest.TestCase):
             calls["n"] += 1
             raise collector.LeaseUnavailable("simulated 500 reading lease")
 
-        with patch.object(collector, "renew_lease", side_effect=flaky_renew):
+        with patch.object(collector_lease, "renew_lease", side_effect=flaky_renew):
             stop = threading.Event()
             lease_lost = threading.Event()
             confirmed_until_ref = {"value": datetime(2026, 9, 8, 12, 0, tzinfo=timezone.utc)}
@@ -343,7 +349,7 @@ class LeaseHeartbeatTests(unittest.TestCase):
         def losing_renew(*_a, **_k):
             raise collector.LeaseTakenByAnotherOwner("taken by another owner")
 
-        with patch.object(collector, "renew_lease", side_effect=losing_renew):
+        with patch.object(collector_lease, "renew_lease", side_effect=losing_renew):
             stop = threading.Event()
             lease_lost = threading.Event()
             confirmed_until_ref = {"value": datetime(2026, 9, 8, 12, 0, tzinfo=timezone.utc)}
@@ -365,7 +371,7 @@ class LeaseHeartbeatTests(unittest.TestCase):
         def missing_renew(*_a, **_k):
             raise collector.LeaseMissing("lease is confirmed absent")
 
-        with patch.object(collector, "renew_lease", side_effect=missing_renew):
+        with patch.object(collector_lease, "renew_lease", side_effect=missing_renew):
             stop = threading.Event()
             lease_lost = threading.Event()
             confirmed_until_ref = {"value": datetime(2026, 9, 8, 12, 0, tzinfo=timezone.utc)}
@@ -387,7 +393,7 @@ class LeaseHeartbeatTests(unittest.TestCase):
         def bare_lost_renew(*_a, **_k):
             raise collector.LeaseLost("unclassified loss")
 
-        with patch.object(collector, "renew_lease", side_effect=bare_lost_renew):
+        with patch.object(collector_lease, "renew_lease", side_effect=bare_lost_renew):
             stop = threading.Event()
             lease_lost = threading.Event()
             confirmed_until_ref = {"value": datetime(2026, 9, 8, 12, 0, tzinfo=timezone.utc)}
@@ -405,7 +411,7 @@ class LeaseHeartbeatTests(unittest.TestCase):
     def test_successful_renewal_updates_shared_confirmed_until_ref(self):
         renewed = {"expires_at": "2026-09-08T13:00:00+00:00"}
 
-        with patch.object(collector, "renew_lease", return_value=renewed):
+        with patch.object(collector_lease, "renew_lease", return_value=renewed):
             stop = threading.Event()
             lease_lost = threading.Event()
             confirmed_until_ref = {"value": datetime(2026, 9, 8, 12, 0, tzinfo=timezone.utc)}
@@ -527,7 +533,7 @@ class LeaseDeadlineWatchdogTests(unittest.TestCase):
             time.sleep(0.4)
             raise TimeoutError("simulated slow/hung renewal request")
 
-        with patch.object(collector, "renew_lease", side_effect=blocked_renew):
+        with patch.object(collector_lease, "renew_lease", side_effect=blocked_renew):
             heartbeat_thread = threading.Thread(
                 target=collector.run_lease_heartbeat,
                 # ttl_seconds tiny so the first renewal attempt starts almost
@@ -809,7 +815,7 @@ class ReconcileTests(unittest.TestCase):
 
 class CaptureSessionTests(unittest.TestCase):
     def setUp(self):
-        collector.STOP = False
+        collector_config.STOP = False
 
     def test_capture_stops_at_session_close_without_fixed_duration(self):
         client = FakeStreamClient()
@@ -1055,7 +1061,7 @@ class MainLifecycleTests(unittest.TestCase):
     be real acceptance gates rather than isolated unit checks."""
 
     def setUp(self):
-        collector.STOP = False
+        collector_config.STOP = False
         self.env = {
             "TRADIER_TOKEN": "token",
             "MOO144_STRIKE_COUNT": "2",
@@ -1083,9 +1089,9 @@ class MainLifecycleTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, env, clear=False),
-            patch.object(collector, "r2_client", return_value=(r2, "bucket")),
-            patch.object(collector, "Tradier", return_value=client),
-            patch.object(collector, "capture_session", side_effect=capture_fn),
+            patch.object(collector_run, "r2_client", return_value=(r2, "bucket")),
+            patch.object(collector_run, "Tradier", return_value=client),
+            patch.object(collector_run, "capture_session", side_effect=capture_fn),
         ):
             def call():
                 return collector.main(
@@ -1172,7 +1178,7 @@ class MainLifecycleTests(unittest.TestCase):
                     return result
 
                 with tempfile.TemporaryDirectory() as tmp, patch.object(
-                    collector, "run_lease_heartbeat", side_effect=heartbeat
+                    collector_run, "run_lease_heartbeat", side_effect=heartbeat
                 ):
                     result, storage = self._run_main(
                         Path(tmp), capture, session_open, session_close,
@@ -1190,7 +1196,7 @@ class MainLifecycleTests(unittest.TestCase):
         r2 = FakeR2()
         with (
             patch.dict(os.environ, dict(self.env, TRADIER_TOKEN="token"), clear=False),
-            patch.object(collector, "r2_client", return_value=(r2, "bucket")),
+            patch.object(collector_run, "r2_client", return_value=(r2, "bucket")),
         ):
             result = collector.main(
                 clock_et=lambda: datetime(2026, 9, 8, 8, 0, tzinfo=ET),
@@ -1490,7 +1496,7 @@ class MainLifecycleTests(unittest.TestCase):
 
 class PreopenReadinessTests(unittest.TestCase):
     def setUp(self):
-        collector.STOP = False
+        collector_config.STOP = False
         self.open = datetime(2026, 9, 8, 9, 30, tzinfo=ET)
 
     def capture(self, connections, close_hour=16, lease_lost=None):
@@ -1656,10 +1662,10 @@ class PreopenReadinessTests(unittest.TestCase):
 
     def test_stop_during_preopen_wait_performs_no_storage_or_provider_setup(self):
         def stop(_):
-            collector.STOP = True
+            collector_config.STOP = True
         with patch.dict(os.environ, {"TRADIER_TOKEN": "test"}), patch.object(
-            collector, "r2_client"
-        ) as storage, patch.object(collector, "Tradier") as provider:
+            collector_run, "r2_client"
+        ) as storage, patch.object(collector_run, "Tradier") as provider:
             self.assertEqual(collector.main(
                 clock_et=lambda: self.open - timedelta(minutes=10), sleeper=stop,
                 session_bounds=lambda _: (self.open, self.open.replace(hour=16, minute=0)),
@@ -1705,8 +1711,8 @@ class PreopenReadinessTests(unittest.TestCase):
                     sleeps.append(seconds)
                     current[0] += timedelta(seconds=seconds)
                 with patch.dict(os.environ, {"TRADIER_TOKEN": "test", "MOO144_STRIKE_COUNT": "2",
-                      "MOO144_SPOOL_DIR": tmp}), patch.object(collector, "r2_client", return_value=(r2, "bucket")), patch.object(
-                      collector, "Tradier", return_value=client):
+                      "MOO144_SPOOL_DIR": tmp}), patch.object(collector_run, "r2_client", return_value=(r2, "bucket")), patch.object(
+                      collector_run, "Tradier", return_value=client):
                     rc = collector.main(clock_et=lambda: current[0], sleeper=sleep,
                                         session_bounds=lambda _: (self.open, close))
                 self.assertEqual(rc, 0)
@@ -1957,7 +1963,7 @@ class SharedStreamMainTests(unittest.TestCase):
     concurrent bounded startup."""
 
     def setUp(self):
-        collector.STOP = False
+        collector_config.STOP = False
         self.open = datetime(2026, 9, 8, 9, 30, tzinfo=ET)
         self.close = datetime(2026, 9, 8, 16, 0, tzinfo=ET)
         self.cutoff = self.open - timedelta(seconds=collector.OPTIONAL_LANE_RESERVE_SECONDS)
@@ -2022,8 +2028,8 @@ class SharedStreamMainTests(unittest.TestCase):
         }
         with (
             patch.dict(os.environ, full_env, clear=False),
-            patch.object(collector, "r2_client", return_value=(r2, "bucket")),
-            patch.object(collector, "Tradier", return_value=client),
+            patch.object(collector_run, "r2_client", return_value=(r2, "bucket")),
+            patch.object(collector_run, "Tradier", return_value=client),
             contextlib.redirect_stdout(self.logs),
         ):
             result = collector.main(
@@ -2396,6 +2402,44 @@ class SharedStreamMainTests(unittest.TestCase):
         self.assertEqual(lanes["QQQ"]["status"], "complete")
         self.assertEqual(lanes["IBIT"]["partial_reasons"],
                          ["lane_finalization_failed: ClientError: ServiceUnavailable"])
+
+
+
+class PackageLayoutTests(unittest.TestCase):
+    """The lane's home is ``collectors/tradier/``; the deployed path is a shim.
+
+    These pin the two seams a future move could break silently: the legacy
+    entry module must keep exposing the package surface, and the process stop
+    flag must keep exactly one owner.
+    """
+
+    def test_deployed_entry_module_reexports_the_package(self):
+        package = importlib.import_module("collectors.tradier")
+        for name in package.__all__:
+            self.assertIs(getattr(collector, name), getattr(package, name), name)
+
+    def test_entry_module_no_longer_owns_the_stop_flag(self):
+        # A boolean copy on the entry module would be settable and do nothing,
+        # which is exactly how a "stop" request goes missing.
+        self.assertFalse(hasattr(collector, "STOP"))
+        self.assertIs(collector_config.STOP, collector_config.STOP)
+
+    def test_deployed_entry_script_runs_main_and_fails_loudly_without_a_token(self):
+        env = {key: value for key, value in os.environ.items() if key != "TRADIER_TOKEN"}
+        completed = subprocess.run(
+            [sys.executable, str(SCRIPTS / "moo144_tradier_collector.py")],
+            capture_output=True, text=True, env=env, cwd=str(ROOT), timeout=120,
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        output = completed.stdout + completed.stderr
+        self.assertIn("collector_failed", output)
+        self.assertIn("TRADIER_TOKEN is required", output)
+
+    def test_run_module_is_the_composition_root(self):
+        # main() orchestrates; settings and post-capture evidence have names.
+        self.assertIs(collector.main, collector_run.main)
+        self.assertTrue(callable(collector_run.load_settings))
+        self.assertTrue(callable(collector_run.finalize_run))
 
 
 if __name__ == "__main__":
