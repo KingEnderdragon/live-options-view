@@ -2,11 +2,9 @@
 
 WHY this module now: _run_session (263 lines) is the second-largest unit
 in the collector and the orchestrator -- it wires auth, the feed, the
-snapshot/price/health loops and the weekly loop into one session. It moves
-out early (with DXLinkFeed) so the biggest units land first; its callees
-still live in the legacy flat file for now, so it imports them from
-collector._legacy until their own slices move them to their final homes
-(the final slice rewrites these imports -- see the responsibility map).
+snapshot/price/health loops and the weekly loop into one session. It moved
+out early (with DXLinkFeed) so the biggest units landed first; its callees
+now live in their final homes in the package (see the responsibility map).
 main() moves with it: it is the Railway entry point and its test patch
 points (start_live_quote_server, make_s3, wait_for_premarket, _run_session)
 resolve through the package entry, as they did in the flat file.
@@ -61,9 +59,7 @@ from .state import (
     load_rvol_baseline,
     restore_state,
 )
-from ._legacy import (
-    weekly_snapshot_loop,
-)
+from .sessions import weekly_snapshot_loop
 
 def _run_session(token_manager: OAuthTokenManager, quote_registry: LiveQuoteRegistry):
     run_id        = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ-") + secrets.token_hex(3)

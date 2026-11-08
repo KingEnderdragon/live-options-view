@@ -41,7 +41,6 @@ Environment variables (set in Railway dashboard):
   COLLECT_SPY            optional -- "0" disables SPY chain collection (default on)
 """
 
-import importlib.util
 import io
 import json
 import logging
@@ -55,7 +54,6 @@ import time
 from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 from typing import Optional
 from urllib.parse import parse_qs, urlparse
 
@@ -92,39 +90,20 @@ from .market import *
 from .market import __all__ as _market_all
 from .weekly import *
 from .weekly import __all__ as _weekly_all
-
-# --- temporary bridge (removed in the final B4 slice) -----------------------
-# Names not yet moved out of the flat file still live in root collector.py.
-# That file is shadowed by this package for `import collector`, so it is
-# loaded here by path as collector._legacy and its names re-exported below.
-# Each slice moves one subsystem out, shrinks the legacy file, and the final
-# slice deletes this bridge entirely.
-def _load_legacy():
-    path = Path(__file__).resolve().parent.parent / "collector.py"
-    spec = importlib.util.spec_from_file_location("collector._legacy", path)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules["collector._legacy"] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-_legacy = _load_legacy()
-globals().update(
-    {name: value for name, value in vars(_legacy).items()
-     if not name.startswith("__") and name != "_entry"}
-)
-
-# The runner imports its not-yet-moved callees from ._legacy, so it loads
-# after the bridge (its own import is what pulls those names in).
+from .sessions import *
+from .sessions import __all__ as _sessions_all
 from .runner import *
 from .runner import __all__ as _runner_all
 
+# Names the flat file used to define at module scope (stdlib/third-party
+# imports and the cc/ms aliases) stay part of the package surface: tests
+# and probe scripts read some of them off `collector` directly
+# (collector.requests, collector.threading, collector.datetime).
 __all__ = sorted(
-    set(_config_all) | set(_feed_all) | set(_oauth_all) | set(_tiers_all) | set(_chain_all) | set(_state_all) | set(_quotes_all) | set(_prices_all) | set(_steo_all) | set(_health_all) | set(_market_all) | set(_weekly_all) | set(_runner_all)
+    set(_config_all) | set(_feed_all) | set(_oauth_all) | set(_tiers_all) | set(_chain_all) | set(_state_all) | set(_quotes_all) | set(_prices_all) | set(_steo_all) | set(_health_all) | set(_market_all) | set(_weekly_all) | set(_sessions_all) | set(_runner_all)
     | {"cc", "ms"}
     | set(['BaseHTTPRequestHandler', 'Optional', 'ThreadingHTTPServer', 'boto3', 'date', 'datetime', 'io', 'json', 'logging', 'lru_cache', 'math', 'os', 'parse_qs', 'pd', 'pytz', 're', 'requests', 'secrets', 'sys', 'threading', 'time', 'timedelta', 'timezone', 'urlparse', 'websocket', 'yf'])
-    | {name for name in vars(_legacy) if not name.startswith("__")}
 )
 
-# Bridge internals are not part of the collector surface.
-del _load_legacy, _legacy, _config_all, _feed_all, _oauth_all, _tiers_all, _chain_all, _state_all, _quotes_all, _prices_all, _steo_all, _health_all, _market_all, _weekly_all, _runner_all, Path, importlib
+# Star-import bookkeeping is not part of the collector surface.
+del _config_all, _feed_all, _oauth_all, _tiers_all, _chain_all, _state_all, _quotes_all, _prices_all, _steo_all, _health_all, _market_all, _weekly_all, _sessions_all, _runner_all
