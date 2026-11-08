@@ -76,6 +76,10 @@ export function checkOrigin(request) {
   }
   return null;
 }
+// Resolves the session cookie to a live user record. Returns null on any
+// break in the chain, including a session that still exists but whose
+// account was since deleted (e.g. liquidated by /api/settle from another
+// device) -- that account is gone, not just logged out.
 export async function requireSession(request, env) {
   const cookies = parseCookies(request);
   const token = cookies[SESSION_COOKIE];
