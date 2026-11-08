@@ -34,6 +34,7 @@ from .config import (
 )
 from .feed import DXLinkFeed
 from .oauth import OAuthTokenManager, TastyAuthError, tasty_auth
+from .tiers import classify_tier
 from ._legacy import (
     Counters,
     LiveQuoteRegistry,
@@ -46,7 +47,6 @@ from ._legacy import (
     _log_ticker_health,
     _observed_spy_price,
     _select_spy_strikes,
-    classify_tier,
     eia_steo_loop,
     finalize_rvol_baseline,
     health_loop,
