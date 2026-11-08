@@ -74,8 +74,9 @@ def on_stop(_signum: int, _frame: Any) -> None:
 def nyse_session_bounds(day: date) -> tuple[datetime, datetime] | None:
     """Exchange hours for ``day``, including holidays/early closes; None if closed.
 
-    Same pattern as ``collector.py``'s ``_weekly_session_bounds`` -- kept as
-    its own copy here since ``collector.py`` isn't a shared library module.
+    Same pattern as ``collector/weekly.py``'s ``_weekly_session_bounds`` --
+    kept as its own copy here since the collector package isn't a shared
+    library module.
     """
     import pandas_market_calendars as mcal
     schedule = mcal.get_calendar("NYSE").schedule(start_date=day, end_date=day)
