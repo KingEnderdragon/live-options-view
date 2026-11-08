@@ -15,8 +15,9 @@ const moduleSource = fs.readFileSync(path.join(__dirname, '../docs/js/countdown-
 const moduleHash = createHash('sha256').update(moduleSource).digest('hex').slice(0, 16);
 assert.ok(html.includes('js/countdown-timer.js?v=' + moduleHash), 'countdown-timer script URL must match its content hash on every hosting path');
 assert.ok(!html.includes('function startCountdown'), 'startCountdown must live in js/countdown-timer.js, not inline in index.html');
-// The chain_underlying test slices the data fetch cycle up to this banner;
-// it stays in index.html as the section's marker.
+// The chain_underlying test used to slice the data fetch cycle up to this
+// banner; since B2 slice 5 it loads docs/js/data-fetch-cycle.js instead.
+// The banner stays in index.html as the section's marker.
 assert.ok(html.includes('// ── countdown timer'), 'countdown banner must stay in index.html as the section marker');
 
 // --- fake-timer harness: the page's shared scope, as the module sees it. ---

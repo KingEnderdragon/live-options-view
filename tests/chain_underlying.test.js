@@ -1,11 +1,13 @@
 // QQQ/SPY chain selection (#121): the pure helpers in docs/shared.js, plus
-// docs/index.html's own fetch/render cycle run against a minimal DOM shim
-// (same section-extraction approach as bots_panel.test.js, so the shipped
-// source is what's tested). If this fails with "could not locate", the
-// '// ── data fetch cycle' or '// ── countdown timer' banner moved.
+// the page's fetch/render cycle — docs/js/data-fetch-cycle.js since B2 slice 5
+// (Nov 2026), loaded by index.html in the same position the inline section
+// occupied — run against a minimal DOM shim, so the shipped source is what's
+// tested. This was the first B2 slice that moved a test: earlier versions
+// sliced the section out of index.html by banner text.
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { createHash } = require('node:crypto');
 const shared = require('../docs/shared.js');
 const { chainLatestPath, occRoot, validateChainPayload, ChainSelection, relativeOiRanges, summarizeSpyHealth } = shared;
 
@@ -72,12 +74,16 @@ function snapshot(symbol, { declare = true, price = symbol === 'SPY' ? 670.2 : 6
 
 // ── index.html fetch/render cycle ────────────────────────────────────────────
 const html = fs.readFileSync(path.join(__dirname, '..', 'docs', 'index.html'), 'utf8');
-const START = '// ── data fetch cycle';
-const END = '// ── countdown timer';
-const from = html.indexOf(START);
-const to = html.indexOf(END, from);
-assert.ok(from !== -1 && to !== -1, 'could not locate the data fetch cycle in docs/index.html');
-const source = html.slice(from, to);
+// B2 (readability quest): the data fetch cycle moved out of index.html into
+// docs/js/data-fetch-cycle.js, loaded in the same position. The test loads the
+// shipped module instead of slicing the page by banner text, and pins the ?v=
+// hash in the page to the module's content (like shared.js).
+const source = fs.readFileSync(path.join(__dirname, '..', 'docs', 'js', 'data-fetch-cycle.js'), 'utf8');
+const moduleHash = createHash('sha256').update(source).digest('hex').slice(0, 16);
+assert.ok(html.includes('js/data-fetch-cycle.js?v=' + moduleHash), 'data-fetch-cycle script URL must match its content hash on every hosting path');
+assert.ok(!html.includes('async function fetchChain('), 'fetchChain must live in js/data-fetch-cycle.js, not inline in index.html');
+assert.ok(!html.includes('function fetchLatest('), 'fetchLatest must live in js/data-fetch-cycle.js, not inline in index.html');
+assert.ok(html.includes('// ── data fetch cycle'), 'data fetch cycle banner must stay in index.html as the section marker');
 
 // The price tile and SPY health badge use the shipped HTML functions, with
 // offline artifact responses and no provider/browser network dependency.
