@@ -3,7 +3,9 @@
 // (Nov 2026), loaded by index.html in the same position the inline section
 // occupied — run against a minimal DOM shim, so the shipped source is what's
 // tested. This was the first B2 slice that moved a test: earlier versions
-// sliced the section out of index.html by banner text.
+// sliced the section out of index.html by banner text. The SPY health badge
+// (fetchSpyHealth) moved again in B2 slice 15 with the paper-trading section —
+// its test now loads docs/js/paper-trading.js instead of slicing the page.
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -183,19 +185,41 @@ const testPriceTile = async () => {
 
 };
 const testSpyHealthBadge = async () => {
+  // B2 (readability quest): fetchSpyHealth moved out of index.html into
+  // docs/js/paper-trading.js with the paper-trading section (slice 15), so
+  // this test loads the shipped module instead of slicing the page between
+  // `let latestSpyHealthRequest` and `liveQuotes.subscribe(`. The module
+  // needs the real shared.js in the same context (LiveQuoteService,
+  // ChainSelection, summarizeSpyHealth) plus the page's shared-scope stubs.
+  const moduleSource = fs.readFileSync(path.join(__dirname, '..', 'docs', 'js', 'paper-trading.js'), 'utf8');
+  const sharedSource = fs.readFileSync(path.join(__dirname, '..', 'docs', 'shared.js'), 'utf8');
+  const moduleHash = createHash('sha256').update(moduleSource).digest('hex').slice(0, 16);
+  assert.ok(html.includes('js/paper-trading.js?v=' + moduleHash), 'paper-trading script URL must match its content hash on every hosting path');
   const badge = { className: '', textContent: '', title: '' };
   let response = { updated_at: new Date().toISOString(), spy: {
     collection_status: 'collecting', spot: { status: 'live' },
     last_snapshot_upload_time: new Date().toISOString(),
   } };
-  const start = html.indexOf('let latestSpyHealthRequest = 0;');
-  const end = html.indexOf('liveQuotes.subscribe(', start);
-  assert.ok(start > 0 && end > start, 'shipped SPY health badge code found');
-  const fetchSpyHealth = new Function('fetch', 'BROWSER_DATA', 'document', 'summarizeSpyHealth',
-    `${html.slice(start, end)}\nreturn fetchSpyHealth;`)(
-      async () => ({ ok: true, json: async () => response }), 'https://r2.example',
-      { getElementById: () => badge }, summarizeSpyHealth,
-    );
+  const pending = [];
+  let fetchImpl = async () => ({ ok: true, json: async () => response });
+  const context = vm.createContext({
+    console,
+    document: { getElementById: () => badge, createElement: () => ({}) },
+    localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+    crypto: { randomUUID: () => 'test-uuid' },
+    BROWSER_DATA: 'https://r2.example',
+    fetch: async (url, options) => fetchImpl(url, options),
+    botsTimer: null,
+    renderBots: () => {},
+    showMarginCallScreen: () => {},
+    closeTicket: () => {},
+    renderSelectedChain: () => {},
+    tickerState: { get: () => null },
+    selectedChainData: () => null,
+  });
+  vm.runInContext(sharedSource, context, { filename: 'docs/shared.js' });
+  vm.runInContext(moduleSource, context, { filename: 'docs/js/paper-trading.js' });
+  const fetchSpyHealth = () => vm.runInContext('fetchSpyHealth()', context);
   await fetchSpyHealth();
   assert.equal(badge.className, 'transport-health live', 'fresh SPY health renders live');
   response = { ...response, updated_at: new Date(Date.now() - 60_000).toISOString() };
@@ -204,13 +228,9 @@ const testSpyHealthBadge = async () => {
   response = { updated_at: new Date().toISOString(), spy: { collection_status: 'missing_today_expiration', reason: 'no SPY 0DTE' } };
   await fetchSpyHealth();
   assert.match(badge.textContent, /missing today expiration/, 'missing SPY 0DTE is visible');
-  const pending = [];
-  const ordered = new Function('fetch', 'BROWSER_DATA', 'document', 'summarizeSpyHealth',
-    html.slice(start, end) + '\nreturn fetchSpyHealth;')(
-      () => new Promise((resolve, reject) => pending.push({ resolve, reject })), 'https://r2.example',
-      { getElementById: () => badge }, summarizeSpyHealth);
-  const oldRequest = ordered();
-  const newRequest = ordered();
+  fetchImpl = () => new Promise((resolve, reject) => pending.push({ resolve, reject }));
+  const oldRequest = fetchSpyHealth();
+  const newRequest = fetchSpyHealth();
   pending[1].resolve({ ok: true, json: async () => ({
     updated_at: new Date().toISOString(), spy: { collection_status: 'disabled' },
   }) });
@@ -218,7 +238,7 @@ const testSpyHealthBadge = async () => {
   pending[0].reject(new Error('old request failed'));
   await oldRequest;
   assert.equal(badge.textContent, 'SPY: disabled', 'old failure cannot replace newer health');
-  const failed = ordered();
+  const failed = fetchSpyHealth();
   pending[2].reject(new Error('network'));
   await failed;
   assert.equal(badge.className, 'transport-health unavailable');
