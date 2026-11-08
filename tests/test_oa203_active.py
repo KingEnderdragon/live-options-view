@@ -11,7 +11,9 @@ from datetime import date
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import oa203_return_scanner as scanner  # noqa: E402
+from scanners.oa203 import active as scanner_active  # noqa: E402
 
 DAY = date(2026, 10, 2)
 OPEN = 1790947800000
@@ -137,7 +139,7 @@ class ActiveCutoff(unittest.TestCase):
     def test_oversized_member_is_not_pointed_to(self):
         for i in range(1, 4):
             self.add_sweep(i)
-        with mock.patch.object(scanner, "ACTIVE_MAX_MEMBER_BYTES", 100):
+        with mock.patch.object(scanner_active, "ACTIVE_MAX_MEMBER_BYTES", 100):
             with self.assertRaisesRegex(ValueError, "MCP artifact budget"):
                 scanner.build_active_snapshot(self.archive, self.cfg, 3, OPEN, CLOSE)
         self.assertFalse(self.archive.path("inprogress/latest.json").exists())
