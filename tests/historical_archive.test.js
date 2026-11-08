@@ -26,12 +26,12 @@ const prices = 'datetime,open,high,low,close\n2026-10-27T13:30:00Z,500,502,499,5
     const ctx = vm.createContext({document:{getElementById:el}, localStorage:{getItem(){return null}}, BROWSER_DATA:'/browser-data', historyLoaded:true, console,
       fetch: url => worker.fetch(new Request(APP + url), new Proxy({}, { get(){throw Error('private binding accessed');} })) });
     vm.runInContext(shared.slice(shared.indexOf('function parseCsv('), shared.indexOf('// ── OIranges.csv')), ctx);
-    // B2 slice 11 (Nov 2026): the sidebar-widgets section moved out of
-    // index.html into docs/js/sidebar-widgets.js — the historical..boot slice
-    // would now include the <script src> tag, which is not valid JS, so load
-    // the three pieces in page order instead: historical panel, the widgets
-    // module, then the canvas-tooltip section.
-    vm.runInContext(html.slice(html.indexOf('// ── historical panel'), html.indexOf('// ── sidebar widgets')), ctx);
+    // B2 slice 12 (Nov 2026): the historical panel moved out of index.html
+    // into docs/js/historical-panel.js — the historical..sidebar slice would
+    // now be the banner + a <script src> tag, which is not valid JS, so load
+    // the shipped module instead, then the widgets module and the
+    // canvas-tooltip section in page order.
+    vm.runInContext(fs.readFileSync('docs/js/historical-panel.js', 'utf8'), ctx);
     vm.runInContext(fs.readFileSync('docs/js/sidebar-widgets.js', 'utf8'), ctx);
     vm.runInContext(html.slice(html.indexOf('// ── canvas hover/touch tooltip'), html.indexOf('// ── boot')), ctx);
     vm.runInContext(`renderHistoryHeatmap = data => { rendered = data; return true; }; renderHistWidgets = (...args) => { widgets = args; };`,ctx);
