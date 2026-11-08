@@ -33,8 +33,9 @@ for (const fn of ['loadHistoryManifest', 'fetchChainCsv', 'loadHistoryDate', 're
   'classifyTierSimple', 'validArchiveDate', 'setHistStatus', 'resetHistoryView', 'normalizeHistRow']) {
   assert.ok(!html.includes(`function ${fn}(`), `${fn} must live in js/historical-panel.js, not inline in index.html`);
 }
-// The banner stays in index.html as the section's marker (bots_panel and
-// bots_dates_browser slice up to it).
+// The banner stays in index.html as the section's marker. Nothing slices
+// up to it anymore — bots_panel and bots_dates_browser load the bots module
+// (B2 slice 13) instead of slicing the page by banner text.
 assert.ok(html.includes('// ── historical panel'), 'historical panel banner must stay in index.html as the section marker');
 
 // --- harness: the page's shared scope, as the module sees it. ---
