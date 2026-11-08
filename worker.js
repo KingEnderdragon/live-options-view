@@ -6,10 +6,12 @@ import {
   sessionCookieHeader, sessionKey, sleep, userKey, withUserRecord,
 } from './worker/common.js';
 import { BROWSER_DATA_PREFIX, fetchLiveQuotes, handleBrowserData, handleLiveQuotes } from './worker/browser-data.js';
+import { settlementPriceServer, validateSettleRequest } from './worker/settlement.js';
 
 // Re-exported from worker/common.js so the Worker's public API (the 32
 // exports pinned by tests/worker_logic.test.js) stays on worker.js.
 export { BOT_USERNAME_RE, STARTING_BALANCE, STRATEGY_ID_RE, computeBookFromTrades, parseCookies } from './worker/common.js';
+export { settlementPriceServer, validateSettleRequest } from './worker/settlement.js';
 
 const MAX_QUOTE_AGE_MS = 15 * 1000;
 const MAX_QUOTE_FUTURE_MS = 30 * 1000;
@@ -897,32 +899,6 @@ async function handlePaperTrade(request, env) {
 // never trusted for anything else.
 // ---------------------------------------------------------------------------
 
-
-// Longs settle worthless -- this book has no exercise capacity, so an ITM
-// long must be closed before expiration to realize value. Shorts don't get
-// that same free pass: a real counterparty will exercise an ITM option
-// against a short seller regardless of what this account can cover, so
-// shorts settle at intrinsic value using the caller-supplied spot for that
-// expiration.
-export function settlementPriceServer(b, spotMarks) {
-  if (b.pos > 0) return 0;
-  const spot = spotMarks[b.exp];
-  if (spot == null) return 0;
-  return b.type === 'call' ? Math.max(spot - b.strike, 0) : Math.max(b.strike - spot, 0);
-}
-
-export function validateSettleRequest(body) {
-  if (!body || typeof body !== 'object') return 'Body must be a JSON object';
-  if (typeof body.as_of !== 'string' || !ISO_DATE.test(body.as_of)) return 'as_of must be an ISO date string';
-  if (!body.spot_marks || typeof body.spot_marks !== 'object' || Array.isArray(body.spot_marks)) {
-    return 'spot_marks must be an object';
-  }
-  for (const [exp, spot] of Object.entries(body.spot_marks)) {
-    if (!ISO_DATE.test(exp)) return 'spot_marks keys must be ISO dates';
-    if (typeof spot !== 'number' || !Number.isFinite(spot) || spot < 0) return 'spot_marks values must be non-negative numbers';
-  }
-  return null;
-}
 
 // Core settlement mutation, shared by the session-authenticated /api/settle
 // endpoint and the unattended cron sweep (see settleAllBots below) -- a bot
