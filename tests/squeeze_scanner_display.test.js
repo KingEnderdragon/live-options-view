@@ -117,9 +117,10 @@ const { formatSqueezeScanStatus, describeSqueezeAcquisitionFailure, formatSqueez
 
 // -- formatSqueezeFirstSeen ----------------------------------------------------
 // Against the real producer contract (short-squeeze-scanner#2's
-// site/archive-contract.md): first_seen_at (UTC write-attempt timestamp,
-// null if unknown) + is_new (true only for the introducing run; false for
-// a known existing candidate including a reappearance; null if unknown).
+// docs/archive-contract.md -- in that repository, not this one): first_seen_at
+// (UTC write-attempt timestamp, null if unknown) + is_new (true only for the
+// introducing run; false for a known existing candidate including a
+// reappearance; null if unknown).
 
 // -- PR #105 round-2 review's exact reproduction: a morning incumbent and a
 // noon newcomer must NOT render identically -----------------------------------
