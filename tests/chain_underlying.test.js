@@ -221,6 +221,9 @@ const testSpyHealthBadge = async () => {
   });
   vm.runInContext(sharedSource, context, { filename: 'docs/shared.js' });
   vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'docs', 'shared', 'quotes.js'), 'utf8'), context, { filename: 'docs/shared/quotes.js' });
+  // B3 slice 4 (Nov 2026): the panel formatters + order validators moved to
+  // docs/shared/format.js — same, after quotes.js, in page order.
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'docs', 'shared', 'format.js'), 'utf8'), context, { filename: 'docs/shared/format.js' });
   vm.runInContext(moduleSource, context, { filename: 'docs/js/paper-trading.js' });
   const fetchSpyHealth = () => vm.runInContext('fetchSpyHealth()', context);
   await fetchSpyHealth();

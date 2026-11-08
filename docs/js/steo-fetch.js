@@ -2,7 +2,7 @@
 // only writes macro/eia_steo.json when EIA_API_KEY is configured. A 404
 // means the optional publication is absent, not proof of why it is absent;
 // keep the panel hidden without treating absence as a transport failure.
-// fmtSteoDelta/findRevision live in shared.js (pure, tested directly there).
+// fmtSteoDelta/findRevision live in docs/shared/format.js (pure, tested directly there).
 async function fetchSteoCalibration() {
   const panel = document.getElementById('steo-panel');
   try {
