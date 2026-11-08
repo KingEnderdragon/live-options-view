@@ -30,7 +30,7 @@ a possible market window; provider observation freshness is unverified.
 
 | File | Purpose |
 | --- | --- |
-| `collector.py` | Add source symbol, original source for carry-forwards, selected-price basis and a receipt time tied to the selected price in the existing `prices.json` payload. No new symbols or schedule. |
+| [collector/prices.py](../../collector/prices.py) | Add source symbol, original source for carry-forwards, selected-price basis and a receipt time tied to the selected price in the existing `prices.json` payload. No new symbols or schedule. |
 | `market_mcp/overview.js`, `consumer.js`, `server.js` | Add the bounded, read-only `market_overview` tool over the existing strip, with source-dependent identities, units, per-row receipt age and named gaps. |
 | `market_overview_universe.json` | Versioned candidate universe: 132 stocks in 11 groups of 12 with a rationale for each group, a share-class alias table, a proposed watchlist cap, and a macro instrument registry with exact instrument types, units and candidate sources. |
 | `market_overview.py` | Pure functions for change arithmetic, scale normalization, FX inversion, identity/contract/adjustment checks, US equity session classification, freshness, universe validation, watchlist merging, sample breadth and top movers. |
@@ -71,7 +71,7 @@ What this shows:
 - **Cash indices, CBOE yield indices and BTC** return nothing over DXLink
   with the configured symbols. We can't yet tell whether the symbology is
   wrong or the entitlement is missing.
-- **The yfinance fallback** in `collector.py` reads only a last price. It
+- **The yfinance fallback** in [collector/prices.py](../../collector/prices.py) reads only a last price. It
   carries no previous close and no trustworthy observation time, so every
   fallback row today has `chg_pct: null`. That fallback can't produce a
   change on its own. A daily-bar history call would be needed for a reference

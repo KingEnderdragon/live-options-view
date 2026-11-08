@@ -2,7 +2,7 @@
 
 The collector publishes SPY's 0DTE chain and underlying context next to QQQ's,
 over the same tastytrade/DXLink session. This file covers collection only. The
-website and market MCP consume it in follow-up changes.
+website and market MCP now have read-only consumers described below; their presence in source does not establish a fresh SPY publication.
 
 ## Artifact layout
 
@@ -155,7 +155,7 @@ not publish SPY snapshots until delivery completes; QQQ collection continues.
   artifact; missing expiration, missing snapshots and missing spot remain
   visible rather than borrowing QQQ health.
 - Every snapshot is validated for the requested symbol before rendering
-  (`validateChainPayload` in shared.js): its top-level symbol,
+  (`validateChainPayload` in [site/shared/chain.js](../../site/shared/chain.js)): its top-level symbol,
   `underlying_market.symbol` and every contract root must match. A mismatch,
   a missing SPY publication (404) or a failed first load is shown as an
   explicit unavailable state, never as the other underlying's data.
