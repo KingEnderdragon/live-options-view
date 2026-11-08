@@ -38,6 +38,7 @@ from .tiers import classify_tier
 from .chain import load_chain
 from .steo import eia_steo_loop
 from .health import health_loop, push_health
+from .market import take_snapshot
 from .prices import (
     _classify_startup,
     _log_ticker_health,
@@ -61,7 +62,6 @@ from .state import (
     restore_state,
 )
 from ._legacy import (
-    take_snapshot,
     weekly_snapshot_loop,
 )
 
