@@ -189,8 +189,10 @@ const testSpyHealthBadge = async () => {
   // docs/js/paper-trading.js with the paper-trading section (slice 15), so
   // this test loads the shipped module instead of slicing the page between
   // `let latestSpyHealthRequest` and `liveQuotes.subscribe(`. The module
-  // needs the real shared.js in the same context (LiveQuoteService,
-  // ChainSelection, summarizeSpyHealth) plus the page's shared-scope stubs.
+  // needs the real shared.js in the same context (ChainSelection,
+  // summarizeSpyHealth) plus docs/shared/quotes.js (B3 slice 3: the
+  // LiveQuoteService its top-level `liveQuotes` constructs) plus the page's
+  // shared-scope stubs.
   const moduleSource = fs.readFileSync(path.join(__dirname, '..', 'docs', 'js', 'paper-trading.js'), 'utf8');
   const sharedSource = fs.readFileSync(path.join(__dirname, '..', 'docs', 'shared.js'), 'utf8');
   const moduleHash = createHash('sha256').update(moduleSource).digest('hex').slice(0, 16);
@@ -218,6 +220,14 @@ const testSpyHealthBadge = async () => {
     selectedChainData: () => null,
   });
   vm.runInContext(sharedSource, context, { filename: 'docs/shared.js' });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'docs', 'shared', 'quotes.js'), 'utf8'), context, { filename: 'docs/shared/quotes.js' });
+  // B3 slice 4 (Nov 2026): the panel formatters + order validators moved to
+  // docs/shared/format.js — same, after quotes.js, in page order.
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'docs', 'shared', 'format.js'), 'utf8'), context, { filename: 'docs/shared/format.js' });
+  // B3 slice 5 (Nov 2026): the chain underlying names moved to
+  // docs/shared/chain.js — same, after format.js, in page order, so
+  // paper-trading.js constructs the real ChainSelection at load.
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'docs', 'shared', 'chain.js'), 'utf8'), context, { filename: 'docs/shared/chain.js' });
   vm.runInContext(moduleSource, context, { filename: 'docs/js/paper-trading.js' });
   const fetchSpyHealth = () => vm.runInContext('fetchSpyHealth()', context);
   await fetchSpyHealth();

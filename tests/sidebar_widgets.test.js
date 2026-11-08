@@ -81,12 +81,15 @@ function harness({ fetchImpl, chainRows, manifestDates = DATES } = {}) {
     },
   };
   const context = vm.createContext(sandbox);
-  // The real shared.js: `parseCsv`, `getThresh`/`oiBucket` are browser
-  // globals in production (not in shared.js's module.exports), so load the
-  // whole file into the context — it defines them as top-level functions.
+  // The real shared.js + shared/csv-ranges.js: `parseCsv`,
+  // `getThresh`/`oiBucket` are browser globals in production (not in
+  // shared.js's module.exports), so load both files into the context — they
+  // define them as top-level functions. B3 slice 1 (Nov 2026): the three
+  // moved to docs/shared/csv-ranges.js, loaded here in page order.
   // `ranges` is declared in the page's shared scope (just above the loader
   // section), before this module loads.
   vm.runInContext(sharedSource, context, { filename: 'docs/shared.js' });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../docs/shared/csv-ranges.js'), 'utf8'), context, { filename: 'docs/shared/csv-ranges.js' });
   vm.runInContext('let ranges = null;', context);
   vm.runInContext('ranges = ' + JSON.stringify(RANGES) + ';', context);
   vm.runInContext(moduleSource, context, { filename: 'docs/js/sidebar-widgets.js' });

@@ -4,7 +4,7 @@
 // scope — is unchanged. No ESM conversion.
 // ── OIranges loader ───────────────────────────────────────────────────────────
 // parseRangesCsv / parseCsv / getThresh / oiBucket / buildHeatmapRows / DISPLAY /
-// TIER_COLORS / fmt*/quoteHtml/flowHtml live in shared.js (also used by diag.html).
+// TIER_COLORS / fmt*/quoteHtml/flowHtml live in shared/heatmap.js (also used by diag.html).
 async function loadRanges() {
   try {
     const resp = await fetch(`${BROWSER_DATA}/derived/OIranges.csv`, { cache: 'no-store' });

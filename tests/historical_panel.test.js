@@ -5,9 +5,9 @@
 // drives the module's functions with stubbed DOM + fetch so the tier
 // classification, archive validation, chain fetch (including the legacy
 // opex fallback), manifest load and heatmap render are verified without the
-// network. The real buildHeatmapRows runs here (shared.js loaded whole,
-// ranges parsed from an inline CSV through the real parseRangesCsv); the
-// matrix stays in tests/historical_archive.test.js, which now loads this
+// network. The real buildHeatmapRows runs here (shared/heatmap.js loaded
+// whole, ranges parsed from an inline CSV through the real parseRangesCsv);
+// the matrix stays in tests/historical_archive.test.js, which now loads this
 // module too. renderHistWidgets is stubbed here — its real implementation
 // is covered by tests/sidebar_widgets.test.js + the assembly check.
 const assert = require('node:assert/strict');
@@ -92,9 +92,15 @@ function harness() {
       createElement: () => makeEl(),
     },
   });
-  // shared.js whole, so parseCsv / parseRangesCsv / buildHeatmapRows /
-  // TIER_COLORS are the real ones; ranges parsed from the inline CSV above.
+  // shared.js + shared/csv-ranges.js + shared/heatmap.js whole, so parseCsv /
+  // parseRangesCsv / buildHeatmapRows / TIER_COLORS are the real ones; ranges
+  // parsed from the inline CSV above. B3 slice 1 (Nov 2026): parseCsv /
+  // parseRangesCsv moved to docs/shared/csv-ranges.js — load the shipped
+  // module too, in page order. B3 slice 2 (Nov 2026): buildHeatmapRows /
+  // TIER_COLORS moved to docs/shared/heatmap.js — same, after csv-ranges.js.
   vm.runInContext(shared, ctx, { filename: 'docs/shared.js' });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../docs/shared/csv-ranges.js'), 'utf8'), ctx, { filename: 'docs/shared/csv-ranges.js' });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../docs/shared/heatmap.js'), 'utf8'), ctx, { filename: 'docs/shared/heatmap.js' });
   vm.runInContext(`ranges = parseRangesCsv(${JSON.stringify(rangesCsv)});`, ctx);
   vm.runInContext(moduleSource, ctx, { filename: 'docs/js/historical-panel.js' });
   return { ctx, els, calls, routes };

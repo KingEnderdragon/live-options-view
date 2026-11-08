@@ -2,8 +2,9 @@
 // Nov 2026). Classic script, loaded by index.html in the same position the
 // inline section occupied, so the page's script order — and the shared global
 // scope — is unchanged. No ESM conversion.
-// `BROWSER_DATA` stays in the stale-page section; `parseCsv`, `TIER_COLORS`
-// and `buildHeatmapRows` come from shared.js; `ranges` from the OIranges
+// `BROWSER_DATA` stays in the stale-page section; `parseCsv` comes from
+// shared/csv-ranges.js, `TIER_COLORS` and `buildHeatmapRows` from
+// shared/heatmap.js; `ranges` from the OIranges
 // loader. `historyLoaded` is declared in the tab-switching module and
 // assigned by loadHistoryManifest's failure path; `hideSimilarPopup` and
 // `renderHistWidgets` are defined in the canvas-tooltip module — all
