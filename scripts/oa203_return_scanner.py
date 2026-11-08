@@ -1304,6 +1304,14 @@ def _build_active_snapshot(archive: DayArchive, cfg: Config, sweep: int,
     """
     if not 1 <= sweep <= ACTIVE_MAX_SWEEP:
         raise ValueError("invalid snapshot sweep")
+    if archive.upload and uploader is None:
+        from moo144_tradier_probe import r2_client
+        from oa203_active_budget import clean_and_reserve
+        client, bucket = r2_client()
+        if archive.prefix != f"oa203/scanner/{archive.day.isoformat()}":
+            raise ValueError("active policy requires the reviewed scanner prefix")
+        budget = clean_and_reserve(client, bucket, archive.day, sweep)
+        log("oa203_active_budget_reserved", **budget)
     manifest_damage: list[dict[str, Any]] = []
     manifest = _read_manifest(archive.dir, manifest_damage, sweep)
     if manifest_damage:
@@ -2086,7 +2094,9 @@ def main(argv: list[str] | None = None) -> int:
                        "--close-ms", str(args.close_ms)]
             try:
                 write_active_attempt(archive, args.sweep, "building")
-                subprocess.run(command, timeout=ACTIVE_BUILD_SECONDS, check=True)
+                from oa203_active_budget import constrain_builder
+                subprocess.run(command, timeout=ACTIVE_BUILD_SECONDS, check=True,
+                               preexec_fn=constrain_builder if sys.platform == "linux" else None)
                 write_active_attempt(archive, args.sweep, "complete")
             except Exception as exc:
                 reason = "timeout" if isinstance(exc, subprocess.TimeoutExpired) else "build_failed"
