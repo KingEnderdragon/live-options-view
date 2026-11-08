@@ -16,6 +16,10 @@
 let histManifestDates = [];
 let histRequest = 0;
 const histCsvCache = {};   // date 'YYYY-MM-DD' -> normalized rows
+// Set by loadHistoryManifest when the archive is stale; renderHistoryHeatmap
+// appends it to the status line. It describes the archive, not the selected
+// date, so it shows whichever date is on screen.
+let histStaleNote = '';
 
 function setHistStatus(text) {
   document.getElementById('hist-status').textContent = text;
@@ -52,6 +56,30 @@ function validArchiveDate(value) {
   return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value;
 }
 
+// How stale is the archive? The manifest's `dates` index is the trading-day
+// index, so "trading days old" is counted as weekdays (Mon–Fri) after the
+// newest date up to today. No holiday calendar exists in the browser, so a
+// holiday counts as a trading day here — the tripwire errs toward stale,
+// which is the safe direction for a warning. (Q1, readability quest,
+// issue #148: the Historical tab used to offer a seven-week-stale archive
+// with no marker at all.)
+function tradingDaysSince(dateStr, today) {
+  const start = new Date(`${dateStr}T00:00:00Z`);
+  const end = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()));
+  if (!Number.isFinite(start.getTime()) || !(start < end)) return 0;
+  let days = 0;
+  for (let d = new Date(start.getTime() + 86400000); d <= end; d = new Date(d.getTime() + 86400000)) {
+    const dow = d.getUTCDay();
+    if (dow !== 0 && dow !== 6) days++;
+  }
+  return days;
+}
+
+function archiveStaleState(newestDateStr, today) {
+  const tradingDaysOld = tradingDaysSince(newestDateStr, today);
+  return { stale: tradingDaysOld > 5, tradingDaysOld };
+}
+
 function resetHistoryView(message) {
   document.getElementById('hist-heatmap-wrap').classList.add('hidden');
   document.getElementById('hist-sidebar').classList.add('hidden');
@@ -62,9 +90,10 @@ function resetHistoryView(message) {
   hideSimilarPopup();
 }
 
-async function loadHistoryManifest() {
+async function loadHistoryManifest(today = new Date()) {
   ++histRequest;
   histManifestDates = [];
+  histStaleNote = '';
   const sel = document.getElementById('hist-date');
   sel.innerHTML = '';
   sel.disabled = true;
@@ -86,6 +115,10 @@ async function loadHistoryManifest() {
     sel.disabled = false;
     sel.innerHTML = histManifestDates.map(d => `<option value="${d}">${d}</option>`).join('');
     const latest = histManifestDates[histManifestDates.length - 1];
+    const staleness = archiveStaleState(latest, today);
+    if (staleness.stale) {
+      histStaleNote = `archive stale: newest date ${latest} is ${staleness.tradingDaysOld} trading days old`;
+    }
     sel.value = latest;
     await loadHistoryDate(latest);
   } catch (e) {
@@ -179,6 +212,6 @@ function renderHistoryHeatmap(data) {
 
   document.getElementById('hist-no-data').classList.add('hidden');
   document.getElementById('hist-heatmap-wrap').classList.remove('hidden');
-  setHistStatus(`Trade date ${snapshot_time}`);
+  setHistStatus(`Trade date ${snapshot_time}` + (histStaleNote ? ` — ${histStaleNote}` : ''));
   return true;
 }

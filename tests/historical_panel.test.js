@@ -138,6 +138,26 @@ const rowsFor = (date, spot) => {
   assert.equal(vm.runInContext("validArchiveDate('')", ctx), false);
 }
 
+// Staleness math (Q1, issue #148): weekdays after the newest date up to
+// today; stale past 5 trading days. 2026-09-18 is a Friday, 2026-11-08 a
+// Sunday: Sep 21–25, Sep 28–Oct 2, Oct 5–9, Oct 12–16, Oct 19–23,
+// Oct 26–30, Nov 2–6 = 35 weekdays.
+{
+  const { ctx } = harness();
+  const days = d => vm.runInContext(`tradingDaysSince('2026-09-18', new Date('${d}T12:00:00Z'))`, ctx);
+  assert.equal(days('2026-09-18'), 0, 'same day is not stale');
+  assert.equal(days('2026-09-19'), 0, 'Saturday adds nothing');
+  assert.equal(days('2026-09-20'), 0, 'Sunday adds nothing');
+  assert.equal(days('2026-09-25'), 5, 'one full week is exactly 5 — not stale');
+  assert.equal(days('2026-09-28'), 6, 'the next Monday tips it over');
+  assert.equal(days('2026-11-08'), 35, 'the live seven-week gap is 35 trading days');
+  const stale = (date, today) => vm.runInContext(`archiveStaleState('${date}', new Date('${today}T12:00:00Z'))`, ctx);
+  assert.equal(stale('2026-09-18', '2026-09-25').stale, false, '5 trading days is not stale');
+  assert.equal(stale('2026-09-18', '2026-09-25').tradingDaysOld, 5);
+  assert.equal(stale('2026-09-18', '2026-09-28').stale, true, '6 trading days is stale');
+  assert.equal(stale('2026-09-18', '2026-11-08').tradingDaysOld, 35);
+}
+
 // Row normalization: strings become numbers, blank Bid/Ask become null
 // (a blank must not render as a zero quote).
 {
@@ -228,16 +248,32 @@ const rowsFor = (date, spot) => {
   }
 
   // loadHistoryManifest success: the select is populated, the latest date
-  // is selected and loaded (widgets prove the load ran).
+  // is selected and loaded (widgets prove the load ran). "Today" is pinned
+  // to 2026-09-24 (Q1): the fixture's newest date, 2026-09-23, is 1 trading
+  // day old then, so the archive is fresh and the status has no stale note.
   {
     const { ctx, els, calls, routes } = harness();
     routes['manifest.json'] = JSON.stringify({ dates: ['2026-09-22', '2026-09-23'] });
     routes['raw/qqq_chain_20260923.csv'] = chainCsv;
-    await vm.runInContext('loadHistoryManifest()', ctx);
+    await vm.runInContext("loadHistoryManifest(new Date('2026-09-24T12:00:00Z'))", ctx);
     assert.equal(els['hist-date'].disabled, false, 'select enabled once the index loads');
     assert.equal(els['hist-date'].value, '2026-09-23', 'latest date selected');
     assert.equal(els['hist-status'].textContent, 'Trade date 2026-09-23');
     assert.equal(calls.widgets.length, 1, 'latest date loaded');
+  }
+
+  // loadHistoryManifest with a stale archive (Q1, issue #148): the status
+  // names the staleness explicitly and the dates stay usable.
+  {
+    const { ctx, els, calls, routes } = harness();
+    routes['manifest.json'] = JSON.stringify({ dates: ['2026-09-16', '2026-09-17', '2026-09-18'] });
+    routes['raw/qqq_chain_20260918.csv'] = chainCsv.replaceAll('2026-09-23', '2026-09-18');
+    await vm.runInContext("loadHistoryManifest(new Date('2026-11-08T12:00:00Z'))", ctx);
+    assert.equal(els['hist-date'].disabled, false, 'stale archive still offers its dates');
+    assert.equal(els['hist-date'].value, '2026-09-18', 'latest date selected');
+    assert.equal(els['hist-status'].textContent,
+      'Trade date 2026-09-18 — archive stale: newest date 2026-09-18 is 35 trading days old');
+    assert.equal(calls.widgets.length, 1, 'latest date still loaded');
   }
 
   // loadHistoryManifest failure: the status names the failure, the select
