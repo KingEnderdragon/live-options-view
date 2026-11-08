@@ -1,6 +1,10 @@
 # Product Design Document — MOO-13: Live OI Viewer + Intraday Chain Pipeline
 
-**Status:** Live / Active development
+**Status:** Evolving design reference; not a deployment receipt
+
+Start with the [current system map](ARCHITECTURE.md) for runtime boundaries and the
+[documentation homes](notes/README.md) for contracts. Repository browser paths now
+use `site/`; this document retains design-era detail that is not a fresh runtime audit.
 **Last updated:** 2026-06-23
 **Repo:** `live-options-view` — github.com/OwenTanzer/live-options-view
 **Live URL:** `options.moopertonic.net`
@@ -53,7 +57,7 @@ The product is a live web view at `options.moopertonic.net`, accessible from any
                 ▼
 ┌─────────────────────────────────┐
 │  options.moopertonic.net        │
-│  docs/index.html (static)       │
+│  site/index.html (static)       │
 │                                 │
 │  • Price strip    (10s poll)   │
 │  • OI heatmap     (60s poll)   │
@@ -75,7 +79,7 @@ The product is a live web view at `options.moopertonic.net`, accessible from any
 
 There is no username/password, TOTP, remember-token, or `/sessions` fallback. The legacy
 `auth/remember_token.json` R2 object is quarantined by omission: production code neither
-reads nor writes it. See `docs/tastytrade-oauth.md` for provisioning, rotation, and rollout gates.
+reads nor writes it. See `site/tastytrade-oauth.md` for provisioning, rotation, and rollout gates.
 
 ### 3.2 DXLink connection sequence
 
@@ -217,7 +221,7 @@ Each session is classified as `0DTE_Regular`, `0DTE_Weekly`, or `0DTE_Monthly` u
 
 ---
 
-## 7. Web Viewer (`docs/index.html`)
+## 7. Web Viewer (`site/index.html`)
 
 ### 7.1 Price strip
 
@@ -313,12 +317,12 @@ Client-side paper trading (average-cost book, multiple named accounts for separa
 - **Short** positions don't get that same pass: a real market-maker/OCC counterparty will exercise an ITM option against a short seller regardless of what this account can or can't do, so modeling short ITM options as free premium would be unrealistic in the other direction. Short positions settle at intrinsic value — `max(spot − strike, 0)` for calls, `max(strike − spot, 0)` for puts — using the last underlying price recorded for that expiration date (`store.spotMarks[date]`, captured each snapshot in `ingestSnapshotQuotes()`). If no spot was ever recorded for that date, it falls back to worthless.
 
 **Write-endpoint hardening** (`/api/paper-trade` is a public write-capable surface, layered defenses, none individually sufficient on their own):
-- Shared token — client sends `X-Paper-Trade-Key` (hardcoded in `docs/index.html` as `PAPER_TRADE_KEY`), Worker checks it against the `PAPER_TRADE_KEY` secret (set via `wrangler secret put PAPER_TRADE_KEY`, not committed to the repo). This token is visible to anyone viewing page source — it's a deterrent against casual/scripted abuse, not real auth.
+- Shared token — client sends `X-Paper-Trade-Key` (hardcoded in `site/index.html` as `PAPER_TRADE_KEY`), Worker checks it against the `PAPER_TRADE_KEY` secret (set via `wrangler secret put PAPER_TRADE_KEY`, not committed to the repo). This token is visible to anyone viewing page source — it's a deterrent against casual/scripted abuse, not real auth.
 - Origin allowlist (`ALLOWED_ORIGINS` in `worker.js`) — blocks ordinary cross-site browser abuse; forgeable by non-browser clients.
 - Cloudflare rate limiting rule (zone-level, dashboard-configured, not in this repo) — 10 requests / 10s per IP on `POST /api/paper-trade`, block for 10s. Free-plan rate limiting rules cap both windows at 10s; still enough to keep a script from sustaining throughput above the human-usage ceiling.
 - Hard body-size cap (`MAX_BODY_BYTES`, enforced by actually reading the stream, not trusting `Content-Length`).
 
-> **New Worker environments (staging, a fork, an account migration, etc.):** the Worker rejects every `/api/paper-trade` request with 403 until `PAPER_TRADE_KEY` is set to match the value hardcoded in `docs/index.html` — this is deliberate fail-closed behavior, not a bug (see the write-endpoint hardening above). Nothing else in the deploy pipeline provisions this secret automatically; `wrangler secret put PAPER_TRADE_KEY` (or the dashboard equivalent) has to be run by hand against any new Worker before paper-trade uploads will work there. `wrangler deploy` / the CI `wrangler-action` won't clear an existing secret on redeploy, so this is a one-time step per environment, not per deploy.
+> **New Worker environments (staging, a fork, an account migration, etc.):** the Worker rejects every `/api/paper-trade` request with 403 until `PAPER_TRADE_KEY` is set to match the value hardcoded in `site/index.html` — this is deliberate fail-closed behavior, not a bug (see the write-endpoint hardening above). Nothing else in the deploy pipeline provisions this secret automatically; `wrangler secret put PAPER_TRADE_KEY` (or the dashboard equivalent) has to be run by hand against any new Worker before paper-trade uploads will work there. `wrangler deploy` / the CI `wrangler-action` won't clear an existing secret on redeploy, so this is a one-time step per environment, not per deploy.
 
 ---
 
@@ -342,16 +346,16 @@ Client-side paper trading (average-cost book, multiple named accounts for separa
 - Bucket: `qqq-options-chain-data`
 - Public access via Cloudflare Worker (not direct R2 public URL)
 - CORS must allow `options.moopertonic.net` and `localhost` for browser fetch
-- `worker.js` (the `live-options-view` Worker) also holds a direct R2 binding (`PAPER_TRADES`, see `wrangler.toml`) so it can write idempotent paper-trade fills to `paper-trades/requests/` — same-origin POST from `docs/index.html`, no separate credentials needed in the browser
+- `worker.js` (the `live-options-view` Worker) also holds a direct R2 binding (`PAPER_TRADES`, see `wrangler.toml`) so it can write idempotent paper-trade fills to `paper-trades/requests/` — same-origin POST from `site/index.html`, no separate credentials needed in the browser
 - The Worker requires `LIVE_QUOTE_ORIGIN` (the Railway public origin) and the
   same `LIVE_QUOTE_KEY` as one-time environment configuration. Normal deploys
   retain both values.
 
 ### 8.3 Web hosting
 
-- Static `docs/index.html` served via Cloudflare Worker at `options.moopertonic.net`
-- Auto-deploys on every push to `master`
-- No build step required
+- Static `site/index.html` served via Cloudflare Worker at `options.moopertonic.net`
+- Deploys on matching `master` changes through [.github/workflows/deploy.yml](.github/workflows/deploy.yml), not every push
+- [scripts/stamp-build.mjs](scripts/stamp-build.mjs) stamps the build ID after packaging checks; this is a build step, not a bundler
 
 ### 8.4 MOO-169: permanent daily Tradier collector
 

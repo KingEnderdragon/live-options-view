@@ -1,6 +1,10 @@
 # Options View market MCP (first slice of #118)
 
-Production follow-up status and Linux image evidence: [ROLLOUT.md](ROLLOUT.md).
+Start with the [system map](../ARCHITECTURE.md) for producers and consumers.
+[ROLLOUT.md](ROLLOUT.md) and [PRODUCTION.md](PRODUCTION.md) preserve dated rollout
+evidence, not a current live-service inventory. The current browser helper and calendar
+home is `site/`; external documentation URLs retain their own `/docs/` paths.
+For the accepted active-publication policy, see [the daily-session specification](../notes/specs/OA203_ACTIVE_LOOKUP.md#activation-policy--november-8-2026); older candidate-state statements below do not supersede it.
 
 Seven read-only tools expose existing producer artifacts. Node 22+; no package
 install, provider token, R2 credentials, scanner invocation or trading imports.
@@ -97,7 +101,7 @@ Its Linux image checks pass; live client/grant gates remain pending. See
 | `result_detail` | Retained snapshot JSON row; exact squeeze run's manifest/results/normalized inputs; selected return contract from bounded sweep pages with producer calculation cells/flags. |
 
 The qualified return view's provisional thresholds and evidence rules are in
-[OA203_QUALIFIED_ASK_BID_V1.md](../OA203_QUALIFIED_ASK_BID_V1.md).
+[OA203_QUALIFIED_ASK_BID_V1.md](../notes/specs/OA203_QUALIFIED_ASK_BID_V1.md).
 The qualified view and SPY collector/website are now on `master`; the collector
 deployment succeeded. The draft SPY MCP work is based on `master` and has not
 been merged or deployed. Fixture coverage here exercises both capabilities
@@ -184,10 +188,10 @@ historical VWAP/RVOL, account trading momentum and buy-only Black-Scholes are
 explicitly unsupported. OI lag/zero-versus-missing, approximate VWAP, missing
 Greeks/quote observation times and historical/sampled coverage travel with results.
 
-Source contracts: [inventory](../docs/plans/2026-09-market-reading-inventory.md),
-[ownership](../docs/plans/2026-09-market-reading-ownership.md),
-[squeeze display](../docs/plans/2026-09-scheduled-squeeze-display.md),
+Source contracts: [inventory](../site/plans/2026-09-market-reading-inventory.md),
+[ownership](../site/plans/2026-09-market-reading-ownership.md),
+[squeeze display](../site/plans/2026-09-scheduled-squeeze-display.md),
 [squeeze archive](https://github.com/OwenTanzer/short-squeeze-scanner/blob/main/docs/archive-contract.md),
-[OA-203 returns](../docs/plans/2026-09-options-return-scanner.md).
+[OA-203 returns](../site/plans/2026-09-options-return-scanner.md).
 
 
