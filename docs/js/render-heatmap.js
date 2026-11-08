@@ -14,7 +14,7 @@ function renderHeatmap(data, symbol = 'QQQ') {
   const book = computeBook();   // computed once per render, not per-cell
   // Paper tickets, positions and QQQ's OIranges calibration are QQQ-only:
   // other underlyings render view-only, colored relative to their own
-  // snapshot (see relativeOiRanges in shared.js).
+  // snapshot (see relativeOiRanges in docs/shared/chain.js).
   buildHeatmapRows(document.getElementById('heatmap-body'), data, isQqq ? ranges : relativeOiRanges(data.rows), {
     getPosition: (sym) => isQqq ? (book[sym]?.pos || 0) : 0,
     getQuote: (sym) => liveQuotes.get(sym),

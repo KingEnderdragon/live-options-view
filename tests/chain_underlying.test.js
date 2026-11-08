@@ -224,6 +224,10 @@ const testSpyHealthBadge = async () => {
   // B3 slice 4 (Nov 2026): the panel formatters + order validators moved to
   // docs/shared/format.js — same, after quotes.js, in page order.
   vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'docs', 'shared', 'format.js'), 'utf8'), context, { filename: 'docs/shared/format.js' });
+  // B3 slice 5 (Nov 2026): the chain underlying names moved to
+  // docs/shared/chain.js — same, after format.js, in page order, so
+  // paper-trading.js constructs the real ChainSelection at load.
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'docs', 'shared', 'chain.js'), 'utf8'), context, { filename: 'docs/shared/chain.js' });
   vm.runInContext(moduleSource, context, { filename: 'docs/js/paper-trading.js' });
   const fetchSpyHealth = () => vm.runInContext('fetchSpyHealth()', context);
   await fetchSpyHealth();

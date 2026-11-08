@@ -124,10 +124,13 @@ const context = vm.createContext(sandbox);
 // B3 slice 4 (Nov 2026): the panel formatters + order validators moved to
 // docs/shared/format.js — same, after quotes.js, so normalizePaperOrder is
 // the real one when the trade paths run.
+// B3 slice 5 (Nov 2026): the chain underlying names moved to
+// docs/shared/chain.js — same, after format.js, in page order.
 vm.runInContext(sharedSource, context, { filename: 'docs/shared.js' });
 vm.runInContext(fs.readFileSync(path.join(__dirname, '../docs/shared/heatmap.js'), 'utf8'), context, { filename: 'docs/shared/heatmap.js' });
 vm.runInContext(fs.readFileSync(path.join(__dirname, '../docs/shared/quotes.js'), 'utf8'), context, { filename: 'docs/shared/quotes.js' });
 vm.runInContext(fs.readFileSync(path.join(__dirname, '../docs/shared/format.js'), 'utf8'), context, { filename: 'docs/shared/format.js' });
+vm.runInContext(fs.readFileSync(path.join(__dirname, '../docs/shared/chain.js'), 'utf8'), context, { filename: 'docs/shared/chain.js' });
 vm.runInContext(moduleSource, context, { filename: 'docs/js/paper-trading.js' });
 const get = name => vm.runInContext(name, context);
 const set = (name, value) => vm.runInContext(`${name} = (${JSON.stringify(value)})`, context);
