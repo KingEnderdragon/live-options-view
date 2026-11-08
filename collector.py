@@ -1,45 +1,11 @@
 #!/usr/bin/env python3
-"""
-collector.py -- QQQ (and SPY) live chain snapshot service.
+"""collector.py -- thin entry shim for the collector service.
 
-Authenticates with tastytrade, subscribes to the QQQ and SPY 0DTE option chains
-via one DXLink websocket, and uploads snapshots to R2 every minute. Each
-underlying keeps its own VWAP/RVOL/momentum state and archive (#121); QQQ keeps
-every pre-SPY key unchanged.
-
-The nearest end-of-week expiration is subscribed through the same feed and
-archived at hourly regular-session slots for historical analysis.  It does not
-replace or alter the tactical 0DTE stream.
-
-R2 output:
-  intraday/YYYYMMDD/snapshot_HHMMSSffffff.csv  -- archived snapshots (microsecond key)
-  intraday/latest.json                   -- live QQQ feed for the web viewer
-  intraday/spy/latest.json               -- live SPY feed (same contract, "symbol": "SPY")
-  intraday/spy/YYYYMMDD/...              -- SPY archive, mirroring the QQQ intraday/YYYYMMDD/ layout
-  intraday/prices.json                   -- macro price strip (every 10s; yfinance fill cached 60s)
-  intraday/health.json                   -- lifecycle telemetry (every 15s)
-  raw/weekly/YYYYMMDD/qqq_chain_*.csv    -- nearest-weekly snapshots (~hourly RTH)
-  manifest.json                          -- existing pipeline manifest + weekly keys
-  macro/eia_steo.json                    -- EIA STEO crude calibration + OVX regime
-                                             (every EIA_STEO_POLL_SECS, optional feature --
-                                             see crude_calibration.py; skipped if EIA_API_KEY unset)
-  baselines/eia_steo_vintages.json       -- rolling log of past STEO releases this
-                                             collector has observed, for vintage-over-vintage diffs
-
-Environment variables (set in Railway dashboard):
-  TASTY_OAUTH_CLIENT_SECRET  tastytrade personal OAuth client secret
-  TASTY_OAUTH_REFRESH_TOKEN tastytrade personal OAuth refresh token
-  TASTY_OAUTH_SCOPES         must be exactly "read"
-  R2_ACCOUNT_ID          Cloudflare account ID
-  R2_ACCESS_KEY_ID       R2 access key
-  R2_SECRET_ACCESS_KEY   R2 secret key
-  R2_BUCKET_NAME         bucket name (default: pub-4d5c916b8cb74ffb8c0abd7dfadb02cf)
-  LIVE_QUOTE_KEY         shared key for the Worker's read-only quote proxy
-  PORT                   Railway HTTP port (default: 8080 locally)
-  EIA_API_KEY            optional -- enables the macro/eia_steo.json feed (see
-                          crude_calibration.py); free signup at eia.gov/opendata.
-                          Feature is silently skipped (logged once) if unset.
-  COLLECT_SPY            optional -- "0" disables SPY chain collection (default on)
+The service now lives in the collector/ package; `import collector` resolves
+to collector/__init__.py, which re-exports every name this file used to
+define. This file stays only so the Railway start command
+`python collector.py` keeps working, and so the not-yet-moved subsystems
+still have a home during the split (see collector/__init__.py's bridge).
 """
 
 import io
@@ -65,162 +31,10 @@ import requests
 import websocket
 import yfinance as yf
 
-import crude_calibration as cc
-import market_signals as ms
-
-# Force UTF-8 stdout to avoid UnicodeEncodeError on non-UTF-8 terminals/Railway
-if hasattr(sys.stdout, "reconfigure"):
-    try:
-        sys.stdout.reconfigure(encoding="utf-8")
-    except Exception:
-        pass
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)-8s %(message)s",
-    datefmt="%H:%M:%S",
-    stream=sys.stdout,
-)
-log = logging.getLogger("collector")
-
-# -- config -------------------------------------------------------------------
-
-ET              = pytz.timezone("America/New_York")
-TASTY_BASE      = "https://api.tastyworks.com"
-TICKER          = "QQQ"
-# Underlyings with their own 0DTE chain, snapshot, indicators and archive
-# (#121). Only TICKER (QQQ) gets the nearest-weekly archive; SPY is 0DTE only,
-# to bound subscriptions and writes.
-CHAIN_UNDERLYINGS = ("QQQ", "SPY")
-COLLECT_SPY     = os.environ.get("COLLECT_SPY", "1") != "0"
-STRIKE_WINDOW   = 33
-SPY_MAX_STRIKES = 67
-SNAPSHOT_SECS   = 60
-WEEKLY_SNAPSHOT_SECS = 60 * 60
-PRICES_SECS     = 10
-HEALTH_SECS     = 15
-PREMARKET_HOUR  = 6
-STOP_HOUR       = 16
-STOP_MIN        = 15
-STALE_FEED_SECS = 120   # warn if no feed event for this many seconds
-LIVE_QUOTE_PORT = int(os.environ.get("PORT", "8080"))
-MAX_LIVE_QUOTE_SYMBOLS = 100
-R2_BUCKET       = os.environ.get("R2_BUCKET_NAME", "pub-4d5c916b8cb74ffb8c0abd7dfadb02cf")
-WEEKLY_R2_PREFIX = "raw/weekly"
-
-# Keep the weekly archive byte-for-byte compatible with qqq-data-pipeline's
-# chain CSV field set and order.  The live 0DTE CSV intentionally retains its
-# additional VolDelta and macro columns.
-PIPELINE_CHAIN_COLUMNS = [
-    "TradeDate", "Expiration", "Strike", "Type", "OptionSymbol", "DTE",
-    "OpenInterest", "Volume", "Bid", "Mid", "Ask", "Last", "IV", "Delta",
-    "Gamma", "Theta", "Vega", "UnderlyingPrice",
-]
-
-# EIA STEO crude calibration feed (see crude_calibration.py). Optional --
-# skipped entirely if EIA_API_KEY isn't set, same soft-dependency shape as
-# the KOSPI/OVX DXLink-symbol guesses degrading to yfinance rather than
-# failing the whole collector. Runs independent of the market session (unlike
-# prices_loop/health_loop, which only run inside _run_session) since STEO has
-# nothing to do with QQQ market hours -- started once from main().
-EIA_API_KEY          = os.environ.get("EIA_API_KEY")
-EIA_STEO_URL          = "https://api.eia.gov/v2/steo/data/"
-EIA_STEO_POLL_SECS    = 6 * 3600   # STEO itself updates ~monthly; polling a few times a
-                                    # day just catches a fresh release promptly without a cron
-EIA_STEO_KEY          = "macro/eia_steo.json"
-EIA_STEO_LOG_KEY      = "baselines/eia_steo_vintages.json"
-EIA_STEO_MAX_VINTAGES = 6
-# EIA v2's `length` caps *total rows returned*, not periods-per-series --
-# with 3 series requested together (facets[seriesId][] has 3 values), the
-# old length=36 capped the combined response at 36 rows total (effectively
-# ~12 periods across 3 series, not 36 periods per series as the docstring
-# claimed), silently truncating history. 5000 is comfortably above
-# 3 series x 36 periods = 108 rows with margin for future series/window
-# growth, and is at/near EIA v2's own per-request row cap. See
-# fetch_eia_steo_rows's truncation check for the actual safety net --
-# this constant alone doesn't guarantee nothing is ever dropped.
-EIA_STEO_PAGE_LENGTH = 5000
-
-# VWAP/RVOL (see market_signals.py and docs/plans/2026-07-vwap-rvol.md).
-# Bucket/lookback/min-days are not derived from anything about QQQ itself --
-# reasonable defaults chosen to balance per-bucket sample density against how
-# fast RVOL exits "insufficient_history" after this feature first deploys.
-RVOL_BUCKET_MINUTES     = 5
-RVOL_LOOKBACK_DAYS      = 20
-RVOL_MIN_DAYS_REQUIRED  = 5
-RVOL_BASELINE_KEY       = "baselines/qqq_rvol_buckets.json"
-
-# Time-series momentum (display/log only, see market_signals.py's module
-# docstring and docs/plans/2026-07-momentum-indicator.md) -- same shape as
-# momentum_qqq's own default params (crassus/crassus/strategies/momentum_qqq.py),
-# but this is a reference signal for the UI/log, not a change to what any
-# account actually trades on.
-MOMENTUM_LOOKBACK_MINUTES          = 60.0
-MOMENTUM_MAX_ANCHOR_OVERSHOOT_MIN  = 10.0
-MOMENTUM_NEUTRAL_BAND_PCT          = 0.05  # display-only up/down/flat threshold
-MOMENTUM_RETAIN_MINUTES            = 24 * 60.0  # generous, decoupled from the configured lookback
-
-PRICE_TICKERS: dict[str, str] = {
-    "QQQ":     "QQQ",
-    "USO":     "USO",
-    "VIX":     "$VIX.X",
-    # Cboe Crude Oil ETF Volatility Index. Same unverified-guess situation as
-    # KOSPI below: tastytrade/dxFeed may or may not carry this index symbol
-    # at all. If the guess is wrong this ticker just never gets DXLink data
-    # and always falls through to the yfinance path (a real, working ^OVX
-    # symbol) -- same graceful degradation every ticker here already has
-    # pre-market.
-    "OVX":     "$OVX.X",
-    "SMH":     "SMH",
-    "IGV":     "IGV",
-    "10Y":     "$TNX.X",      # CBOE 10-year Treasury yield index (value = yield × 10)
-    "JPY/USD": "/6J:XCME",    # CME yen futures, USD-per-JPY; inverted for display
-    # KOSPI Composite Index — tastytrade/dxFeed is a US-brokerage feed and may
-    # not carry this at all; unverified guess at the dxFeed index-symbol
-    # convention (cf. $VIX.X/$TNX.X above). If it's wrong this ticker simply
-    # never gets DXLink data and always falls through to the yfinance path
-    # below, which is a real, working symbol — same graceful-degradation
-    # behavior every ticker already has pre-market.
-    "KOSPI":   "$KOSPI.X",
-    "BTC/USD": "BTC/USD:CXERX",
-    "META":    "META",
-    "GOOGL":   "GOOGL",
-    "AMZN":    "AMZN",
-    "TSLA":    "TSLA",
-    "MU":      "MU",
-    "SPCX":    "SPCX",
-    "AAPL":    "AAPL",
-}
-
-TICKER_CLASSES: dict[str, str] = {
-    "QQQ": "equity", "SPY": "equity", "USO": "equity", "SMH": "equity", "IGV": "equity",
-    "META": "equity", "GOOGL": "equity", "AMZN": "equity", "TSLA": "equity",
-    "MU": "equity", "SPCX": "equity", "AAPL": "equity",
-    "VIX": "index", "OVX": "index", "10Y": "yield", "JPY/USD": "futures",
-    "KOSPI": "international", "BTC/USD": "crypto",
-}
-
-# Yahoo Finance symbols for the same tickers (fallback when DXLink has no data)
-YF_SYMBOL_MAP: dict[str, str] = {
-    "QQQ":     "QQQ",
-    "USO":     "USO",
-    "VIX":     "^VIX",       # pre-market: None expected (CBOE only calculates at open)
-    "OVX":     "^OVX",       # pre-market: same CBOE-open-only caveat as VIX above
-    "SMH":     "SMH",
-    "IGV":     "IGV",
-    "10Y":     "^TNX",       # yields the rate directly (e.g. 4.485), NOT × 10
-    "JPY/USD": "JPYUSD=X",
-    "KOSPI":   "^KS11",      # KOSPI Composite Index
-    "BTC/USD": "BTC-USD",
-    "META":    "META",
-    "GOOGL":   "GOOGL",
-    "AMZN":    "AMZN",
-    "TSLA":    "TSLA",
-    "MU":      "MU",
-    "SPCX":    "SPCX",
-    "AAPL":    "AAPL",
-}
-
+from collector import crude_calibration as cc
+from collector import market_signals as ms
+from collector.config import *  # noqa: F401,F403 -- constants + log
+import collector as _entry  # entry indirection for test patch points
 
 # -- upload counters ----------------------------------------------------------
 
@@ -609,7 +423,7 @@ def _contract_symbols(contract, strike: float, exp_date: str, side: str,
 def nearest_weekly_expiration(as_of: date, valid_days: Optional[set[date]] = None) -> date:
     """Return the EoW expiration using qqq-data-pipeline's holiday behavior."""
     nominal_friday = as_of + timedelta(days=(4 - as_of.weekday()) % 7)
-    valid = _load_calendar() if valid_days is None else valid_days
+    valid = _entry._load_calendar() if valid_days is None else valid_days
     if not valid:
         # The chain lookup below still verifies that this expiration actually
         # exists. Calendar failure must not disturb the existing 0DTE path.
@@ -1271,7 +1085,7 @@ class _CalendarLookupError(Exception):
 def classify_tier(today: date) -> str:
     import calendar as _cal
 
-    valid = _load_calendar()
+    valid = _entry._load_calendar()
     if not valid:
         return DEFAULT_TIER
 
@@ -1501,7 +1315,7 @@ def push_prices(s3, feed: DXLinkFeed, counters: Counters,
     # yfinance fallback for any tickers DXLink didn't populate
     yf_missing = [lbl for lbl, d in prices.items() if d["price"] is None]
     if yf_missing:
-        yf_data = fetch_yf_prices_bounded()
+        yf_data = _entry.fetch_yf_prices_bounded()
         filled = []
         for lbl in yf_missing:
             yf_price = yf_data.get(lbl)
@@ -1714,7 +1528,7 @@ def save_steo_vintage_log(s3, entries: list[dict]) -> None:
 
 
 def push_eia_steo(s3) -> None:
-    rows = fetch_eia_steo_rows(EIA_API_KEY)
+    rows = _entry.fetch_eia_steo_rows(EIA_API_KEY)
     # EIA's v2 API doesn't hand back "which monthly release this row came
     # from" directly, so the calendar month we happen to be polling in is
     # used as the vintage *label* -- but whether to mint a new vintage entry
@@ -1730,7 +1544,7 @@ def push_eia_steo(s3) -> None:
     # Flagged in review. Content-equality against the last logged entry is
     # the real signal for "did a new release land"; the calendar month is
     # only the label attached once that's true.
-    release_period = datetime.now(timezone.utc).strftime("%Y-%m")
+    release_period = _entry.datetime.now(timezone.utc).strftime("%Y-%m")
     current = cc.parse_steo_rows(rows, release_period=release_period)
     current_points_payload = [
         {"period": p.period, "brent": p.brent, "wti": p.wti, "balance": p.balance}
@@ -1774,7 +1588,7 @@ def push_eia_steo(s3) -> None:
     ovx_value = _last_prices.get("OVX", {}).get("price")
 
     payload = json.dumps({
-        "timestamp":       datetime.now(timezone.utc).isoformat(),
+        "timestamp":       _entry.datetime.now(timezone.utc).isoformat(),
         "current_release": release_period,
         "prior_release":   prior_vintage.release_period if prior_vintage else None,
         "points":          [
@@ -2578,7 +2392,7 @@ def _weekly_session_bounds(day: date) -> Optional[tuple[datetime, datetime]]:
 def _weekly_snapshot_slot(ts_et: datetime) -> Optional[datetime]:
     """Return the hourly RTH slot containing ``ts_et``, or None outside RTH."""
     ts_et = ts_et.astimezone(ET)
-    bounds = _weekly_session_bounds(ts_et.date())
+    bounds = _entry._weekly_session_bounds(ts_et.date())
     if bounds is None:
         return None
     session_open, session_close = bounds
@@ -2776,11 +2590,6 @@ def _exchange_session_dates(start: date, end: date) -> set[date]:
     except Exception as exc:
         raise ExchangeCalendarUnavailable(type(exc).__name__) from exc
 
-def past_stop() -> bool:
-    et = datetime.now(ET)
-    return (et.hour, et.minute) >= (STOP_HOUR, STOP_MIN)
-
-
 def weekly_snapshot_loop(s3, feed: DXLinkFeed, strikes: list[dict],
                          exp_date: str, today: date) -> None:
     """Collect one weekly snapshot per hourly regular-session slot."""
@@ -2799,35 +2608,16 @@ def weekly_snapshot_loop(s3, feed: DXLinkFeed, strikes: list[dict],
         time.sleep(SNAPSHOT_SECS)
 
 
-def _session_bounds(et: datetime) -> tuple[datetime, datetime]:
-    """Return the session start/stop bounds for the ET date of ``et``."""
-    session_date = et.date()
-    start = ET.localize(datetime(
-        session_date.year, session_date.month, session_date.day,
-        PREMARKET_HOUR, 0, 0,
-    ))
-    stop = ET.localize(datetime(
-        session_date.year, session_date.month, session_date.day,
-        STOP_HOUR, STOP_MIN, 0,
-    ))
-    return start, stop
-
-
-def _inside_session_window(et: datetime) -> bool:
-    start, stop = _session_bounds(et)
-    return start <= et < stop
-
-
 def _session_is_eligible(et: datetime, blocked_session_date: date | None = None) -> bool:
     """Return True only when auth is allowed for this exchange-session date."""
     if blocked_session_date == et.date() or not _inside_session_window(et):
         return False
-    return et.date() in _exchange_session_dates(et.date(), et.date())
+    return et.date() in _entry._exchange_session_dates(et.date(), et.date())
 
 
 def _next_session_start(et: datetime, blocked_session_date: date | None = None) -> datetime:
     horizon = et.date() + timedelta(days=14)
-    for session_date in sorted(_exchange_session_dates(et.date(), horizon)):
+    for session_date in sorted(_entry._exchange_session_dates(et.date(), horizon)):
         if session_date == blocked_session_date:
             continue
         candidate = ET.localize(datetime(
@@ -3140,20 +2930,20 @@ def main():
         return
 
     quote_registry = LiveQuoteRegistry()
-    start_live_quote_server(quote_registry)
+    _entry.start_live_quote_server(quote_registry)
 
     # Independent of the QQQ market session (unlike prices_loop/health_loop,
     # started fresh inside every _run_session): EIA STEO has nothing to do
     # with market hours, so this runs continuously off its own s3 client for
     # the life of the process. No-ops immediately if EIA_API_KEY is unset.
-    steo_thread = threading.Thread(target=eia_steo_loop, args=(make_s3(),), daemon=True)
+    steo_thread = threading.Thread(target=eia_steo_loop, args=(_entry.make_s3(),), daemon=True)
     steo_thread.start()
 
     blocked_session_date: date | None = None
     while True:
-        wait_for_premarket(blocked_session_date)
+        _entry.wait_for_premarket(blocked_session_date)
         try:
-            _run_session(token_manager, quote_registry)
+            _entry._run_session(token_manager, quote_registry)
         except TastyAuthError as exc:
             quote_registry.clear_session()
             blocked_session_date = datetime.now(ET).date()

@@ -20,7 +20,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import collector  # noqa: E402
-import market_signals as ms  # noqa: E402
+from collector import market_signals as ms  # noqa: E402
 
 
 class FakeBody:
