@@ -418,3 +418,60 @@ const bot = (alias, username, cash, positions = [], extra = {}) =>
 }
 
 console.log('PASS automated tab equity, leader, escaping, and empty states');
+
+// Full, fixed-zone trade dates; these instants are today/yesterday relative to
+// the synthetic review date 2026-11-06. No wall clock or live accounts needed.
+{
+  quotes.clear();
+  panel.botsError = null;
+  const cases = [
+    ['today', '2026-11-06T14:30:00Z', 'Nov 6, 2026, 9:30:00 AM EST (New York)'],
+    ['yesterday', '2026-11-05T21:15:09Z', 'Nov 5, 2026, 4:15:09 PM EST (New York)'],
+    ['older year', '2025-08-15T16:49:00Z', 'Aug 15, 2025, 12:49:00 PM EDT (New York)'],
+    ['NY date rollover', '2026-01-01T02:00:00Z', 'Dec 31, 2025, 9:00:00 PM EST (New York)'],
+    ['DST first 1:30', '2026-11-01T01:30:00-04:00', 'Nov 1, 2026, 1:30:00 AM EDT (New York)'],
+    ['DST second 1:30', '2026-11-01T01:30:00-05:00', 'Nov 1, 2026, 1:30:00 AM EST (New York)'],
+    ['equivalent Z', '2026-07-01T16:49:00Z', 'Jul 1, 2026, 12:49:00 PM EDT (New York)'],
+    ['equivalent offset', '2026-07-01T12:49:00-04:00', 'Jul 1, 2026, 12:49:00 PM EDT (New York)'],
+    ['null', null, 'Not recorded'], ['undefined', undefined, 'Not recorded'],
+    ['empty', '', 'Not recorded'], ['whitespace', '  ', 'Not recorded'],
+    ['invalid', 'not-a-date', 'Invalid timestamp'],
+    ['hostile', '<img src=x onerror=alert(1)>', 'Invalid timestamp'],
+    ['nonfinite', Infinity, 'Invalid timestamp'], ['wrong type', true, 'Invalid timestamp'],
+    ['numeric epoch', 0, 'Dec 31, 1969, 7:00:00 PM EST (New York)'],
+  ];
+  for (const [name, value, expected] of cases) {
+    const record = bot('Fixture', 'fixture', 12000, [], {
+      last_trade_ts: value, trade_count: 3, account_closed: true,
+    });
+    const snapshot = structuredClone(record);
+    Object.freeze(record.positions); Object.freeze(record);
+    panel.botsData = { as_of: '2026-11-06T18:00:00Z', bots: [record] };
+    panel.renderBots();
+    const output = els['bots-grid'].innerHTML;
+    assert.ok(output.includes(`Last trade: ${expected}</span>`), name + ': date/zone/state');
+    assert.equal(output.includes('<img'), false, name + ': no injected markup');
+    assert.equal(output.includes('Invalid Date'), false, name + ': no raw parse error');
+    assert.match(output, /Closed — trading stopped; history retained/);
+    assert.match(output, /Cash \$12000\.00 · 3 trades/);
+    assert.match(output, /class="bot-equity">\$12000\.00/);
+    assert.deepEqual(record, snapshot, name + ': input history must not change');
+    assert.deepEqual(panel.botEquity(record), {
+      complete: true, unmarked: 0, openValue: 0, equity: 12000,
+    });
+  }
+  // Changing only trade dates cannot change ranking, equity, PnL or rollups.
+  const records = [bot('Lower', 'low', 11000, [], {strategy_id:'A'}),
+    bot('Higher', 'high', 12000, [], {strategy_id:'B'}),
+    bot('Unmarked', 'pending', 9000, [pos('MISSING', 1, 3)], {strategy_id:'A'})];
+  const financialView = () => els['bots-grid'].innerHTML.replace(/<span class="bot-last-trade">[^<]*<\/span>/g, '');
+  panel.botsData = { bots: records }; panel.renderBots();
+  const before = financialView(), rollup = els['bots-by-strategy'].innerHTML;
+  panel.botsData = { bots: records.map((r, i) => ({...r, last_trade_ts: cases[i][1]})) };
+  const snapshot = structuredClone(panel.botsData);
+  panel.renderBots();
+  assert.equal(financialView(), before);
+  assert.equal(els['bots-by-strategy'].innerHTML, rollup);
+  assert.deepEqual(panel.botsData, snapshot);
+}
+console.log('PASS full last-trade dates, fixed New York zone, DST, missing/invalid, escaping and unchanged history');

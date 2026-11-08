@@ -264,6 +264,7 @@
     font-size: 0.76rem;
     color: var(--dim);
   }
+  #steo-panel.hidden { display: none; }
   #steo-panel .steo-label {
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -654,6 +655,7 @@
   .bot-pnl.down { color: #ee3300; }
   .bot-pnl.flat { color: var(--dim); }
   .bot-meta { font-size: 0.72rem; color: var(--dim); margin-top: 4px; }
+  .bot-last-trade { font-size: 0.8rem; line-height: 1.5; color: var(--fg); }
   .bot-card table { width: 100%; min-width: 0; margin-top: 8px; font-size: 0.72rem; }
   .bot-card th { color: var(--dim); font-weight: 500; text-align: right; }
   .bot-card th:first-child, .bot-card td:first-child { text-align: left; }
@@ -694,7 +696,7 @@
   #hist-no-data.hidden { display: none; }
   #hist-body { display: flex; align-items: flex-start; gap: 1rem; flex-wrap: wrap; }
   #hist-heatmap-wrap { overflow-x: auto; margin-bottom: 1rem; }
-  #hist-heatmap-wrap.hidden { display: none; }
+  #hist-heatmap-wrap.hidden, #hist-sidebar.hidden { display: none; }
 
   /* ── historical sidebar widgets ──────────────────────────────────────── */
   #hist-sidebar {
@@ -857,7 +859,8 @@
 <!-- EIA STEO crude calibration + OVX regime, see collector.py's macro/eia_steo.json
      (optional feed -- gated on EIA_API_KEY; panel just never appears if it's absent). -->
 <div id="steo-panel" class="hidden">
-  <span><span class="steo-label">STEO</span><span class="steo-value" id="steo-release">—</span></span>
+  <span><span class="steo-label">EIA STEO</span><span class="steo-value" id="steo-release">—</span></span>
+  <span><span class="steo-label">Forecast</span><span class="steo-value" id="steo-period">—</span></span>
   <span><span class="steo-label">Brent fcst</span><span class="steo-value" id="steo-brent">—</span><span class="steo-delta" id="steo-brent-delta"></span></span>
   <span><span class="steo-label">WTI fcst</span><span class="steo-value" id="steo-wti">—</span><span class="steo-delta" id="steo-wti-delta"></span></span>
   <span><span class="steo-label">World balance</span><span class="steo-value" id="steo-balance">—</span><span class="steo-delta" id="steo-balance-delta"></span></span>
@@ -2068,18 +2071,25 @@ async function fetchPrices() {
 }
 
 // EIA STEO crude calibration + OVX regime. Optional feed -- collector.py
-// only ever writes macro/eia_steo.json if EIA_API_KEY is configured, so a
-// 404 here just means the feature isn't enabled; the panel stays hidden
-// rather than showing an error, same as #steo-panel's default state.
+// only writes macro/eia_steo.json when EIA_API_KEY is configured. A 404
+// means the optional publication is absent, not proof of why it is absent;
+// keep the panel hidden without treating absence as a transport failure.
 // fmtSteoDelta/findRevision live in shared.js (pure, tested directly there).
 async function fetchSteoCalibration() {
   const panel = document.getElementById('steo-panel');
   try {
-    const resp = await fetch(`${R2}/macro/eia_steo.json?_=${Date.now()}`);
-    if (!resp.ok) { panel.classList.add('hidden'); return; }
+    const resp = await fetch(`${BROWSER_DATA}/macro/eia_steo.json?_=${Date.now()}`);
+    if (resp.status === 404) { panel.classList.add('hidden'); return; }
+    if (!resp.ok) throw new Error(`STEO publication returned HTTP ${resp.status}`);
     const data = await resp.json();
-    const points = data.points || [];
+    const points = data?.points;
+    if (!Array.isArray(points)) throw new Error('Invalid STEO points');
     if (!points.length) { panel.classList.add('hidden'); return; }
+    const isPeriod = value => typeof value === 'string' && /^\d{4}-(0[1-9]|1[0-2])$/.test(value);
+    if (!isPeriod(data.current_release) || (data.prior_release != null && !isPeriod(data.prior_release)) ||
+        points.some(p => !p || !isPeriod(p.period))) {
+      throw new Error('Invalid STEO release or forecast period');
+    }
 
     // Nearest forecast period still ahead of (or equal to) the current
     // calendar month -- the most relevant single number for "what does the
@@ -2088,6 +2098,7 @@ async function fetchSteoCalibration() {
     const nowPeriod = new Date().toISOString().slice(0, 7);
     const nearest = points.find(p => p.period >= nowPeriod) || points[points.length - 1];
     const revision = findRevision(data.revisions, nearest.period);
+    document.getElementById('steo-period').textContent = nearest.period;
 
     document.getElementById('steo-release').textContent =
       data.current_release + (data.prior_release ? ` (vs ${data.prior_release})` : '');
@@ -2432,6 +2443,20 @@ function botsStatusLine(suffix) {
   return botsError ? `roster unavailable — ${botsError} · showing last known` : suffix;
 }
 
+// Display only: retain the original trade timestamp and financial history.
+const botTradeDateFormat = new Intl.DateTimeFormat('en-US', {
+  timeZone: 'America/New_York', year: 'numeric', month: 'short', day: 'numeric',
+  hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true,
+  timeZoneName: 'short',
+});
+function formatBotLastTrade(value) {
+  if (value == null || (typeof value === 'string' && !value.trim())) return 'Not recorded';
+  if (typeof value !== 'string' && typeof value !== 'number') return 'Invalid timestamp';
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return 'Invalid timestamp';
+  return `${botTradeDateFormat.format(date)} (New York)`;
+}
+
 function renderBots() {
   if (!botsData) {
     if (botsError) {
@@ -2497,7 +2522,7 @@ function renderBots() {
         : '<span class="bot-unmarked">awaiting marks</span>'}</div>
       <div class="bot-meta">
         Cash $${bot.balance_cash.toFixed(2)} · ${bot.trade_count} trade${bot.trade_count === 1 ? '' : 's'}
-        ${bot.last_trade_ts ? ` · last ${new Date(bot.last_trade_ts).toLocaleTimeString()}` : ''}
+        <br><span class="bot-last-trade">Last trade: ${escapeHtml(formatBotLastTrade(bot.last_trade_ts))}</span>
         ${unmarked ? `<br><span class="bot-unmarked">${unmarked} position${unmarked === 1 ? '' : 's'} without a mark — equity and PnL withheld, and this account is unranked</span>` : ''}
       </div>
       ${bot.positions.length
@@ -2516,6 +2541,7 @@ function renderBots() {
 // chain archive (raw/qqq_chain_{date}.csv, or raw/opex/qqq_chain_{date}.csv
 // for pre-pipeline seeded dates) instead of intraday/latest.json.
 let histManifestDates = [];
+let histRequest = 0;
 const histCsvCache = {};   // date 'YYYY-MM-DD' -> normalized rows
 
 function setHistStatus(text) {
@@ -2547,23 +2573,50 @@ function normalizeHistRow(r) {
   };
 }
 
+function validArchiveDate(value) {
+  if (typeof value !== 'string' || !/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(value)) return false;
+  const date = new Date(`${value}T00:00:00Z`);
+  return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value;
+}
+
+function resetHistoryView(message) {
+  document.getElementById('hist-heatmap-wrap').classList.add('hidden');
+  document.getElementById('hist-sidebar').classList.add('hidden');
+  document.getElementById('hist-no-data').classList.remove('hidden');
+  document.getElementById('hist-no-data').textContent = message;
+  document.getElementById('hist-price').textContent = '—';
+  document.getElementById('hist-tier-badge').style.display = 'none';
+  hideSimilarPopup();
+}
+
 async function loadHistoryManifest() {
+  ++histRequest;
+  histManifestDates = [];
+  const sel = document.getElementById('hist-date');
+  sel.innerHTML = '';
+  sel.disabled = true;
+  resetHistoryView('Loading archive index…');
   setHistStatus('Loading archive index…');
   try {
-    const resp = await fetch(`${R2}/manifest.json?_=${Date.now()}`);
+    const resp = await fetch(`${BROWSER_DATA}/manifest.json?_=${Date.now()}`);
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const m = await resp.json();
-    histManifestDates = (m.dates || []).slice().sort();
+    if (!m || !Array.isArray(m.dates) || !m.dates.every(validArchiveDate)) {
+      throw new Error('Invalid archive date index');
+    }
+    histManifestDates = [...new Set(m.dates)].sort();
     if (!histManifestDates.length) {
       setHistStatus('Archive is empty.');
+      resetHistoryView('No archived dates are available.');
       return;
     }
-    const sel = document.getElementById('hist-date');
+    sel.disabled = false;
     sel.innerHTML = histManifestDates.map(d => `<option value="${d}">${d}</option>`).join('');
     const latest = histManifestDates[histManifestDates.length - 1];
     sel.value = latest;
     await loadHistoryDate(latest);
   } catch (e) {
+    historyLoaded = false; // Reopening Historical retries a failed index.
     setHistStatus(`Failed to load archive index: ${e.message}`);
     document.getElementById('hist-no-data').textContent = 'Could not load historical archive.';
   }
@@ -2573,12 +2626,25 @@ async function loadHistoryManifest() {
 // Shared by the date-select flow and the sidebar widgets (intraday/daily/similarity),
 // which need other dates' chains besides the one currently on screen.
 async function fetchChainCsv(dateStr) {
+  if (!validArchiveDate(dateStr)) throw new Error('Invalid archive date');
   if (histCsvCache[dateStr]) return histCsvCache[dateStr];
   const key = dateStr.replace(/-/g, '');
-  let resp = await fetch(`${R2}/raw/qqq_chain_${key}.csv?_=${Date.now()}`);
-  if (!resp.ok) resp = await fetch(`${R2}/raw/opex/qqq_chain_${key}.csv?_=${Date.now()}`);
+  let resp = await fetch(`${BROWSER_DATA}/raw/qqq_chain_${key}.csv?_=${Date.now()}`);
+  if (resp.status === 404) resp = await fetch(`${BROWSER_DATA}/raw/opex/qqq_chain_${key}.csv?_=${Date.now()}`);
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-  const rows = parseCsv(await resp.text()).map(normalizeHistRow);
+  const raw = parseCsv(await resp.text());
+  // Name the first failing field so the panel says why a dated archive is unusable
+  // (e.g. a file with blank OpenInterest throughout must not render as zero OI).
+  const badField = r => !validArchiveDate(r.Expiration) ? 'Expiration'
+    : !['call', 'put'].includes(r.Type) ? 'Type'
+    : ['Strike', 'UnderlyingPrice', 'OpenInterest'].find(c => r[c] === '' || !Number.isFinite(+r[c])) ||
+      (+r.Strike <= 0 ? 'Strike' : +r.UnderlyingPrice <= 0 ? 'UnderlyingPrice' : +r.OpenInterest < 0 ? 'OpenInterest' : null);
+  const bad = raw.filter(badField);
+  if (bad.length) {
+    throw new Error(`Malformed chain archive: ${badField(bad[0])} invalid in ${bad.length} of ${raw.length} rows`);
+  }
+  if (!raw.length) throw new Error('Empty chain archive');
+  const rows = raw.map(normalizeHistRow);
   histCsvCache[dateStr] = rows;
   return rows;
 }
@@ -2591,11 +2657,12 @@ async function fetchChainCsv(dateStr) {
 // here — extending to other timeframes is a deliberate future step, not an
 // oversight.
 async function loadHistoryDate(dateStr) {
+  const request = ++histRequest;
   setHistStatus(`Loading ${dateStr}…`);
-  document.getElementById('hist-heatmap-wrap').classList.add('hidden');
-  document.getElementById('hist-no-data').classList.remove('hidden');
+  resetHistoryView(`Loading ${dateStr}…`);
   try {
     const rows = await fetchChainCsv(dateStr);
+    if (request !== histRequest) return;
     const sub = rows.filter(r => r.Expiration === dateStr);
     if (!sub.length) {
       setHistStatus(`No 0DTE chain found for ${dateStr}.`);
@@ -2605,10 +2672,18 @@ async function loadHistoryDate(dateStr) {
     const spot = sub[0].UnderlyingPrice || null;
     const tier = classifyTierSimple(dateStr);
     const ok = renderHistoryHeatmap({ rows: sub, underlying_price: spot, tier, expiration: dateStr, snapshot_time: dateStr });
-    if (ok) renderHistWidgets(sub, spot, tier, dateStr);
+    if (ok) {
+      document.getElementById('hist-sidebar').classList.remove('hidden');
+      renderHistWidgets(sub, spot, tier, dateStr);
+    }
   } catch (e) {
+    if (request !== histRequest) return;
     setHistStatus(`Error loading ${dateStr}: ${e.message}`);
-    document.getElementById('hist-no-data').textContent = `No archived chain for ${dateStr}.`;
+    document.getElementById('hist-no-data').textContent = e.message === 'HTTP 404'
+      ? `No archived chain for ${dateStr}.`
+      : /^(Malformed|Empty) chain archive/.test(e.message)
+        ? `The archived chain for ${dateStr} is unusable and is not shown.`
+        : `Could not load the archived chain for ${dateStr}.`;
   }
 }
 
@@ -2642,11 +2717,16 @@ function renderHistoryHeatmap(data) {
 const intradayCache = {};   // dateStr -> [{t,o,h,l,c}] 5-min bars
 
 async function loadIntradayPrices(dateStr) {
+  if (!validArchiveDate(dateStr)) throw new Error('Invalid archive date');
   if (intradayCache[dateStr]) return intradayCache[dateStr];
   const key = dateStr.replace(/-/g, '');
-  const resp = await fetch(`${R2}/prices/qqq_intraday_${key}.csv?_=${Date.now()}`);
+  const resp = await fetch(`${BROWSER_DATA}/prices/qqq_intraday_${key}.csv?_=${Date.now()}`);
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
   const rows = parseCsv(await resp.text());
+  if (!rows.length || rows.some(r => !r.datetime ||
+      ![r.open, r.high, r.low, r.close].every(v => v !== '' && Number.isFinite(+v)))) {
+    throw new Error('Malformed or empty intraday archive');
+  }
   const bars = rows
     .map(r => ({ t: r.datetime, o: +r.open, h: +r.high, l: +r.low, c: +r.close }))
     .filter(b => [b.o, b.h, b.l, b.c].every(Number.isFinite));
@@ -3004,21 +3084,30 @@ function renderTop5Widget(rows, spot) {
 }
 
 async function renderIntradayWidget(dateStr) {
+  const request = histRequest;
   document.getElementById('widget-intraday-label').textContent = dateStr;
   const canvas = document.getElementById('widget-intraday');
+  renderCandles(canvas, []);
   try {
-    renderCandles(canvas, await loadIntradayPrices(dateStr));
+    const bars = await loadIntradayPrices(dateStr);
+    if (request !== histRequest) return;
+    renderCandles(canvas, bars);
   } catch (e) {
+    if (request !== histRequest) return;
     renderCandles(canvas, []);
   }
 }
 
 async function renderDailyWidget(dateStr) {
+  const request = histRequest;
   const canvas = document.getElementById('widget-daily');
+  renderCandles(canvas, []);
   try {
     const { candles, centerIndex } = await loadDailyWindow(dateStr, 2);
+    if (request !== histRequest) return;
     renderCandles(canvas, candles, { highlightIndex: centerIndex >= 0 ? centerIndex : null, labels: true });
   } catch (e) {
+    if (request !== histRequest) return;
     renderCandles(canvas, []);
   }
 }
@@ -3049,10 +3138,12 @@ async function showSimilarPopup(e, dateStr) {
 // top-5 historically similar 0DTE sessions by cosine similarity of the bucketed OI
 // shape, each with its next-day % move and a hover popup of that day's intraday chart.
 async function renderSimilarWidget(dateStr) {
+  const request = histRequest;
   const listEl = document.getElementById('similar-list');
   listEl.innerHTML = '<div class="widget-empty">Loading…</div>';
   try {
     const matches = await queryTopSimilar(dateStr, 5);
+    if (request !== histRequest) return;
     if (!matches.length) {
       listEl.innerHTML = '<div class="widget-empty">Not enough historical sessions cached yet.</div>';
       return;
@@ -3073,6 +3164,7 @@ async function renderSimilarWidget(dateStr) {
       }).catch(() => { moveEl.textContent = '—'; });
     }
   } catch (e) {
+    if (request !== histRequest) return;
     listEl.innerHTML = '<div class="widget-empty">Similarity unavailable.</div>';
   }
 }
