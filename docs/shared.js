@@ -8,7 +8,11 @@
 // a no-op and the concern files define the globals directly. The CSV/range
 // helpers (parseCsv, parseRangesCsv, getThresh, oiBucket) are deliberately NOT
 // re-exported here — as before, they are browser globals, defined by
-// docs/shared/csv-ranges.js; require that file directly under Node. Kept
+// docs/shared/csv-ranges.js; require that file directly under Node. The heatmap
+// names (DISPLAY, TIER_COLORS, the cell formatters, buildHeatmapRows) are
+// likewise browser globals, defined by docs/shared/heatmap.js — except
+// computeAtmWindow, which IS re-exported below, because
+// require('../docs/shared.js') always returned it (see the Node entry point). Kept
 // dependency-free of paper-trading state (positions/click handling are passed
 // in via opts) so diag.html can exercise the exact same parse/threshold/render
 // code the live app runs, without dragging in unrelated app state.
@@ -708,165 +712,6 @@ function normalizeShareOrder({
   return normalized;
 }
 
-const DISPLAY = 20;   // ±N strikes shown
-
-const TIER_COLORS = {
-  '0DTE_Regular': '#4a90d9',
-  '0DTE_Weekly':  '#e8c84b',
-  '0DTE_Monthly': '#e8604b',
-};
-
-
-function fmtOI(v) {
-  if (!v || v === 0) return '';
-  if (v < 1000)  return String(v);
-  if (v < 10000) return (v / 1000).toFixed(1) + 'K';
-  return Math.floor(v / 1000) + 'K';
-}
-
-function fmtVol(v) {
-  if (!v || v === 0) return '';
-  if (v < 1000)  return String(v);
-  if (v < 10000) return (v / 1000).toFixed(1) + 'k';
-  return Math.floor(v / 1000) + 'k';
-}
-
-function fmtQ(v) {
-  if (v == null) return '';
-  return v < 10 ? v.toFixed(2) : v.toFixed(1);
-}
-function quoteHtml(bid, ask) {
-  if (bid == null && ask == null) return '';
-  const b = bid != null ? fmtQ(bid) : '—';
-  const a = ask != null ? fmtQ(ask) : '—';
-  return `<span class="quote">${b} × ${a}</span>`;
-}
-
-// flow level 0–4 based on contracts-per-minute delta
-function flowLevel(d) {
-  if (d <= 0)   return 0;
-  if (d < 20)   return 1;
-  if (d < 100)  return 2;
-  if (d < 500)  return 3;
-  return 4;
-}
-
-function flowHtml(delta) {
-  const lvl = flowLevel(delta);
-  if (lvl === 0) return '';
-  const label = delta < 1000 ? `+${delta}` : `+${(delta/1000).toFixed(1)}k`;
-  return `<span class="flow flow-${lvl}">${label}</span>`;
-}
-
-// ATM strike + the ±display window around it, for a given {rows, spot} shape.
-// Shared by buildHeatmapRows (what's rendered) and the live app's quote
-// interest tracking (what LiveQuoteService keeps around), so the two windows
-// can't drift out of sync with each other.
-function computeAtmWindow(rows, spot, display = DISPLAY) {
-  const strikeValues = [...new Set((rows || []).map(r => +r.Strike).filter(Number.isFinite))].sort((a, b) => a - b);
-  if (!strikeValues.length || spot == null) return { atm: null, offsets: [], strikes: new Set() };
-  const atm = strikeValues.reduce((best, s) => Math.abs(s - spot) < Math.abs(best - spot) ? s : best, strikeValues[0]);
-  const offsets = [];
-  for (let o = display; o >= -display; o--) offsets.push(o);
-  const strikes = new Set(offsets.map(o => atm + o));
-  return { atm, offsets, strikes };
-}
-
-// ── shared heatmap row builder ─────────────────────────────────────────────────
-// Used by the live panel, the historical panel, and diag.html's full-pipeline
-// test — takes the same {rows, underlying_price, tier} shape regardless of
-// whether it came from live JSON or a parsed archive CSV. Paper-trading state
-// (position badges, click-to-trade) is opt-in via `opts`, not baked in, so
-// callers with no notion of positions (historical panel, diagnostics) don't
-// need to fake any of that.
-function buildHeatmapRows(tbody, data, ranges, opts = {}) {
-  const { getPosition, getQuote, onCellClick } = opts;
-  const { rows, underlying_price: spot, tier } = data;
-  tbody.innerHTML = '';
-  if (!spot || !rows || !rows.length) return false;
-
-  // Index rows by strike+type
-  const byStrike = {};
-  for (const r of rows) {
-    const key = `${r.Strike}`;
-    if (!byStrike[key]) byStrike[key] = {};
-    byStrike[key][r.Type] = r;
-  }
-
-  const { atm, offsets } = computeAtmWindow(rows, spot);
-  if (atm == null) return false;
-
-  for (const offset of offsets) {
-    const strike = atm + offset;
-    const strKey = `${strike}`;
-    const callRow = byStrike[strKey]?.call;
-    const putRow  = byStrike[strKey]?.put;
-    const isAtm   = offset === 0;
-
-    const callOI    = parseInt(callRow?.OpenInterest ?? 0) || 0;
-    const putOI     = parseInt(putRow?.OpenInterest  ?? 0) || 0;
-    const callVol   = parseInt(callRow?.Volume    ?? 0) || 0;
-    const putVol    = parseInt(putRow?.Volume     ?? 0) || 0;
-    const callDelta = parseInt(callRow?.VolDelta  ?? 0) || 0;
-    const putDelta  = parseInt(putRow?.VolDelta   ?? 0) || 0;
-    const callQuote = callRow?.OptionSymbol && getQuote ? getQuote(callRow.OptionSymbol) : null;
-    const putQuote  = putRow?.OptionSymbol && getQuote ? getQuote(putRow.OptionSymbol) : null;
-    const callBid   = getQuote ? (callQuote?.bid ?? null) : (callRow?.Bid ?? null);
-    const callAsk   = getQuote ? (callQuote?.ask ?? null) : (callRow?.Ask ?? null);
-    const putBid    = getQuote ? (putQuote?.bid ?? null) : (putRow?.Bid ?? null);
-    const putAsk    = getQuote ? (putQuote?.ask ?? null) : (putRow?.Ask ?? null);
-
-    const ct = getThresh(ranges, tier || '0DTE_Regular', offset, 'call');
-    const pt = getThresh(ranges, tier || '0DTE_Regular', offset, 'put');
-    const cb = oiBucket(callOI, ct);
-    const pb = oiBucket(putOI,  pt);
-
-    const tr = document.createElement('tr');
-    if (isAtm) tr.classList.add('atm-row');
-
-    // Call cell
-    const callTd = document.createElement('td');
-    callTd.className = `call-cell c${cb}`;
-    const callPos = getPosition ? (getPosition(callRow?.OptionSymbol) || 0) : 0;
-    callTd.innerHTML = fmtOI(callOI) +
-      quoteHtml(callBid, callAsk) +
-      (callVol ? `<span class="vol">${fmtVol(callVol)}</span>` : '') +
-      flowHtml(callDelta) +
-      (callPos ? `<span class="pos-badge">${callPos > 0 ? '+' : ''}${callPos}</span>` : '');
-    if (onCellClick && callRow?.OptionSymbol) {
-      callTd.classList.add('tradable');
-      callTd.onclick = (e) => onCellClick(e, callRow);
-    }
-    tr.appendChild(callTd);
-
-    // Strike cell
-    const strikeTd = document.createElement('td');
-    strikeTd.className = 'strike-cell' + (isAtm ? ' atm' : '');
-    strikeTd.textContent = isAtm ? `${strike} ★` : `${strike}`;
-    strikeTd.title = `${offset > 0 ? '+' : ''}${offset} from ATM`;
-    tr.appendChild(strikeTd);
-
-    // Put cell
-    const putTd = document.createElement('td');
-    putTd.className = `put-cell p${pb}`;
-    const putPos = getPosition ? (getPosition(putRow?.OptionSymbol) || 0) : 0;
-    putTd.innerHTML = fmtOI(putOI) +
-      quoteHtml(putBid, putAsk) +
-      (putVol ? `<span class="vol">${fmtVol(putVol)}</span>` : '') +
-      flowHtml(putDelta) +
-      (putPos ? `<span class="pos-badge">${putPos > 0 ? '+' : ''}${putPos}</span>` : '');
-    if (onCellClick && putRow?.OptionSymbol) {
-      putTd.classList.add('tradable');
-      putTd.onclick = (e) => onCellClick(e, putRow);
-    }
-    tr.appendChild(putTd);
-
-    tbody.appendChild(tr);
-  }
-
-  return true;
-}
-
 // ── chain underlying selection (#121) ───────────────────────────────────────
 // QQQ keeps its original artifact; SPY has its own tree (see
 // SPY_COLLECTION.md). Anything not listed is unsupported -- never mapped
@@ -962,7 +807,15 @@ function summarizeSpyHealth(payload, nowMs = Date.now()) {
 // docs/diag.html), so this block only runs under Node, where it re-exports
 // exactly the same 26 names this file always exported. The CSV/range helpers
 // are not re-exported (see the header): they stay browser globals.
+// computeAtmWindow moved to docs/shared/heatmap.js (B3 slice 2) and is
+// re-exported from there; relativeOiRanges still defaults its display to
+// DISPLAY, which under Node is provided as a global below — in the browser it
+// is the lexical global heatmap.js declares. A `var DISPLAY` here would break
+// the browser: it would pre-create the global before heatmap.js's
+// `const DISPLAY` declares it, so the property is set on globalThis instead.
 if (typeof module !== 'undefined' && typeof require === 'function') {
+  const heatmap = require('./shared/heatmap.js');
+  if (typeof globalThis.DISPLAY === 'undefined') globalThis.DISPLAY = heatmap.DISPLAY;
   module.exports = {
     CHAIN_UNDERLYINGS, chainLatestPath, occRoot, validateChainPayload, ChainSelection, relativeOiRanges,
     summarizeSpyHealth,
@@ -970,6 +823,6 @@ if (typeof module !== 'undefined' && typeof require === 'function') {
     SHARE_QUOTE_MAX_AGE_MS, freshShareQuote, formatVwapRvol, formatMomentum,
     fmtSteoDelta, findRevision, formatSqueezeScheduleStatus, formatSqueezeScanStatus, describeSqueezeAcquisitionFailure, formatSqueezeFirstSeen,
     parseRetryAfter, normalizePaperOrder, normalizeShareOrder,
-    isTradeableShareSymbol, computeAtmWindow,
+    isTradeableShareSymbol, computeAtmWindow: heatmap.computeAtmWindow,
   };
 }

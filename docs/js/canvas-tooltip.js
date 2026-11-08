@@ -2,7 +2,7 @@
 // Nov 2026). Classic script, loaded by index.html in the same position the
 // inline section occupied, so the page's script order — and the shared global
 // scope — is unchanged. No ESM conversion.
-// `fmtOI` comes from shared.js; `histRequest` from the historical panel;
+// `fmtOI` comes from shared/heatmap.js; `histRequest` from the historical panel;
 // `loadIntradayPrices`, `loadDailyWindow`, `queryTopSimilar` and `nextDayMove`
 // from the sidebar-widgets module — all runtime-only, after all scripts load.
 // Callers: `renderHistWidgets` is called by the historical panel's

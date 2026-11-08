@@ -136,9 +136,12 @@ function harness(stubs = {}) {
     nextDayMove: stubs.nextDayMove || (async dateStr => (dateStr === '2026-09-21' ? 1.23 : null)),
   };
   const context = vm.createContext(sandbox);
-  // The real shared.js: `fmtOI` is a browser global in production (not in
-  // shared.js's module.exports), so load the whole file into the context.
+  // The real shared.js + shared/heatmap.js: `fmtOI` is a browser global in
+  // production (not in shared.js's module.exports), so load the whole files
+  // into the context, in page order — B3 slice 2 (Nov 2026): fmtOI moved out
+  // of docs/shared.js into docs/shared/heatmap.js.
   vm.runInContext(sharedSource, context, { filename: 'docs/shared.js' });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../docs/shared/heatmap.js'), 'utf8'), context, { filename: 'docs/shared/heatmap.js' });
   vm.runInContext(moduleSource, context, { filename: 'docs/js/canvas-tooltip.js' });
   return { context, els, bodyChildren, created };
 }

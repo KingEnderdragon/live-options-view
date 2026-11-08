@@ -26,8 +26,11 @@ const prices = 'datetime,open,high,low,close\n2026-10-27T13:30:00Z,500,502,499,5
       fetch: url => worker.fetch(new Request(APP + url), new Proxy({}, { get(){throw Error('private binding accessed');} })) });
     // B3 slice 1 (Nov 2026): parseCsv moved out of docs/shared.js into
     // docs/shared/csv-ranges.js — load the shipped module instead of slicing
-    // the function out of shared.js by banner text.
+    // the function out of shared.js by banner text. B3 slice 2 (Nov 2026):
+    // buildHeatmapRows / fmtOI moved to docs/shared/heatmap.js — load it too,
+    // in page order, so the canvas-tooltip module reads the real fmtOI.
     vm.runInContext(fs.readFileSync('docs/shared/csv-ranges.js', 'utf8'), ctx);
+    vm.runInContext(fs.readFileSync('docs/shared/heatmap.js', 'utf8'), ctx);
     // B2 slice 12 (Nov 2026): the historical panel moved out of index.html
     // into docs/js/historical-panel.js — the historical..sidebar slice would
     // now be the banner + a <script src> tag, which is not valid JS, so load

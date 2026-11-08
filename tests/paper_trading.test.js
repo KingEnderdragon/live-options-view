@@ -2,8 +2,8 @@
 // into docs/js/paper-trading.js, loaded in the same position. The test pins
 // the ?v= hash in the page to the module's content (like shared.js), asserts
 // the section no longer lives inline, and drives the book / execution /
-// settlement / render paths with a stub DOM + stub fetch + the real shared.js:
-// average-cost computeBook (including a flip through zero and share
+// settlement / render paths with a stub DOM + stub fetch + the real shared.js
+// and shared/heatmap.js: average-cost computeBook (including a flip through
 // multipliers), the execution request retry + error identity, executeTrade's
 // normalization / no-session / pending-dedupe / fill paths, settleExpired's
 // no-op / settle / 410-margin-call / transient-failure paths, snapshot ingest
@@ -115,7 +115,11 @@ const sandbox = {
   },
 };
 const context = vm.createContext(sandbox);
+// B3 slice 2 (Nov 2026): fmtQ / computeAtmWindow moved out of shared.js
+// into docs/shared/heatmap.js — load the shipped module too, in page order,
+// so renderPaper / visibleContractSymbols read the real ones.
 vm.runInContext(sharedSource, context, { filename: 'docs/shared.js' });
+vm.runInContext(fs.readFileSync(path.join(__dirname, '../docs/shared/heatmap.js'), 'utf8'), context, { filename: 'docs/shared/heatmap.js' });
 vm.runInContext(moduleSource, context, { filename: 'docs/js/paper-trading.js' });
 const get = name => vm.runInContext(name, context);
 const set = (name, value) => vm.runInContext(`${name} = (${JSON.stringify(value)})`, context);

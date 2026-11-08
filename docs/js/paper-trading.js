@@ -102,7 +102,7 @@ function openPositionSymbols() {
 }
 
 // Same ±DISPLAY window buildHeatmapRows() renders, via the shared helper in
-// shared.js — computed separately here would risk silently drifting out of
+// shared/heatmap.js — computed separately here would risk silently drifting out of
 // sync with what's actually on screen.
 function visibleContractSymbols(data) {
   const rows = data?.rows || [];

@@ -137,6 +137,7 @@
 
 <script src="shared.js"></script>
 <script src="shared/csv-ranges.js"></script>
+<script src="shared/heatmap.js"></script>
 <script>
 const R2 = "https://pub-4d5c916b8cb74ffb8c0abd7dfadb02cf.r2.dev";
 const PROXY = `${location.origin}/r2-proxy`;
@@ -266,7 +267,7 @@ function testImg(url) {
 
 // ── section 1.5: full pipeline (fetch → parse → validate → render) ──────────
 // Uses shared/csv-ranges.js's real parseRangesCsv/getThresh/oiBucket and
-// shared.js's real buildHeatmapRows —
+// shared/heatmap.js's real buildHeatmapRows —
 // the exact code the live app runs — instead of a second hand-rolled check
 // that could drift out of sync with it.
 const PIPELINE_PATHS = [
