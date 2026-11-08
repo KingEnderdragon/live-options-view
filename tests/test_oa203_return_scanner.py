@@ -1,5 +1,7 @@
 import gzip
+import importlib
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -9,8 +11,11 @@ from datetime import date
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import oa203_return_scanner as scanner  # noqa: E402
+from scanners.oa203 import active as scanner_active  # noqa: E402
+from scanners.oa203 import runtime as scanner_runtime  # noqa: E402
 from oa203_returns import (  # noqa: E402
     ContractInfo,
     Observation,
@@ -478,7 +483,7 @@ class RetryBackoff(unittest.TestCase):
         session.request.side_effect = request
         client = scanner.Tradier("test", session=session,
                                  clock=lambda: clock["t"], sleep=sleep)
-        with mock.patch.object(scanner, "log"):
+        with mock.patch.object(scanner_runtime, "log"):
             if recover:
                 self.assertEqual(client.request("GET", "/test", attempts=attempts),
                                  FakeResponse(200).json())
@@ -543,7 +548,7 @@ class RetryBackoff(unittest.TestCase):
                 client = scanner.Tradier("test", session=session, clock=lambda: clock["t"],
                                          sleep=lambda s: clock.__setitem__("t", clock["t"] + s))
                 client.budget_deadline = 1010.0
-                with mock.patch.object(scanner, "log"), self.assertRaises(Exception):
+                with mock.patch.object(scanner_runtime, "log"), self.assertRaises(Exception):
                     client.request("GET", "/test")
                 self.assertEqual(session.request.call_count, 1)
                 self.assertEqual(client.stats["retries_skipped_budget"], 1)
@@ -779,7 +784,7 @@ class BudgetAtDispatch(unittest.TestCase):
         provider = ScriptedProvider(steps)
         client = scanner.Tradier("tok", session=provider, clock=provider.now, sleep=provider.sleep)
         universe = [{"underlying": n, "expiration": "2026-09-28"} for n in names]
-        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(scanner, "log"):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(scanner_runtime, "log"):
             (Path(tmp) / "sweeps").mkdir()
             entry = scanner.run_sweep(client, universe, 1, Path(tmp) / "sweeps" / "sweep_0001.jsonl.gz",
                                       block_size=len(names), workers=1, budget_s=600, clock=provider.now)
@@ -1195,7 +1200,7 @@ class UploadRecovery(unittest.TestCase):
             archive = scanner.DayArchive(cfg.spool_dir, DAY, cfg.r2_prefix, True, uploader)
             universe = {"selected": [], "selected_count": 0}
             archive.write_json("universe.json", universe)
-            with mock.patch.object(scanner, "log") as log:
+            with mock.patch.object(scanner_runtime, "log") as log:
                 scanner.finalize(archive, FakeClient(), cfg, universe, T0, T0 + MIN)
             self.assertTrue(archive.finalized())
             self.assertEqual(archive.pending_uploads(), [scanner.UPLOAD_JOURNAL])
@@ -1215,15 +1220,15 @@ def fake_sweep(stop_after=None):
         calls["n"] += 1
         entry = scanner.run_sweep(client, selected, sweep, out_path, block_size, workers)
         if stop_after is not None and calls["n"] >= stop_after:
-            scanner.STOP = True
+            scanner_runtime.STOP = True
         return entry
     return sweep_fn
 
 
 class StopAndRecover(unittest.TestCase):
     def setUp(self):
-        scanner.STOP = False
-        self.addCleanup(setattr, scanner, "STOP", False)
+        scanner_runtime.STOP = False
+        self.addCleanup(setattr, scanner_runtime, "STOP", False)
 
     def test_stop_during_collection_then_restart_after_close_finalizes(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1247,7 +1252,7 @@ class StopAndRecover(unittest.TestCase):
             self.assertEqual(len(archive.manifest()), 2)
 
             # Restart after the close: the scheduled command now finalizes the day.
-            scanner.STOP = False
+            scanner_runtime.STOP = False
             after = lambda: scanner.datetime(2026, 9, 25, 16, 30, tzinfo=scanner.ET)
             rc = scanner.run_day(cfg, client=client, now=after, bounds_for=lambda d: SESSION,
                                  sleep_until=lambda when: None, uploader=uploader)
@@ -1307,8 +1312,8 @@ class InterruptedWrites(unittest.TestCase):
     MONDAY = date(2026, 9, 28)
 
     def setUp(self):
-        scanner.STOP = False
-        self.addCleanup(setattr, scanner, "STOP", False)
+        scanner_runtime.STOP = False
+        self.addCleanup(setattr, scanner_runtime, "STOP", False)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.cfg = scanner.Config(spool_dir=Path(self.tmp.name), upload=True, workers=1, backfill_top=2)
@@ -1323,7 +1328,7 @@ class InterruptedWrites(unittest.TestCase):
             client.sweep = sweep
             name = f"sweeps/sweep_{sweep:04d}.jsonl.gz"
             in_session = T0 + sweep * 5 * MIN  # T0 is 09:30 ET on DAY
-            with mock.patch.object(scanner, "now_ms", return_value=in_session):
+            with mock.patch.object(scanner_runtime, "now_ms", return_value=in_session):
                 archive.append_manifest(scanner.run_sweep(client, self.selected, sweep,
                                                           archive.path(name), 50, 1))
         return archive
@@ -1335,7 +1340,7 @@ class InterruptedWrites(unittest.TestCase):
         rc = scanner.run_day(self.cfg, client=client, now=at, bounds_for=session_for,
                              sleep_until=lambda when: None, sweep_fn=fake_sweep(stop_after=stop_after),
                              uploader=self.uploader)
-        scanner.STOP = False
+        scanner_runtime.STOP = False
         return rc, scanner.DayArchive(self.cfg.spool_dir, self.MONDAY, self.cfg.r2_prefix, True, self.uploader)
 
     def monday_universe(self):
@@ -1424,6 +1429,42 @@ class InterruptedWrites(unittest.TestCase):
             with gzip.open(target, "rt") as src:
                 self.assertEqual(src.read(), "old\n")  # previous complete version kept
             self.assertEqual(sorted(p.name for p in Path(tmp).iterdir()), ["x.jsonl.gz"])
+
+
+
+class PackageLayoutTests(unittest.TestCase):
+    """The scanner's home is ``scanners/oa203/``; the deployed path is a shim.
+
+    Pins the seams a future move could break silently: the entry module must
+    keep exposing the package surface, the stop flag must keep one owner, and
+    the deployed script must still run the CLI.
+    """
+
+    def test_entry_module_reexports_the_package(self):
+        package = importlib.import_module("scanners.oa203")
+        for name in package.__all__:
+            self.assertIs(getattr(scanner, name), getattr(package, name), name)
+
+    def test_entry_module_no_longer_owns_the_stop_flag(self):
+        # A boolean copy here would be settable and do nothing.
+        self.assertFalse(hasattr(scanner, "STOP"))
+        self.assertIs(scanner_runtime.STOP, scanner_runtime.STOP)
+
+    def test_deployed_script_runs_the_cli(self):
+        repo = Path(__file__).resolve().parents[1]
+        completed = subprocess.run(
+            [sys.executable, str(repo / "scripts" / "oa203_return_scanner.py"), "--help"],
+            capture_output=True, text=True, cwd=str(repo), timeout=120,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("run", completed.stdout)
+
+    def test_each_job_has_its_own_module(self):
+        # The five jobs the survey found in one file, plus their inputs.
+        for name in ("sweep", "archive", "outputs", "active", "backfill",
+                     "assessment", "session", "readout"):
+            module = importlib.import_module(f"scanners.oa203.{name}")
+            self.assertTrue(module.__doc__, name)
 
 
 if __name__ == "__main__":
