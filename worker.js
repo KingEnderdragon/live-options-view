@@ -1,48 +1,26 @@
-const R2_ORIGIN = "https://pub-4d5c916b8cb74ffb8c0abd7dfadb02cf.r2.dev";
-// Only these public artifacts are exposed to the browser through this route.
-// Never use the private bucket binding or a caller-provided destination.
-const BROWSER_DATA_ORIGIN = 'https://live-options-view.otmooper12.workers.dev';
-const BROWSER_DATA_PREFIX = '/browser-data/';
-const BROWSER_DATA_KEYS = new Set([
-  'intraday/latest.json',
-  'intraday/spy/latest.json',
-  'intraday/prices.json',
-  'intraday/health.json',
-  'derived/OIranges.csv',
-  'macro/eia_steo.json',
-  'manifest.json',
-  'squeeze-scanner/v1/scheduled/latest.json',
-  'squeeze-scanner/v1/scheduled/latest-attempt.json',
-  'squeeze-scanner/v1/scheduled/latest-schedule.json',
-]);
-// Only the three QQQ archive filename families consumed by Historical.
-// Validate calendar dates, not just eight arbitrary digits. No prefix proxying.
-function isPublicArchiveKey(key) {
-  const match = /^(?:raw\/(?:opex\/)?qqq_chain_|prices\/qqq_intraday_)([0-9]{4})([0-9]{2})([0-9]{2})\.csv$/.exec(key);
-  if (!match) return false;
-  const date = `${match[1]}-${match[2]}-${match[3]}`;
-  const parsed = new Date(`${date}T00:00:00Z`);
-  return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === date;
-}
-const ALLOWED_ORIGINS = ['https://options.moopertonic.net', 'http://localhost:8787'];
-const MAX_BODY_BYTES = 16 * 1024; // a trade record is a few hundred bytes; this leaves ample headroom
+import {
+  BOT_USERNAME_RE, ISO_DATE, MAX_BODY_BYTES, MAX_KV_WRITE_ATTEMPTS, R2_ORIGIN,
+  SESSION_COOKIE, SESSION_TTL_SECONDS, STARTING_BALANCE, STRATEGY_ID_RE,
+  botKey, checkOrigin, clearedSessionCookieHeader, computeBookFromTrades,
+  jsonResponse, parseCookies, readJsonBody, readLimited, requireSession,
+  sessionCookieHeader, sessionKey, sleep, userKey, withUserRecord,
+} from './worker/common.js';
+import { BROWSER_DATA_PREFIX, fetchLiveQuotes, handleBrowserData, handleLiveQuotes } from './worker/browser-data.js';
+
+// Re-exported from worker/common.js so the Worker's public API (the 32
+// exports pinned by tests/worker_logic.test.js) stays on worker.js.
+export { BOT_USERNAME_RE, STARTING_BALANCE, STRATEGY_ID_RE, computeBookFromTrades, parseCookies } from './worker/common.js';
+
 const MAX_QUOTE_AGE_MS = 15 * 1000;
 const MAX_QUOTE_FUTURE_MS = 30 * 1000;
-const MAX_LIVE_QUOTE_SYMBOLS = 100;
 const TRADEABLE_SHARE_SYMBOLS = new Set([
   'QQQ', 'USO', 'SMH', 'IGV', 'META', 'GOOGL', 'AMZN', 'TSLA', 'MU', 'SPCX', 'AAPL',
 ]);
 
-const SESSION_COOKIE = 'session';
-const SESSION_TTL_SECONDS = 60 * 60 * 24 * 30; // 30 days
 const PBKDF2_ITERATIONS = 100_000;
-export const STARTING_BALANCE = 10_000;
 export const USERNAME_RE = /^[A-Za-z0-9_]{3,20}$/;
-export const BOT_USERNAME_RE = /^[A-Za-z0-9_]{3,40}$/;
-export const STRATEGY_ID_RE = /^[a-z0-9_]{1,40}$/;
 export const MIN_PASSWORD_LEN = 8;
 export const MAX_PASSWORD_LEN = 256;
-const MAX_KV_WRITE_ATTEMPTS = 5;
 const SETTLEMENT_ID_PREFIX = 'settle';
 export const EXECUTION_RESERVATION_LEASE_MS = 30 * 1000;
 export const BOT_INDEX_KEY = 'system/bot-membership-v1.json';
@@ -138,87 +116,9 @@ export default {
   },
 }
 
-async function handleBrowserData(request, url) {
-  const origin = request.headers.get('Origin');
-  if (url.origin !== BROWSER_DATA_ORIGIN ||
-      (origin !== null && origin !== BROWSER_DATA_ORIGIN)) {
-    return new Response('Forbidden', { status: 403 });
-  }
-  if (request.method !== 'GET') {
-    return new Response('Method not allowed', { status: 405, headers: { Allow: 'GET' } });
-  }
-  const key = url.pathname.slice(BROWSER_DATA_PREFIX.length);
-  if (!BROWSER_DATA_KEYS.has(key) && !isPublicArchiveKey(key)) return new Response('Not found', { status: 404 });
-  // Accept only the existing numeric cache-buster, never arbitrary query data.
-  if (url.search && !/^\?_=[0-9]{1,20}$/.test(url.search)) {
-    return new Response('Invalid query', { status: 400 });
-  }
-  try {
-    const upstream = await fetch(`${R2_ORIGIN}/${key}${url.search}`, {
-      method: 'GET',
-      headers: {},
-      credentials: 'omit',
-      redirect: 'manual',
-      cf: { cacheTtl: 0, cacheEverything: false },
-    });
-    // Preserve status and stream bytes without parsing. Limit response headers
-    // so upstream cookies/auth cannot affect this origin, and Location cannot
-    // make the browser follow a redirect that the Worker refused to follow.
-    const headers = new Headers();
-    for (const name of ['Content-Type', 'Content-Encoding', 'Content-Length',
-      'Cache-Control', 'ETag', 'Last-Modified', 'Retry-After']) {
-      const value = upstream.headers.get(name);
-      if (value !== null) headers.set(name, value);
-    }
-    return new Response(upstream.body, {
-      status: upstream.status, statusText: upstream.statusText, headers,
-    });
-  } catch {
-    return new Response('Public data upstream unavailable', { status: 502 });
-  }
-}
 
-async function handleLiveQuotes(url, env) {
-  const symbols = parseRequestedSymbols(url.searchParams.get('symbols'));
-  if (!symbols) {
-    return jsonResponse({ error: `Request 1-${MAX_LIVE_QUOTE_SYMBOLS} valid symbols` }, 400);
-  }
-  try {
-    const upstream = await fetchLiveQuotes(symbols, env);
-    const response = new Response(upstream.body, {
-      status: upstream.status,
-      headers: {
-        'Content-Type': upstream.headers.get('Content-Type') || 'application/json',
-        'Cache-Control': 'no-store',
-      },
-    });
-    const retryAfter = upstream.headers.get('Retry-After');
-    if (retryAfter) response.headers.set('Retry-After', retryAfter);
-    return response;
-  } catch (error) {
-    return jsonResponse({ error: 'Live quote service unavailable' }, 503);
-  }
-}
 
-function fetchLiveQuotes(symbols, env) {
-  if (!env.LIVE_QUOTE_ORIGIN || !env.LIVE_QUOTE_KEY) {
-    throw new Error('Live quote service is not configured');
-  }
-  const upstreamUrl = new URL('/live-quotes', env.LIVE_QUOTE_ORIGIN);
-  upstreamUrl.searchParams.set('symbols', symbols.join(','));
-  return fetch(upstreamUrl, {
-    headers: { 'X-Live-Quote-Key': env.LIVE_QUOTE_KEY },
-    cf: { cacheTtl: 0, cacheEverything: false },
-  });
-}
 
-function parseRequestedSymbols(value) {
-  if (!value) return null;
-  const symbols = [...new Set(value.split(',').map(symbol => symbol.trim().replace(/\s/g, '')).filter(Boolean))];
-  if (!symbols.length || symbols.length > MAX_LIVE_QUOTE_SYMBOLS) return null;
-  if (symbols.some(symbol => symbol.length > 64 || !/^[A-Za-z0-9._/:+-]+$/.test(symbol))) return null;
-  return symbols;
-}
 
 // ---------------------------------------------------------------------------
 // Auth: username/password accounts backed by the USERS KV namespace, opaque
@@ -227,15 +127,7 @@ function parseRequestedSymbols(value) {
 // devices rather than living in one browser's localStorage.
 // ---------------------------------------------------------------------------
 
-function userKey(username) {
-  return `user:${username.toLowerCase()}`;
-}
 
-// Legacy membership markers are retained for migration and rollback. The R2
-// index holds the same public bot identifiers; account records remain authoritative.
-function botKey(username) {
-  return `bot:${username.toLowerCase()}`;
-}
 
 function validateBotIndex(value) {
   if (!value || value.schema_version !== 1 || typeof value.ready !== 'boolean' ||
@@ -367,39 +259,10 @@ export async function handleBotIndexReconcile(request, env) {
   }
 }
 
-function sessionKey(token) {
-  return `sess:${token}`;
-}
 
-function isSecureRequest(request) {
-  return new URL(request.url).protocol === 'https:';
-}
 
-// `Secure` cookies never round-trip over plain http://, which the dev origin
-// (http://localhost:8787) already in ALLOWED_ORIGINS relies on -- so the
-// flag is conditional on the actual request scheme rather than always on.
-function sessionCookieHeader(request, token, maxAgeSeconds) {
-  const secure = isSecureRequest(request) ? '; Secure' : '';
-  return `${SESSION_COOKIE}=${token}; HttpOnly${secure}; SameSite=Lax; Path=/; Max-Age=${maxAgeSeconds}`;
-}
 
-function clearedSessionCookieHeader(request) {
-  return sessionCookieHeader(request, '', 0);
-}
 
-export function parseCookies(request) {
-  const header = request.headers.get('Cookie');
-  const cookies = {};
-  if (!header) return cookies;
-  for (const part of header.split(';')) {
-    const idx = part.indexOf('=');
-    if (idx === -1) continue;
-    const name = part.slice(0, idx).trim();
-    const value = part.slice(idx + 1).trim();
-    if (name) cookies[name] = value;
-  }
-  return cookies;
-}
 
 export function randomSaltBase64() {
   return bytesToBase64(crypto.getRandomValues(new Uint8Array(16)));
@@ -440,31 +303,7 @@ export function constantTimeEqual(a, b) {
   return diff === 0;
 }
 
-async function readJsonBody(request) {
-  const contentLength = Number(request.headers.get('Content-Length') || 0);
-  if (contentLength > MAX_BODY_BYTES) {
-    return { error: new Response('Payload too large', { status: 413 }) };
-  }
-  let raw;
-  try {
-    raw = await readLimited(request, MAX_BODY_BYTES);
-  } catch (e) {
-    return { error: new Response('Payload too large', { status: 413 }) };
-  }
-  try {
-    return { body: JSON.parse(raw) };
-  } catch (e) {
-    return { error: new Response('Invalid JSON', { status: 400 }) };
-  }
-}
 
-function checkOrigin(request) {
-  const origin = request.headers.get('Origin');
-  if (origin && !ALLOWED_ORIGINS.includes(origin)) {
-    return new Response('Forbidden', { status: 403 });
-  }
-  return null;
-}
 
 async function startSession(request, env, record, status) {
   const token = crypto.randomUUID();
@@ -737,57 +576,8 @@ export function netPositions(trades) {
 // break in the chain, including a session that still exists but whose
 // account was since deleted (e.g. liquidated by /api/settle from another
 // device) -- that account is gone, not just logged out.
-async function requireSession(request, env) {
-  const cookies = parseCookies(request);
-  const token = cookies[SESSION_COOKIE];
-  if (!token) return null;
-  const sessionRaw = await env.SESSIONS.get(sessionKey(token));
-  if (!sessionRaw) return null;
-  const session = JSON.parse(sessionRaw);
-  const userRaw = await env.USERS.get(userKey(session.username));
-  if (!userRaw) return null;
-  return { token, username: session.username, record: JSON.parse(userRaw) };
-}
 
-// Applies `mutate(record)` to a user's KV record and writes the result back.
-// KV has no compare-and-swap, so this is optimistic concurrency: read,
-// mutate, write a bumped `version`, then re-read to check the write actually
-// stuck before trusting it; retries from a fresh read on a version mismatch.
-// Good enough given this app's single-user-at-a-time usage pattern -- not a
-// true CAS, and KV's eventual consistency means the confirming re-read is a
-// best-effort check, not a guarantee.
-//
-// `mutate` returns one of:
-//   { error }             -- reject, no write (e.g. insufficient balance)
-//   { result }             -- no-op (e.g. idempotent replay), no write
-//   { record, result }     -- write `record` (version is added automatically)
-async function withUserRecord(env, username, mutate) {
-  const key = userKey(username);
-  for (let attempt = 0; attempt < MAX_KV_WRITE_ATTEMPTS; attempt++) {
-    const raw = await env.USERS.get(key);
-    if (!raw) return { error: 'not_found' };
-    const record = JSON.parse(raw);
-    const outcome = mutate(record);
-    if (outcome.error) return outcome;
-    if (!outcome.record) return outcome;
 
-    const nextVersion = record.version + 1;
-    const nextRecord = { ...outcome.record, version: nextVersion };
-    await env.USERS.put(key, JSON.stringify(nextRecord));
-
-    const confirmRaw = await env.USERS.get(key);
-    const confirmed = confirmRaw ? JSON.parse(confirmRaw) : null;
-    if (confirmed && confirmed.version === nextVersion) {
-      return { record: nextRecord, result: outcome.result };
-    }
-    await sleep(10 + Math.floor(Math.random() * 40));
-  }
-  return { error: 'conflict' };
-}
-
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
 
 // ---------------------------------------------------------------------------
 // Trade execution
@@ -1107,30 +897,6 @@ async function handlePaperTrade(request, env) {
 // never trusted for anything else.
 // ---------------------------------------------------------------------------
 
-export function computeBookFromTrades(trades) {
-  const book = {};
-  for (const t of trades) {
-    const instrumentType = t.instrument_type ?? 'option';
-    const multiplier = t.multiplier ?? (instrumentType === 'share' ? 1 : 100);
-    const b = book[t.sym] ?? (book[t.sym] = {
-      pos: 0, avg: 0, realized: 0,
-      instrument_type: instrumentType, multiplier,
-      strike: t.strike, type: t.type, exp: t.exp,
-    });
-    const q = t.side === 'buy' ? t.qty : -t.qty;
-    if (b.pos === 0 || Math.sign(b.pos) === Math.sign(q)) {
-      b.avg = (b.avg * Math.abs(b.pos) + t.price * Math.abs(q)) / (Math.abs(b.pos) + Math.abs(q));
-      b.pos += q;
-    } else {
-      const closing = Math.min(Math.abs(q), Math.abs(b.pos));
-      b.realized += (t.price - b.avg) * closing * b.multiplier * Math.sign(b.pos);
-      b.pos += q;
-      if (b.pos === 0) b.avg = 0;
-      else if (Math.sign(b.pos) === Math.sign(q)) b.avg = t.price;
-    }
-  }
-  return book;
-}
 
 // Longs settle worthless -- this book has no exercise capacity, so an ITM
 // long must be closed before expiration to realize value. Shorts don't get
@@ -1376,7 +1142,6 @@ async function handleSettle(request, env) {
 }
 
 const MAX_STRING_LEN = 64;
-const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 
 // Schema check for a trade record before it's written to R2. This log is
 // meant to become cross-strategy analysis data, so loose validation here
@@ -1603,36 +1368,4 @@ function exactContractQuote(payload, symbol, side, nowMs) {
   };
 }
 
-function jsonResponse(value, status, extraHeaders = {}) {
-  return new Response(JSON.stringify(value), {
-    status,
-    headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...extraHeaders },
-  });
-}
 
-// Reads the request body up to `limit` bytes, aborting the stream and
-// throwing if exceeded. Content-Length alone isn't trustworthy (absent on
-// chunked requests, or simply lied about), so this is the real enforcement.
-async function readLimited(request, limit) {
-  if (!request.body) return '';
-  const reader = request.body.getReader();
-  const chunks = [];
-  let received = 0;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    received += value.byteLength;
-    if (received > limit) {
-      await reader.cancel();
-      throw new Error('Payload too large');
-    }
-    chunks.push(value);
-  }
-  const buf = new Uint8Array(received);
-  let offset = 0;
-  for (const chunk of chunks) {
-    buf.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return new TextDecoder().decode(buf);
-}
