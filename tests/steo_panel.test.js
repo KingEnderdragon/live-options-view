@@ -149,6 +149,10 @@ async function showValid(data = fixture) {
   assert.equal(el('steo-ovx-regime').textContent, 'no_data');
 
   assert.ok(calls.every(({ url }) => url.startsWith('/browser-data/macro/eia_steo.json?_=')));
-  assert.match(html, /setInterval\(fetchSteoCalibration, 60_000\)/, 'existing recovery cadence is unchanged');
+  // B2 slice 16 (Nov 2026): boot moved out of index.html into docs/js/boot.js,
+  // so the recovery cadence now lives there, not in the page — read it from
+  // the shipped module (boot.test.js also pins the full interval list).
+  const bootSrc = fs.readFileSync(path.join(__dirname, '../docs/js/boot.js'), 'utf8');
+  assert.match(bootSrc, /setInterval\(fetchSteoCalibration, 60_000\)/, 'existing recovery cadence is unchanged');
   console.log('PASS optional STEO panel: 404, empty, real-format render, upstream/transport/schema failures, missing values and recovery');
 })().catch(error => { console.error(error); process.exitCode = 1; });
