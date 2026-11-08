@@ -5,9 +5,9 @@
 // `BROWSER_DATA` stays in the stale-page section; `parseCsv`, `TIER_COLORS`
 // and `buildHeatmapRows` come from shared.js; `ranges` from the OIranges
 // loader. `historyLoaded` is declared in the tab-switching module and
-// assigned by loadHistoryManifest's failure path; `hideSimilarPopup` is
-// defined in the canvas-tooltip section and `renderHistWidgets` in the
-// sidebar-widgets module — all runtime-only, after all scripts load.
+// assigned by loadHistoryManifest's failure path; `hideSimilarPopup` and
+// `renderHistWidgets` are defined in the canvas-tooltip module — all
+// runtime-only, after all scripts load.
 // Callers: showTab('history') in the tab-switching module (runtime-only).
 // Reads the same R2 bucket the live view polls, but pulls the settled daily
 // chain archive (raw/qqq_chain_{date}.csv, or raw/opex/qqq_chain_{date}.csv

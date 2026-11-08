@@ -6,7 +6,7 @@
 // `classifyTierSimple` stay declared in the historical panel (the page's
 // shared scope); `BROWSER_DATA` stays in the stale-page section; `parseCsv`,
 // `getThresh`/`oiBucket` and `ranges` come from shared.js / the OIranges
-// loader. Callers live in the canvas-tooltip section (`renderHistWidgets`,
+// loader. Callers live in the canvas-tooltip module (`renderHistWidgets`,
 // via `loadDailyWindow` / `queryTopSimilar` / `nextDayMove`) — all
 // runtime-only, after all scripts load.
 // ── sidebar widgets: Top 5 OI, Intraday, Daily context, Similar Sessions ──────

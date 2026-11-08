@@ -30,10 +30,12 @@ const prices = 'datetime,open,high,low,close\n2026-10-27T13:30:00Z,500,502,499,5
     // into docs/js/historical-panel.js — the historical..sidebar slice would
     // now be the banner + a <script src> tag, which is not valid JS, so load
     // the shipped module instead, then the widgets module and the
-    // canvas-tooltip section in page order.
+    // canvas-tooltip module in page order. B2 slice 14 (Nov 2026): the
+    // canvas-tooltip section moved out too, so slicing up to the boot banner
+    // would now be the banner + a <script src> tag as well.
     vm.runInContext(fs.readFileSync('docs/js/historical-panel.js', 'utf8'), ctx);
     vm.runInContext(fs.readFileSync('docs/js/sidebar-widgets.js', 'utf8'), ctx);
-    vm.runInContext(html.slice(html.indexOf('// ── canvas hover/touch tooltip'), html.indexOf('// ── boot')), ctx);
+    vm.runInContext(fs.readFileSync('docs/js/canvas-tooltip.js', 'utf8'), ctx);
     vm.runInContext(`renderHistoryHeatmap = data => { rendered = data; return true; }; renderHistWidgets = (...args) => { widgets = args; };`,ctx);
     return {ctx,el};
   }
