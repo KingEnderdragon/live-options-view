@@ -94,12 +94,17 @@ globals().update(
      if not name.startswith("__") and name != "_entry"}
 )
 
+# The runner imports its not-yet-moved callees from ._legacy, so it loads
+# after the bridge (its own import is what pulls those names in).
+from .runner import *
+from .runner import __all__ as _runner_all
+
 __all__ = sorted(
-    set(_config_all) | set(_feed_all)
+    set(_config_all) | set(_feed_all) | set(_runner_all)
     | {"cc", "ms"}
     | set(['BaseHTTPRequestHandler', 'Optional', 'ThreadingHTTPServer', 'boto3', 'date', 'datetime', 'io', 'json', 'logging', 'lru_cache', 'math', 'os', 'parse_qs', 'pd', 'pytz', 're', 'requests', 'secrets', 'sys', 'threading', 'time', 'timedelta', 'timezone', 'urlparse', 'websocket', 'yf'])
     | {name for name in vars(_legacy) if not name.startswith("__")}
 )
 
 # Bridge internals are not part of the collector surface.
-del _load_legacy, _legacy, _config_all, _feed_all, Path, importlib
+del _load_legacy, _legacy, _config_all, _feed_all, _runner_all, Path, importlib
