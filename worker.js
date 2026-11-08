@@ -1,19 +1,20 @@
 import {
-  BOT_USERNAME_RE, ISO_DATE, MAX_BODY_BYTES, R2_ORIGIN,
-  SESSION_COOKIE, SESSION_TTL_SECONDS, STARTING_BALANCE, STRATEGY_ID_RE,
+  ISO_DATE, MAX_BODY_BYTES, R2_ORIGIN,
   botKey, checkOrigin, clearedSessionCookieHeader, computeBookFromTrades,
-  jsonResponse, parseCookies, readJsonBody, readLimited, requireSession,
-  sessionCookieHeader, sessionKey, userKey, withUserRecord,
+  jsonResponse, readJsonBody, readLimited, requireSession,
+  sessionKey, userKey, withUserRecord,
 } from './worker/common.js';
 import { BROWSER_DATA_PREFIX, fetchLiveQuotes, handleBrowserData, handleLiveQuotes } from './worker/browser-data.js';
 import { settlementPriceServer, validateSettleRequest } from './worker/settlement.js';
-import { botUsernames, handleBotIndexReconcile, handleBotMetadata, handleBots, syncBotMembership } from './worker/bots.js';
+import { botUsernames, handleBotIndexReconcile, handleBotMetadata, handleBots } from './worker/bots.js';
+import { handleLogin, handleLogout, handleMe, handleRegister } from './worker/auth.js';
 
 // Re-exported from worker/common.js so the Worker's public API (the 32
 // exports pinned by tests/worker_logic.test.js) stays on worker.js.
 export { BOT_USERNAME_RE, STARTING_BALANCE, STRATEGY_ID_RE, computeBookFromTrades, parseCookies } from './worker/common.js';
 export { settlementPriceServer, validateSettleRequest } from './worker/settlement.js';
 export { BOT_INDEX_KEY, handleBotIndexReconcile, handleBotMetadata, handleBots, netPositions, repairLegacyBotMarker, updateBotIndex } from './worker/bots.js';
+export { MAX_PASSWORD_LEN, MIN_PASSWORD_LEN, USERNAME_RE, constantTimeEqual, derivePasswordHash, randomSaltBase64 } from './worker/auth.js';
 
 const MAX_QUOTE_AGE_MS = 15 * 1000;
 const MAX_QUOTE_FUTURE_MS = 30 * 1000;
@@ -21,10 +22,6 @@ const TRADEABLE_SHARE_SYMBOLS = new Set([
   'QQQ', 'USO', 'SMH', 'IGV', 'META', 'GOOGL', 'AMZN', 'TSLA', 'MU', 'SPCX', 'AAPL',
 ]);
 
-const PBKDF2_ITERATIONS = 100_000;
-export const USERNAME_RE = /^[A-Za-z0-9_]{3,20}$/;
-export const MIN_PASSWORD_LEN = 8;
-export const MAX_PASSWORD_LEN = 256;
 const SETTLEMENT_ID_PREFIX = 'settle';
 export const EXECUTION_RESERVATION_LEASE_MS = 30 * 1000;
 
@@ -134,180 +131,6 @@ export default {
 
 
 
-
-
-export function randomSaltBase64() {
-  return bytesToBase64(crypto.getRandomValues(new Uint8Array(16)));
-}
-
-export async function derivePasswordHash(password, saltBase64, iterations = PBKDF2_ITERATIONS) {
-  const keyMaterial = await crypto.subtle.importKey(
-    'raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveBits'],
-  );
-  const bits = await crypto.subtle.deriveBits(
-    { name: 'PBKDF2', hash: 'SHA-256', salt: base64ToBytes(saltBase64), iterations },
-    keyMaterial,
-    256,
-  );
-  return bytesToBase64(new Uint8Array(bits));
-}
-
-function bytesToBase64(bytes) {
-  let binary = '';
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary);
-}
-
-function base64ToBytes(base64) {
-  const binary = atob(base64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  return bytes;
-}
-
-// Workers' WebCrypto has no built-in timing-safe string compare. Both inputs
-// here are fixed-length base64 of a 256-bit digest, so the length check
-// leaks nothing secret; the byte comparison itself doesn't short-circuit.
-export function constantTimeEqual(a, b) {
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  return diff === 0;
-}
-
-
-
-async function startSession(request, env, record, status) {
-  const token = crypto.randomUUID();
-  await env.SESSIONS.put(
-    sessionKey(token),
-    JSON.stringify({ username: record.username, createdAt: new Date().toISOString() }),
-    { expirationTtl: SESSION_TTL_SECONDS },
-  );
-  return jsonResponse(
-    { username: record.username, balance_cash: record.balance_cash, trades: record.trades },
-    status,
-    { 'Set-Cookie': sessionCookieHeader(request, token, SESSION_TTL_SECONDS) },
-  );
-}
-
-async function handleRegister(request, env) {
-  const originError = checkOrigin(request);
-  if (originError) return originError;
-  const bodyResult = await readJsonBody(request);
-  if (bodyResult.error) return bodyResult.error;
-  const { username, password, alias, strategy_id } = bodyResult.body || {};
-
-  // A bot account is only ever created by an operator presenting the shared
-  // BOT_REGISTRATION_KEY. A wrong key is rejected outright rather than quietly
-  // downgraded to a human registration, so a typo in the setup script fails
-  // loudly instead of silently producing an account missing from the roster.
-  const botKeyHeader = request.headers.get('X-Bot-Registration-Key');
-  let isBot = false;
-  if (botKeyHeader !== null) {
-    if (!env.BOT_REGISTRATION_KEY || botKeyHeader !== env.BOT_REGISTRATION_KEY) {
-      return jsonResponse({ error: 'Invalid bot registration key' }, 403);
-    }
-    isBot = true;
-  }
-  if (isBot && alias !== undefined && (typeof alias !== 'string' || alias.length > 40)) {
-    return jsonResponse({ error: 'Alias must be a string of at most 40 characters' }, 400);
-  }
-  // The Worker deliberately does not validate strategy_id against a list of
-  // known strategies: the registry lives in the Crassus runtime and grows
-  // there (reddit_sentiment_qqq arrived in #22), so a whitelist here would
-  // silently reject every new strategy until someone remembered to redeploy
-  // the Worker. The runner already refuses to start on an unregistered
-  // strategy_id, which is the check that actually matters.
-  if (isBot && strategy_id !== undefined &&
-      (typeof strategy_id !== 'string' || !STRATEGY_ID_RE.test(strategy_id))) {
-    return jsonResponse({ error: 'strategy_id must be 1-40 chars: lowercase letters, numbers, underscore' }, 400);
-  }
-
-  if (typeof username !== 'string' || !(isBot ? BOT_USERNAME_RE : USERNAME_RE).test(username)) {
-    return jsonResponse({ error: `Username must be 3-${isBot ? 40 : 20} characters: letters, numbers, underscore` }, 400);
-  }
-  if (typeof password !== 'string' || password.length < MIN_PASSWORD_LEN || password.length > MAX_PASSWORD_LEN) {
-    return jsonResponse({ error: `Password must be ${MIN_PASSWORD_LEN}-${MAX_PASSWORD_LEN} characters` }, 400);
-  }
-
-  const key = userKey(username);
-  // KV has no conditional-create, so two simultaneous registrations of the
-  // same username can both pass this check and the second put() wins --
-  // accepted given this app's low-stakes, low-concurrency usage.
-  const existing = await env.USERS.get(key);
-  if (existing) return jsonResponse({ error: 'Username already taken' }, 409);
-
-  const salt = randomSaltBase64();
-  const hash = await derivePasswordHash(password, salt);
-  const record = {
-    username,
-    salt,
-    hash,
-    iterations: PBKDF2_ITERATIONS,
-    balance_cash: STARTING_BALANCE,
-    starting_balance: STARTING_BALANCE,
-    trades: [],
-    createdAt: new Date().toISOString(),
-    version: 0,
-    ...(isBot ? { is_bot: true, alias: alias || username, strategy_id: strategy_id || null } : {}),
-  };
-  await env.USERS.put(key, JSON.stringify(record));
-  // Index after the record exists, so the roster can never point at a
-  // username that has no account behind it.
-  if (isBot) {
-    try { await syncBotMembership(env, username); }
-    catch { return jsonResponse({ error: 'Bot membership update failed; login to retry' }, 503); }
-  }
-
-  return startSession(request, env, record, 201);
-}
-
-async function handleLogin(request, env) {
-  const originError = checkOrigin(request);
-  if (originError) return originError;
-  const bodyResult = await readJsonBody(request);
-  if (bodyResult.error) return bodyResult.error;
-  const { username, password } = bodyResult.body || {};
-
-  if (typeof username !== 'string' || typeof password !== 'string') {
-    return jsonResponse({ error: 'Invalid username or password' }, 401);
-  }
-
-  const raw = await env.USERS.get(userKey(username));
-  if (!raw) return jsonResponse({ error: 'Invalid username or password' }, 401);
-  const record = JSON.parse(raw);
-
-  const candidateHash = await derivePasswordHash(password, record.salt, record.iterations);
-  if (!constantTimeEqual(candidateHash, record.hash)) {
-    return jsonResponse({ error: 'Invalid username or password' }, 401);
-  }
-
-  if (record.is_bot === true) {
-    try { await syncBotMembership(env, record.username); }
-    catch { return jsonResponse({ error: 'Bot membership update failed; retry login' }, 503); }
-  }
-
-  return startSession(request, env, record, 200);
-}
-
-async function handleLogout(request, env) {
-  const cookies = parseCookies(request);
-  const token = cookies[SESSION_COOKIE];
-  if (token) await env.SESSIONS.delete(sessionKey(token));
-  return new Response(null, { status: 204, headers: { 'Set-Cookie': clearedSessionCookieHeader(request) } });
-}
-
-async function handleMe(request, env) {
-  const session = await requireSession(request, env);
-  if (!session) return jsonResponse({ error: 'Not logged in' }, 401);
-  return jsonResponse(
-    { username: session.username, balance_cash: session.record.balance_cash, trades: session.record.trades,
-      account_closed: session.record.account_closed === true,
-      closed_at: session.record.closed_at ?? null, closure_reason: session.record.closure_reason ?? null },
-    200,
-  );
-}
 
 
 
