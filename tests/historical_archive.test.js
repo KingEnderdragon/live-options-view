@@ -2,7 +2,6 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const html = fs.readFileSync('docs/index.html', 'utf8');
-const shared = fs.readFileSync('docs/shared.js', 'utf8');
 const APP = 'https://live-options-view.otmooper12.workers.dev';
 const chain = 'Expiration,Type,Strike,UnderlyingPrice,OpenInterest,Volume,DTE\n2026-10-27,call,500,500,200,20,0\n2026-10-27,put,500,500,100,10,0';
 const prices = 'datetime,open,high,low,close\n2026-10-27T13:30:00Z,500,502,499,501';
@@ -25,7 +24,10 @@ const prices = 'datetime,open,high,low,close\n2026-10-27T13:30:00Z,500,502,499,5
     const el = id => elements[id] ||= { textContent:'',innerHTML:'',style:{},classList:{add(){},remove(){}}, value:'',disabled:false };
     const ctx = vm.createContext({document:{getElementById:el}, localStorage:{getItem(){return null}}, BROWSER_DATA:'/browser-data', historyLoaded:true, console,
       fetch: url => worker.fetch(new Request(APP + url), new Proxy({}, { get(){throw Error('private binding accessed');} })) });
-    vm.runInContext(shared.slice(shared.indexOf('function parseCsv('), shared.indexOf('// ── OIranges.csv')), ctx);
+    // B3 slice 1 (Nov 2026): parseCsv moved out of docs/shared.js into
+    // docs/shared/csv-ranges.js — load the shipped module instead of slicing
+    // the function out of shared.js by banner text.
+    vm.runInContext(fs.readFileSync('docs/shared/csv-ranges.js', 'utf8'), ctx);
     // B2 slice 12 (Nov 2026): the historical panel moved out of index.html
     // into docs/js/historical-panel.js — the historical..sidebar slice would
     // now be the banner + a <script src> tag, which is not valid JS, so load

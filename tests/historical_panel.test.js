@@ -92,9 +92,12 @@ function harness() {
       createElement: () => makeEl(),
     },
   });
-  // shared.js whole, so parseCsv / parseRangesCsv / buildHeatmapRows /
-  // TIER_COLORS are the real ones; ranges parsed from the inline CSV above.
+  // shared.js + shared/csv-ranges.js whole, so parseCsv / parseRangesCsv /
+  // buildHeatmapRows / TIER_COLORS are the real ones; ranges parsed from the
+  // inline CSV above. B3 slice 1 (Nov 2026): parseCsv / parseRangesCsv moved
+  // to docs/shared/csv-ranges.js — load the shipped module too, in page order.
   vm.runInContext(shared, ctx, { filename: 'docs/shared.js' });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../docs/shared/csv-ranges.js'), 'utf8'), ctx, { filename: 'docs/shared/csv-ranges.js' });
   vm.runInContext(`ranges = parseRangesCsv(${JSON.stringify(rangesCsv)});`, ctx);
   vm.runInContext(moduleSource, ctx, { filename: 'docs/js/historical-panel.js' });
   return { ctx, els, calls, routes };

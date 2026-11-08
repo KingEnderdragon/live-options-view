@@ -1,10 +1,17 @@
-// shared.js — data parsing + heatmap rendering shared between index.html (the
-// live app) and diag.html (the R2 fetch diagnostic). Plain classic script (no
-// module system, no build step) so both pages just <script src="shared.js">
-// this before their own inline script. Kept dependency-free of paper-trading
-// state (positions/click handling are passed in via opts) so diag.html can
-// exercise the exact same parse/threshold/render code the live app runs,
-// without dragging in unrelated app state.
+// shared.js — the entry point for the shared front-end library. The code used
+// to live in this one file (1,017 lines); it is being split by concern (B3,
+// Nov 2026) into docs/shared/*.js, each a plain classic script like this file,
+// loaded by its own <script> tag in docs/index.html and docs/diag.html. This
+// file keeps the Node surface: under Node it re-exports the same 26 names
+// require('../docs/shared.js') always returned (pinned by
+// tests/csv_ranges.test.js); in the browser the export block at the bottom is
+// a no-op and the concern files define the globals directly. The CSV/range
+// helpers (parseCsv, parseRangesCsv, getThresh, oiBucket) are deliberately NOT
+// re-exported here — as before, they are browser globals, defined by
+// docs/shared/csv-ranges.js; require that file directly under Node. Kept
+// dependency-free of paper-trading state (positions/click handling are passed
+// in via opts) so diag.html can exercise the exact same parse/threshold/render
+// code the live app runs, without dragging in unrelated app state.
 
 // Ephemeral quote state shared by the live table, trade ticket, and open
 // positions. Durable snapshots are one producer today; a faster poller or
@@ -709,60 +716,6 @@ const TIER_COLORS = {
   '0DTE_Monthly': '#e8604b',
 };
 
-// ── CSV parser ────────────────────────────────────────────────────────────────
-function parseCsv(text) {
-  const lines = text.trim().split('\n');
-  const headers = lines[0].split(',').map(h => h.trim());
-  return lines.slice(1).map(line => {
-    const vals = line.split(',');
-    const obj = {};
-    headers.forEach((h, i) => obj[h] = vals[i]?.trim() ?? '');
-    return obj;
-  });
-}
-
-// ── OIranges.csv -> { tier: { offset: { call:[p25,p50,p75,p90], put:[...] } } } ──
-function parseRangesCsv(text) {
-  const rows = parseCsv(text);
-  const out = {};
-  for (const r of rows) {
-    const tier   = r.Tier;
-    const offset = parseInt(r.StrikeOffset);
-    if (!out[tier]) out[tier] = {};
-    out[tier][offset] = {
-      call: [+r.Call_p25, +r.Call_p50, +r.Call_p75, +r.Call_p90],
-      put:  [+r.Put_p25,  +r.Put_p50,  +r.Put_p75,  +r.Put_p90],
-      call_adj: +r.Call_adj || 1.0,
-      put_adj:  +r.Put_adj  || 1.0,
-    };
-  }
-  return out;
-}
-
-// ── threshold lookup (mirrors oi_viewer.py effective_thresholds) ──────────────
-// `ranges` is passed explicitly (not a closed-over global) so this is callable
-// from any page that has fetched+parsed its own OIranges.csv.
-function getThresh(ranges, tier, offset, side) {
-  if (!ranges) return [0, 0, 0, 0];
-  const reg = ranges['0DTE_Regular']?.[offset];
-  if (!reg) return [0, 0, 0, 0];
-  const base = reg[side];
-  if (tier === '0DTE_Regular') return base;
-  const adj_key = side === 'call' ? 'call_adj' : 'put_adj';
-  const t = ranges[tier]?.[offset];
-  const mult = t ? (t[adj_key] || 1.0) : 1.0;
-  return base.map(v => v * mult);
-}
-
-function oiBucket(oi, thresh) {
-  if (oi === 0) return 0;
-  const [p25, p50, p75, p90] = thresh;
-  if (oi < p25) return 1;
-  if (oi < p50) return 2;
-  if (oi < p75) return 3;
-  if (oi < p90) return 4;
-  return 5;
-}
 
 function fmtOI(v) {
   if (!v || v === 0) return '';
@@ -1004,7 +957,12 @@ function summarizeSpyHealth(payload, nowMs = Date.now()) {
   return { state: 'live', text: 'SPY: live', detail: 'SPY snapshot and spot are current' };
 }
 
-if (typeof module !== 'undefined') {
+// Node entry point: the concern modules are plain classic scripts in the
+// browser (loaded by their own <script> tags — see docs/index.html and
+// docs/diag.html), so this block only runs under Node, where it re-exports
+// exactly the same 26 names this file always exported. The CSV/range helpers
+// are not re-exported (see the header): they stay browser globals.
+if (typeof module !== 'undefined' && typeof require === 'function') {
   module.exports = {
     CHAIN_UNDERLYINGS, chainLatestPath, occRoot, validateChainPayload, ChainSelection, relativeOiRanges,
     summarizeSpyHealth,
