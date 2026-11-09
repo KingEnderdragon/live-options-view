@@ -51,30 +51,37 @@ function normalizeQuoteRow(label, row, receivedAt, nowMs) {
     || (instrument.asset_class === 'crypto'
       ? (row?.rolling_change_pct != null ? 'rolling_24h' : 'unavailable')
       : 'previous_close_unverified');
-  const ageMs = observedMs !== null ? nowMs - observedMs
-    : receiptMs !== null ? nowMs - receiptMs : null;
-  let state;
-  if (missing) state = 'missing';
-  else if (stale || row?.refresh_error) state = 'stale';
-  else if (daily) state = 'daily';
-  else if (session && !QUOTE_ACTIVE_SESSIONS.includes(session)) {
-    state = session === 'maintenance' ? 'maintenance' : 'closed';
-  } else if (!session) state = 'unknown';
-  else if (ageMs !== null && (ageMs < -30_000 || ageMs > QUOTE_STALE_MS)) state = 'stale';
-  else state = 'live';
-  return {
+  return decorateQuoteRow({
     label, id: instrument.id ?? row?.instrument_id ?? null,
     name: instrument.name ?? label, asset_class: instrument.asset_class ?? null,
     unit: instrument.unit ?? null, profile: instrument.profile ?? null,
     price, prev_close: quoteNumber(row?.prev_close),
-    changePct, changeBasis, session, daily, stale, state,
-    source, observedAt, observedMs, receiptAt, receiptMs, ageMs,
+    changePct, changeBasis, session, daily, stale, missing,
+    source, observedAt, observedMs, receiptAt, receiptMs,
     reference: row?.reference ?? null,
     rollingReference: row?.rolling_reference ?? null,
     resolvedContract: row?.resolved_contract ?? null,
     refreshError: row?.refresh_error ?? null,
     raw: row || {}, receivedAt,
-  };
+  }, nowMs);
+}
+
+// Age and freshness are a function of the current clock, not of ingestion.
+// Snapshots re-decorate retained rows so an outage ages cards and removes them
+// from movers instead of freezing a one-hour-old quote as live.
+function decorateQuoteRow(row, nowMs) {
+  const ageMs = row.observedMs !== null ? nowMs - row.observedMs
+    : row.receiptMs !== null ? nowMs - row.receiptMs : null;
+  let state;
+  if (row.missing) state = 'missing';
+  else if (row.stale || row.refreshError) state = 'stale';
+  else if (row.daily) state = 'daily';
+  else if (row.session && !QUOTE_ACTIVE_SESSIONS.includes(row.session)) {
+    state = row.session === 'maintenance' ? 'maintenance' : 'closed';
+  } else if (!row.session) state = 'unknown';
+  else if (ageMs !== null && (ageMs < -30_000 || ageMs > QUOTE_STALE_MS)) state = 'stale';
+  else state = 'live';
+  return { ...row, ageMs, state };
 }
 
 class QuoteStore {
@@ -107,30 +114,29 @@ class QuoteStore {
     return changed;
   }
 
-  // The existing live-quote transport pushes the 18 compact instruments more
-  // often than prices.json. It may refresh a current value, never a stale one's
-  // observation time.
-  mergeTickers(quotes, observedAt = null) {
+  // Only a ticker carrying a provider event time may touch the shared row.
+  // LiveQuoteRegistry's quote_ts is a receipt time and may pair an old last
+  // trade with a newly received bid/ask; promoting it would fake freshness.
+  mergeTickers(quotes) {
     let changed = false;
     const nowMs = this.nowFn();
     for (const quote of quotes || []) {
       const label = quote?.symbol;
       const current = this.rows.get(label);
       if (!current || quoteNumber(quote.price) === null) continue;
-      // Only a provider observation may refresh the shared row. The compact
-      // ticker store's r2/yfinance fallbacks are the same artifact this store
-      // already holds; replaying them would not add freshness.
       if (!['dxlink', 'dxlink-live'].includes(quote.source)) continue;
-      const nextObserved = quote.quote_ts || quote.observedAt || observedAt;
-      const nextMs = nextObserved ? Date.parse(nextObserved) : null;
-      if (current.observedMs !== null && nextMs !== null && nextMs < current.observedMs) continue;
+      if (typeof quote.observed_at !== 'string') continue;
+      const nextMs = Date.parse(quote.observed_at);
+      if (!Number.isFinite(nextMs)) continue;
+      if (current.observedMs !== null && nextMs < current.observedMs) continue;
       const updated = normalizeQuoteRow(label, {
-        ...current.raw, price: quote.price, source: quote.source || current.source,
+        ...current.raw,
+        price: quote.price,
+        source: quote.source || current.source,
         prev_close: quote.prev_close ?? current.prev_close,
         chg_pct: quote.chg_pct ?? current.raw.chg_pct,
-        observed_at: nextObserved, collector_received_at: nextObserved, quote_ts: nextObserved,
-        stale: false, refresh_error: null,
-      }, nextObserved, nowMs);
+        observed_at: quote.observed_at,
+      }, current.receivedAt, nowMs);
       this.rows.set(label, updated);
       changed = true;
     }
@@ -138,14 +144,19 @@ class QuoteStore {
     return changed;
   }
 
-  row(label) { return this.rows.get(label) || null; }
+  row(label) {
+    const stored = this.rows.get(label);
+    return stored ? decorateQuoteRow(stored, this.nowFn()) : null;
+  }
 
   snapshot() {
+    const nowMs = this.nowFn();
+    const rows = [...this.rows.values()].map(row => decorateQuoteRow(row, nowMs));
     return {
-      rows: [...this.rows.values()],
-      byLabel: this.rows,
+      rows,
+      byLabel: new Map(rows.map(row => [row.label, row])),
       meta: this.meta,
-      nowMs: this.nowFn(),
+      nowMs,
     };
   }
 }
@@ -341,7 +352,7 @@ if (typeof module !== 'undefined') {
   module.exports = {
     QUOTE_PIN_STORAGE_KEY, QUOTE_PIN_LIMIT, QUOTE_STALE_MS, QUOTE_MOVER_MAX_AGE_MS,
     QUOTE_SESSION_LABELS, QUOTE_MODE_LABELS, QUOTE_MOVER_GROUPS,
-    QuoteStore, QuotePins, normalizeQuoteRow, quoteSessionMode, computeMovers,
+    QuoteStore, QuotePins, normalizeQuoteRow, decorateQuoteRow, quoteSessionMode, computeMovers,
     sanitizePins, quoteCandidates, quoteReferenceUsable, clockFallbackMode,
     formatQuotePercent, formatQuoteAge, formatQuotePrice,
   };

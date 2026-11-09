@@ -54,13 +54,18 @@ renders it and runs one `QuotePanelController`. The controller:
 - owns the only prices timer. Cards never fetch, so there are no per-card
   polling loops.
 
-The existing live-quote transport may overlay a newer provider tick for the
-compact instruments; its `r2`/`yfinance` fallbacks cannot downgrade a fresh
-`prices.json` row.
+The existing live-quote transport may overlay a newer provider tick only when
+the tick carries its own provider event time. Its `quote_ts` is a receipt time
+and may pair an old last trade with a newly received bid/ask, so receipt-only
+ticks never freshen the store. The panel currently reads `prices.json` alone;
+the overlay path is retained only with that explicit observation-time guard.
 
-Observation time drives the displayed age. Publication or retrieval time never
-freshens a quote. Each card exposes source, observation age, session state and
-change basis through its accessible label and title.
+Observation time drives the displayed age. Snapshots re-decorate retained rows
+against the current clock, so a failed or partial refresh ages cards and
+removes expired rows from movers instead of freezing the last ingestion age.
+Publication or retrieval time never freshens a quote. Each card exposes source,
+observation age, session state and change basis through its accessible label
+and title.
 
 ## Session source
 
@@ -89,6 +94,8 @@ pin and reorder interactions, empty state, session switch, one-in-flight
 refresh, backoff, visibility changes and cleanup. `node tests/quote_instruments.test.js`
 fails if the browser projection drifts from the accepted 100 registry.
 
-Rendered desktop and mobile-sized inspection is recorded with the PR. Real
+Rendered desktop and mobile-sized inspection is recorded with the PR, including
+a browser-measured focus-retention check: after a refresh, the focused pin
+button, its card node and its control node are the same objects. Real
 premarket, after-hours, overnight-futures and weekend-crypto observation is
 acceptance work for G4 after #178 is deployed, not a fixture claim.

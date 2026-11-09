@@ -102,15 +102,62 @@ const labels = list => Array.from(list, item => item.label);
 }
 
 {
-  // A live ticker overlay may refresh a current row, but the compact store's
-  // r2 fallback never downgrades a fresh prices.json observation.
+  // Retained rows age from the current clock, including partial payloads and
+  // outages that never produce another row for the instrument.
+  const clock = [NOW];
+  const store = new model.QuoteStore({ nowFn: () => clock[0] });
+  store.mergePayload(payload({
+    AAPL: row('AAPL', { observed_at: new Date(NOW - 10_000).toISOString() }),
+    MSFT: row('MSFT', { observed_at: new Date(NOW - 10_000).toISOString() }),
+  }));
+  let snapshot = store.snapshot();
+  assert.equal(snapshot.byLabel.get('AAPL').ageMs, 10_000);
+  assert.equal(snapshot.byLabel.get('AAPL').state, 'live');
+  assert.equal(model.computeMovers(snapshot, { mode: 'equities' }).eligible, 2);
+
+  clock[0] += 60 * 60_000;
+  snapshot = store.snapshot();
+  const aged = snapshot.byLabel.get('AAPL');
+  assert.equal(aged.ageMs, 10_000 + 60 * 60_000, 'age advances without another payload');
+  assert.equal(aged.state, 'stale', 'a retained row cannot stay live for an hour');
+  assert.equal(model.computeMovers(snapshot, { mode: 'equities' }).eligible, 0,
+    'expired rows leave the movers list');
+
+  // A partial publication for another instrument must not reset AAPL's age.
+  store.mergePayload(payload({ MSFT: row('MSFT', { observed_at: new Date(clock[0] - 10_000).toISOString() }) }));
+  snapshot = store.snapshot();
+  assert.equal(snapshot.byLabel.get('AAPL').state, 'stale');
+  assert.equal(snapshot.byLabel.get('MSFT').state, 'live');
+}
+
+{
+  // A receipt time is not a provider observation. The compact registry's
+  // quote_ts may pair an old last trade with a newer bid/ask; that must never
+  // freshen the row, and a fresh provider event must not erase failure flags.
   const store = new model.QuoteStore({ nowFn: () => NOW });
-  store.mergePayload(payload({ QQQ: row('QQQ', { price: 656 }) }));
-  store.mergeTickers([{ symbol: 'QQQ', price: 1, source: 'r2-snapshot', observedAt: new Date(NOW).toISOString() }]);
-  assert.equal(store.row('QQQ').price, 656, 'fallback ticker replay is ignored');
-  store.mergeTickers([{ symbol: 'QQQ', price: 657, source: 'dxlink', observedAt: new Date(NOW - 1000).toISOString() }]);
-  assert.equal(store.row('QQQ').price, 657, 'a live provider ticker refreshes the row');
-  assert.equal(store.row('QQQ').state, 'live');
+  store.mergePayload(payload({
+    AAPL: row('AAPL', {
+      observed_at: new Date(NOW - 60 * 60_000).toISOString(),
+      refresh_error: 'timeout',
+    }),
+  }));
+  assert.equal(store.snapshot().byLabel.get('AAPL').state, 'stale');
+  const receiptOnly = { symbol: 'AAPL', price: 999, source: 'dxlink', quote_ts: new Date(NOW).toISOString() };
+  assert.equal(store.mergeTickers([receiptOnly]), false, 'a receipt-only ticker is ignored');
+  assert.equal(store.row('AAPL').price, 100);
+  assert.equal(store.row('AAPL').observedAt, new Date(NOW - 60 * 60_000).toISOString());
+
+  store.mergeTickers([{ symbol: 'AAPL', price: 1, source: 'r2-snapshot', observedAt: new Date(NOW).toISOString() }]);
+  assert.equal(store.row('AAPL').price, 100, 'fallback replay is ignored');
+
+  const providerEvent = { symbol: 'AAPL', price: 101, source: 'dxlink',
+    observed_at: new Date(NOW - 1000).toISOString() };
+  assert.equal(store.mergeTickers([providerEvent]), true);
+  const updated = store.row('AAPL');
+  assert.equal(updated.price, 101);
+  assert.equal(updated.observedAt, providerEvent.observed_at, 'provider time, not receipt time, is retained');
+  assert.equal(updated.refreshError, 'timeout', 'a new observation does not erase a producer failure flag');
+  assert.equal(updated.state, 'stale');
 }
 
 {

@@ -69,11 +69,6 @@ function initPriceStrip() {
       store: quoteStoreRef,
       pins: new QuotePins({ storage: safeStorage() }),
     });
-    tickerState.subscribe(() => {
-      const snapshot = tickerState.snapshot();
-      const quotes = Object.entries(snapshot).map(([symbol, quote]) => ({ ...quote, symbol }));
-      if (quoteStoreRef.mergeTickers(quotes)) quotePanelRef.render(quoteStoreRef.snapshot());
-    });
   }
   // Legacy containers are optional: an older page can still build its tiles.
   const main = document.getElementById('px-main');

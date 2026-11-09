@@ -42,8 +42,8 @@ class El {
     child.parentNode = null;
     return child;
   }
-  setAttribute(name, value) { this.attributes[name] = String(value); }
-  getAttribute(name) { return this.attributes[name] ?? null; }
+  setAttribute(name, value) { this.attributes[name] = { name, value: String(value) }; }
+  getAttribute(name) { return this.attributes[name]?.value ?? null; }
   removeAttribute(name) { delete this.attributes[name]; }
   addEventListener(type, handler) { (this.listeners[type] ||= []).push(handler); }
   removeEventListener(type, handler) {
@@ -131,7 +131,7 @@ function payload(rows, { lane = { mode: 'equities', eligible: true } } = {}) {
 }
 
 function findCard(container, label) {
-  return container.children.find(child => child.attributes['data-symbol'] === label)?._quoteCard || null;
+  return container.children.find(child => child.getAttribute('data-symbol') === label)?._quoteCard || null;
 }
 
 function makeStorage(initial = null) {
@@ -207,6 +207,12 @@ function makeStorage(initial = null) {
   assert.equal(findCard(panel.els.pins, 'AAPL').moveRight.disabled, true, 'last pin cannot move right');
   assert.equal(findCard(panel.els.pins, 'NFLX').moveRight.getAttribute('aria-label'), 'Move NFLX right');
   assert.equal(findCard(panel.els.pins, 'NFLX').unpin.getAttribute('aria-label'), 'Unpin NFLX');
+  const focusedButton = findCard(panel.els.pins, 'AAPL').moveLeft;
+  focusedButton.focus();
+  const focusedCardElement = findCard(panel.els.pins, 'AAPL').el;
+  panel.render();
+  assert.equal(findCard(panel.els.pins, 'AAPL').el, focusedCardElement, 'an unchanged pin keeps its element node');
+  assert.equal(focusedButton.focused, true, 'a refresh does not blur a focused pin control');
   findCard(panel.els.pins, 'AAPL').moveLeft.dispatch('click');
   assert.deepEqual(Array.from(panel.pins.list()), ['AAPL', 'NFLX'], 'move-left reorders and persists');
   assert.match(panel.els.announce.textContent, /moved left/);
@@ -306,6 +312,36 @@ function makeStorage(initial = null) {
   documentRef.dispatch('visibilitychange');
   const visibleTimer = [...timers.values()].filter(timer => !timer.cleared).at(-1);
   assert.equal(visibleTimer.ms, 0);
+
+  // An outage advances ages: the failed refresh re-decorates retained rows so
+  // the pinned card becomes stale and leaves the movers instead of freezing.
+  const agingClock = [NOW];
+  const agingStore = new model.QuoteStore({ nowFn: () => agingClock[0] });
+  const agingDoc = new Doc(IDS);
+  const agingPanel = dom.initQuotePanel({
+    documentRef: agingDoc,
+    store: agingStore,
+    pins: new model.QuotePins({ storage: makeStorage(JSON.stringify(['AAPL'])) }),
+  });
+  agingStore.mergePayload(payload({ AAPL: row('AAPL', { observed_at: new Date(NOW - 10_000).toISOString() }) }));
+  agingPanel.render();
+  assert.equal(findCard(agingPanel.els.pins, 'AAPL').stateEl.textContent, 'Regular');
+  agingClock[0] += 60 * 60_000;
+  let agingCalls = 0;
+  const agingController = new dom.QuotePanelController({
+    refresh: async () => { agingCalls += 1; return null; },
+    store: agingStore, panel: agingPanel, documentRef: agingDoc,
+    nowFn: () => agingClock[0], backoffMs: 1_000,
+  });
+  agingController.start({ immediate: true });
+  const agingTimer = [...timers.values()].filter(timer => !timer.cleared).at(-1);
+  await agingTimer.fn();
+  assert.equal(agingCalls, 1);
+  assert.equal(findCard(agingPanel.els.pins, 'AAPL').stateEl.textContent, 'stale',
+    'a failed refresh ages the retained card');
+  assert.equal(agingPanel.els.moversUp.children.length, 0, 'the stale row leaves movers');
+  assert.match(agingPanel.els.updated.textContent, /refresh failed/);
+  agingController.stop();
 
   controller.stop();
   assert.equal(controller.running, false);

@@ -40,6 +40,7 @@ function quoteCardTitle(row) {
 function quoteCard(doc, row, { section, index = null, movable = false, onPinToggle = null, onMove = null } = {}) {
   const el = quotePanelElement(doc, 'article', 'ticker-btn quote-card');
   el.setAttribute('data-symbol', row.label);
+  el.dataset.symbol = row.label;
   el.setAttribute('data-section', section);
   el.setAttribute('tabindex', '0');
   el.setAttribute('aria-label', `${row.name}, ${formatQuotePrice(row)}, ${formatQuotePercent(row.changePct)}, ${quoteStateText(row)}`);
@@ -105,8 +106,11 @@ function paintQuoteCard(card, row) {
 
 function syncQuoteCards(container, labels, rowFor, build) {
   const existing = container.children;
+  const labelOf = child => child.getAttribute
+    ? child.getAttribute('data-symbol')
+    : (child.dataset?.symbol ?? null);
   const same = existing.length === labels.length &&
-    labels.every((label, index) => existing[index].attributes?.['data-symbol'] === label);
+    labels.every((label, index) => labelOf(existing[index]) === label);
   if (same) {
     for (let index = 0; index < labels.length; index += 1) {
       const card = existing[index]._quoteCard;
@@ -400,6 +404,9 @@ class QuotePanelController {
         this.failures += 1;
         const delay = Math.min(this.maxBackoffMs, this.backoffMs * (2 ** (this.failures - 1)));
         const ago = formatQuoteAge(this.nowFn() - startedAt);
+        // Re-decorate retained rows on the failure path too: ages and stale
+        // states must advance even when no new payload arrives.
+        this.panel?.render?.(this.store.snapshot());
         this.panel?.setStatus?.(`Quote refresh failed · showing last values (${ago} ago)`);
         this._schedule(delay);
         return null;
