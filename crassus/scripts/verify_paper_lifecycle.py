@@ -71,7 +71,7 @@ def check(name: str, condition: bool, detail: str = "") -> None:
 
 
 def snapshot(spot: float) -> MarketSnapshot:
-    now = datetime.now(ET).isoformat()
+    now = clock.now_et().isoformat()
     rows = [
         {"OptionSymbol": f"QQQ261109C00{strike}000", "Strike": float(strike),
          "Type": "call", "Bid": 2.4, "Ask": 2.5, "Volume": 100, "OpenInterest": 100}
@@ -128,7 +128,8 @@ def main() -> int:
         )
         ledger_dir = TMP / "ledger"
         state_dir = TMP / "state"
-        start = datetime.now(ET)
+        # Match the isolated Worker clock, independent of CI wall time.
+        start = datetime(2026, 11, 9, 10, 0, tzinfo=ET)
         clock.now_et = lambda: start
         runner = Runner([account], base_url=BASE, snapshot_url=BASE + "/intraday/latest.json",
                         ledger_dir=ledger_dir, state_dir=state_dir, bot_registration_key=KEY)

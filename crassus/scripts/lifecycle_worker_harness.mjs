@@ -6,6 +6,15 @@ import http from 'node:http';
 import { randomUUID } from 'node:crypto';
 import worker, { updateBotIndex } from '../../backend/index.js';
 
+// Fixed regular-session time for the fixture contracts. Production clock
+// behavior stays intact; only this isolated test process replaces Date.
+const NativeDate = Date;
+const fixtureNow = NativeDate.parse('2026-11-09T15:00:00Z');
+globalThis.Date = class extends NativeDate {
+  constructor(...args) { super(...(args.length ? args : [fixtureNow])); }
+  static now() { return fixtureNow; }
+};
+
 const BOT_KEY = 'lifecycle-integration-key';
 const HOST = '127.0.0.1';
 const nonce = randomUUID();
