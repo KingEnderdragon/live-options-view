@@ -12,7 +12,7 @@ A safe fixture check from the repository root is `node tests/vwap_rvol_display.t
 
 ## Distinguish the live quote from the snapshot
 
-The same cell can contain lagged OI and a much fresher bid/ask. Follow the live quote service and poller from [the page shell](../site/index.html) through `/api/live-quotes` in [worker.js](../backend/index.js) to `handleLiveQuotes` in [backend/browser-data.js](../backend/browser-data.js): the Worker proxies to the collector's in-memory quote service, not an R2 write. For archived data, inspect the shell's `R2` and `BROWSER_DATA` constants: only the configured workers.dev origin uses `/browser-data/`; the custom domain reads fixed public R2. Ask: which timestamp belongs to the quote side, which to snapshot construction, and which to retrieval?
+The same cell can contain lagged OI and a much fresher bid/ask. Follow the live quote service and poller from [the page shell](../site/index.html) through `/api/live-quotes` in [backend/index.js](../backend/index.js) to `handleLiveQuotes` in [backend/browser-data.js](../backend/browser-data.js): the Worker proxies to the collector's in-memory quote service, not an R2 write. For archived data, inspect the shell's `R2` and `BROWSER_DATA` constants: only the configured workers.dev origin uses `/browser-data/`; the custom domain reads fixed public R2. Ask: which timestamp belongs to the quote side, which to snapshot construction, and which to retrieval?
 
 ## Follow a Historical OI color
 
@@ -24,7 +24,7 @@ The date list, chain CSV and calibration are external-pipeline products. This co
 
 Open [squeeze-panel.js](../site/js/squeeze-panel.js): its pointers select an externally produced ranking and report latest success separately from newer attempts; it does not run the squeeze scan. Open [market_mcp/server.js](../market_mcp/server.js) to see the seven read-only tools, then [the MCP guide](../market_mcp/README.md) to follow a `detail_reference` to pinned evidence. OA-203's ranking producer is [the scanner](../market_data/options_scanner/__main__.py), whereas Tradier time-and-sales ends at an archive with no reader in this tree. Similar provider names do not make these the same data path.
 
-For Bots, open [bots-panel.js](../site/js/bots-panel.js) and follow `/api/bots` into [worker.js](../backend/index.js). The Cloudflare cron invokes `settleAllBots` even with no page open. Follow it into [backend/settlement.js](../backend/settlement.js), which reads membership through [backend/bots.js](../backend/bots.js), account state and archive spot marks; the dashboard settlement path instead has page-observed spot marks, which are not guaranteed recovery of dates the page never saw. This walkthrough does not change settlement or closed-account policy.
+For Bots, open [bots-panel.js](../site/js/bots-panel.js) and follow `/api/bots` into [backend/index.js](../backend/index.js). The Cloudflare cron invokes `settleAllBots` even with no page open. Follow it into [backend/settlement.js](../backend/settlement.js), which reads membership through [backend/bots.js](../backend/bots.js), account state and archive spot marks; the dashboard settlement path instead has page-observed spot marks, which are not guaranteed recovery of dates the page never saw. This walkthrough does not change settlement or closed-account policy.
 
 ## A usable stopping point
 

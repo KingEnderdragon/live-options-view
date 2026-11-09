@@ -1,4 +1,4 @@
-# Website and paper-account Worker
+# Website and paper-account backend
 
 [backend/index.js](index.js) is the stable Cloudflare entry point. It dispatches to
 these modules; [wrangler.toml](../wrangler.toml) defines assets, bindings and cron.

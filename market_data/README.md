@@ -1,4 +1,4 @@
-# Market-data producers
+# Market data
 
 These services acquire or derive data for readers elsewhere in the repository.
 They have separate lifecycles; a browser request does not start them.

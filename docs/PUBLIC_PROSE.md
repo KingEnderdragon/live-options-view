@@ -1,6 +1,6 @@
 # Public prose: preservation and reference inventory
 
-The accepted source tree at `2b08a174b1d296943f92c07a0978c5a1ffaf7682` contains 44 served files, including the Markdown members below. Steve owns the path-only `docs/` → `site/` move and all deployment/test/packaging references. Musef owns repository prose links. No served Markdown is relocated to an internal-only directory, edited, removed or unpublished by lane M.
+The accepted source tree at `2b08a174b1d296943f92c07a0978c5a1ffaf7682` contains 44 served files, including the Markdown members below. Steve owns the path-only `docs/` → `site/` move and all runtime/test/packaging references. Musef owns repository prose links. No served Markdown is relocated to an internal-only directory, edited, removed or unpublished by lane M.
 
 The destination is the same publicly served asset tree under a clearer repository name. Each public-relative path and original Git blob must remain unchanged; the blob column pins the comparison, not a live HTTP observation. Repository folder names are not public URL prefixes. Existing historical or external `/docs/` references are not rewritten merely because this tree moves.
 

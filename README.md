@@ -10,7 +10,7 @@ Open [the website](https://options.moopertonic.net), then use the [system map](A
 |---|---|---|
 | Where is the page? | [site/index.html](site/index.html), [site/js](site/js) | Page shell and browser features; the source directory is not a public URL prefix |
 | Where do prices and chain snapshots come from? | [market_data/live_market/](market_data/live_market) → [collector guide](market_data/live_market/README.md) | tastytrade/DXLink acquisition, snapshot-derived readings and optional EIA forecasts |
-| What serves data and accounts? | [Worker guide](backend/README.md), [wrangler.toml](wrangler.toml) | Static assets, allowlisted archive access, live-quote proxy, paper-trading API and scheduled settlement |
+| What serves data and accounts? | [Backend guide](backend/README.md), [wrangler.toml](wrangler.toml) | Static assets, allowlisted archive access, live-quote proxy, paper-trading API and scheduled settlement |
 | What decides paper trades? | [crassus/README.md](crassus/README.md) | Strategy runner; consumes market snapshots and calls the Worker account API |
 | What produces Big Banana rankings? | [market_data/options_scanner/__main__.py](market_data/options_scanner/__main__.py), [scanner contract](site/plans/2026-09-options-return-scanner.md) | Tradier chain sampling, stored sweeps and retrospective return products |
 | What stores Tradier time-and-sales? | [launcher](market_data/tradier/launcher.py), [market_data/tradier/OPERATIONS.md](market_data/tradier/OPERATIONS.md) | Separate daily archive collector; it does not feed the displayed chain |
