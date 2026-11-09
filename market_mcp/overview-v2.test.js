@@ -117,6 +117,12 @@ test('a reference more than one exchange session old cannot produce a previous-c
   const stale=event('AAPL');stale.reference={...stale.reference,observed_at:'2026-09-01T20:00:00Z'};
   const r=await one(setup({AAPL:stale}),'AAPL');
   assert.equal(r.change.status,'unavailable');assert.equal(r.change.absolute,null);assert.ok(r.change.reasons.includes('reference_not_previous_session'));
+  // Crypto's cut is the previous UTC day exactly; a missing day is a multi-day move.
+  const btc=event('BTC/USD');btc.reference={...btc.reference,observed_at:'2026-09-30T00:00:00Z',observation_timezone:'UTC'};
+  let c=await one(setup({'BTC/USD':btc}),'BTC/USD');
+  assert.equal(c.change.status,'unavailable');assert.ok(c.change.reasons.includes('reference_not_previous_session'));
+  btc.reference={...btc.reference,observed_at:'2026-10-01T00:00:00Z'};
+  c=await one(setup({'BTC/USD':btc}),'BTC/USD');assert.notEqual(c.change.status,'unavailable');
 });
 
 test('unverified calendars stay unknown; crypto can be continuous and equity holiday is closed',async()=>{  let r=await one(setup({KOSPI:event('KOSPI')}),'KOSPI');assert.equal(r.freshness.market_state,'unknown');assert.equal(r.freshness.live,false);

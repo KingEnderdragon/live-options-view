@@ -266,7 +266,13 @@ function enrich(out, r, p, now) {
   // calendar-day bound still catches a clearly stale reference.
   const sessionGap = currentDate && referenceDate && ['E','V','Y'].includes(inst.profile) ? sessionsBetween(referenceDate, currentDate) : null;
   const dayGap = currentDate && referenceDate ? (Date.parse(currentDate) - Date.parse(referenceDate)) / 86400000 : null;
-  if (sessionGap !== null ? sessionGap > 1 : dayGap !== null && dayGap > 5) reasons.push('reference_not_previous_session');
+  // Crypto's documented cut is the previous UTC day, so it must be exact: a
+  // missing day turns the figure into a multi-day move wearing a daily label.
+  const gapInvalid = dayGap == null ? false
+    : inst.profile === 'C' ? dayGap !== 1
+    : ['E','V','Y'].includes(inst.profile) ? (sessionGap !== null ? sessionGap > 1 : dayGap > 5)
+    : false;
+  if (gapInvalid) reasons.push('reference_not_previous_session');
   const unavailable = reasons.length > 0;
   const partial = [];
   if (!observed && !r.observation_date) partial.push('observation_time_unverified');
