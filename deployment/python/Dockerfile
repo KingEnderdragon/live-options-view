@@ -12,7 +12,7 @@ RUN apt-get update \
 COPY deployment/python/requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . ./
+COPY market_data/ ./market_data/
 
 # Each service manifest selects its own entry point.
 CMD ["python", "-m", "market_data.live_market"]
