@@ -58,6 +58,9 @@ jobs:
       - name: Run Guideline Phelps suite
         working-directory: crassus
         run: python scripts/verify_phelps.py
+      - name: Run changing-ATM position-stacking fixture (#86)
+        working-directory: crassus
+        run: python scripts/verify_position_stacking.py
       - name: Run looking_glass_straddle strategy suite
         working-directory: crassus
         run: python scripts/verify_looking_glass_straddle.py
