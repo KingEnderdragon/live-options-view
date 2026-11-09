@@ -15,7 +15,7 @@ Open [the website](https://options.moopertonic.net), then use the [system map](A
 | What produces Big Banana rankings? | [market_data/options_scanner/__main__.py](market_data/options_scanner/__main__.py), [scanner contract](site/plans/2026-09-options-return-scanner.md) | Tradier chain sampling, stored sweeps and retrospective return products |
 | What stores Tradier time-and-sales? | [launcher](market_data/tradier/launcher.py), [market_data/tradier/OPERATIONS.md](market_data/tradier/OPERATIONS.md) | Separate daily archive collector; it does not feed the displayed chain |
 | How does an assistant read it? | [market_mcp/README.md](market_mcp/README.md) | Bounded read-only tools over producer artifacts, not an alternate ranking engine |
-| What is offline research? | [synthetic_days](research/synthetic_days/README.md), [MOO-171 audit](research/snapshot_analysis/README.md), [news_pin_bot](experiments/news_pin_bot/README.md) | Separate simulation, audit and news tooling; not implied to be deployed |
+| Where is strategy backtesting? | [Synthetic days](research/synthetic_days/README.md) | Offline replay against the current Crassus strategies |
 
 Each service owns its implementation and operating guide. The three market-data producers share [Python image packaging](deployment/python/README.md); their launch paths and schedules are documented with each component. [wrangler.toml](wrangler.toml) stays at root so both Cloudflare deployment routes discover the same configuration.
 
@@ -23,7 +23,7 @@ Each service owns its implementation and operating guide. The three market-data 
 
 - [market_data/](market_data/README.md): live acquisition, daily archives and option scans.
 - [site/](site), [backend/](backend/README.md), [crassus/](crassus/README.md) and [market_mcp/](market_mcp/README.md): distinct browser, account/API, strategy and assistant-reader components.
-- [research/](research/README.md): empirical studies, frozen analyses and simulation tools.
+- [research/](research/README.md): offline backtesting and links to completed studies.
 - [experiments/](experiments/README.md): prototypes not integrated into the operating system.
 - [docs/](docs/README.md), [deployment/](deployment/python/README.md), [scripts/](scripts), [tests/](tests) and [.github/](.github): documentation, shared packaging, repository-wide tools, cross-component tests and automation.
 
