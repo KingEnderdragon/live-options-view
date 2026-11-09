@@ -166,13 +166,38 @@ const labels = list => Array.from(list, item => item.label);
   const maintenance = snapshotWith({
     '/GC': row('/GC', { market_session: 'maintenance', session: 'maintenance', chg_pct: 2 }),
   });
-  const mode = model.quoteSessionMode({ ...maintenance, meta: { ...maintenance.meta, lane: null } });
+  const mode = model.quoteSessionMode({ ...maintenance, meta: { ...maintenance.meta, lane: { mode: 'futures' } } });
   assert.equal(mode.mode, 'futures');
   assert.deepEqual(labels(model.computeMovers(maintenance, { mode: 'futures' }).up), []);
   assert.equal(model.clockFallbackMode(Date.parse('2026-11-14T17:00:00Z')), 'crypto', 'Saturday is crypto');
   assert.equal(model.clockFallbackMode(Date.parse('2026-11-09T09:30:00Z')), 'equities', 'Monday premarket is equities');
   assert.equal(model.clockFallbackMode(Date.parse('2026-11-09T07:00:00Z')), 'futures', 'overnight is futures');
   assert.equal(model.clockFallbackMode(Date.parse('2026-11-14T01:30:00Z')), 'crypto', 'Friday after 20:00 ET is crypto');
+}
+
+{
+  // Deployed regression: an old artifact on a Sunday night has Friday's
+  // extended-hours trade sessions but no producer lane. The panel must not
+  // claim equities are open; with no fresh rows the session is unknown.
+  const stale = snapshotWith({
+    QQQ: row('QQQ', { observed_at: new Date(NOW - 59 * 3600_000).toISOString() }),
+    SMH: row('SMH', { observed_at: new Date(NOW - 59 * 3600_000).toISOString() }),
+  });
+  const mode = model.quoteSessionMode({ ...stale, meta: { ...stale.meta, lane: null } });
+  assert.equal(mode.mode, 'unknown');
+  assert.equal(mode.label, 'Session unknown');
+  assert.equal(mode.source, 'no_fresh_session_evidence');
+  assert.equal(model.computeMovers(stale, { mode: 'equities' }).eligible, 0);
+}
+
+{
+  // A fresh weekend crypto row still names the active group without a lane.
+  const weekend = snapshotWith({
+    'BTC/USD': row('BTC/USD', { market_session: 'continuous', session: 'continuous' }),
+  });
+  const mode = model.quoteSessionMode({ ...weekend, meta: { ...weekend.meta, lane: null } });
+  assert.equal(mode.mode, 'crypto');
+  assert.equal(mode.source, 'rows_or_clock');
 }
 
 // ── movers ───────────────────────────────────────────────────────────────────

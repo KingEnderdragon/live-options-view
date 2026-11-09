@@ -69,12 +69,12 @@ and title.
 
 ## Session source
 
-The producer's `price_lane.mode` is authoritative when present. Otherwise the
-panel infers the group from `market_session` values, then from an ET clock
-fallback for older artifacts. The clock fallback cannot know exchange holidays
-or early closes; it is labelled by its provenance only internally, and the
-producer path is what real extended-session acceptance depends on
-([#178](https://github.com/OwenTanzer/live-options-view/issues/178)).
+The producer's `price_lane.mode` is authoritative when present. Otherwise only
+rows whose state is `live` may name the active group; a row's `session` is the
+last trade/observation session, not proof that the market is open now. If no
+fresh row supports the ET clock fallback group, the panel reports
+`Session unknown` rather than claiming extended-hours coverage from a stale
+Friday print on a Sunday night.
 
 ## Release and rollback
 

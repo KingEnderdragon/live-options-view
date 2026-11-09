@@ -220,6 +220,23 @@ function makeStorage(initial = null) {
   assert.deepEqual(Array.from(panel.pins.list()), ['AAPL']);
   assert.match(panel.els.announce.textContent, /Unpinned/);
 
+  const staleClock = [NOW];
+  const staleDoc = new Doc(IDS);
+  const staleStore = new model.QuoteStore({ nowFn: () => staleClock[0] });
+  const stalePanel = dom.initQuotePanel({
+    documentRef: staleDoc, store: staleStore,
+    pins: new model.QuotePins({ storage: makeStorage('[]') }),
+  });
+  staleStore.mergePayload(payload({
+    QQQ: row('QQQ', { observed_at: new Date(NOW - 3 * 60 * 60_000).toISOString() }),
+    SMH: row('SMH', { observed_at: new Date(NOW - 3 * 60 * 60_000).toISOString() }),
+  }, { lane: null }));
+  stalePanel.render();
+  assert.equal(stalePanel.els.session.textContent, 'Session unknown',
+    'stale extended-session rows cannot claim the market is open');
+  assert.match(stalePanel.els.moversScope.textContent, /No active group/);
+  assert.equal(stalePanel.els.moversUp.children.length, 0);
+
   // Picker filters and adds; core and already-pinned instruments never appear.
   panel.openPicker();
   assert.equal(panel.els.pinDialog.hidden, false);
