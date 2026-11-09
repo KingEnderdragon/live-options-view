@@ -102,12 +102,40 @@ class FormulaParity(unittest.TestCase):
         self.assertEqual(result["status"], {"code": "undefined", "reason": "zero_call_oi"})
 
     def test_max_pain_matches_the_strategy_including_ties(self):
-        for rows in (chain(), chain(600.0)[::-1],
-                     [row(600, "call", 0), row(605, "put", 0)]):
+        for rows in (chain(), chain(600.0)[::-1]):
             expected_strike, expected_both = _compute_max_pain(rows)
             result = compute_reference_max_pain(rows)
             self.assertEqual(result["values"]["max_pain_strike"], expected_strike)
             self.assertEqual(result["values"]["strikes_with_oi_both_sides"], expected_both)
+
+    def test_max_pain_with_no_open_interest_surface_is_no_data(self):
+        # All-zero and all-missing are indistinguishable on this feed; both
+        # have no loss surface, so the reading must not publish the lowest
+        # candidate strike as a max-pain level.
+        zero = [row(600, "call", 0), row(600, "put", 0), row(605, "call", 0)]
+        missing = [row(600, "call", None), row(600, "put", None), row(605, "call", None)]
+        zero_result = compute_reference_max_pain(zero)
+        missing_result = compute_reference_max_pain(missing)
+        self.assertEqual(zero_result, missing_result)
+        for result in (zero_result, missing_result):
+            self.assertEqual(result["status"],
+                             {"code": "no_data", "reason": "no_open_interest_surface"})
+            self.assertIsNone(result["values"]["max_pain_strike"])
+            self.assertEqual(result["values"]["rows_with_open_interest"], 0)
+            self.assertEqual(result["values"]["strikes_with_oi_both_sides"], 0)
+            self.assertEqual(result["values"]["candidate_strikes"], 2)
+        # The strategy's own fallback is unchanged: this is an unsupported
+        # reading, not a strategy policy change.
+        self.assertEqual(_compute_max_pain(zero)[0], 600)
+
+    def test_max_pain_with_one_sided_open_interest_still_matches(self):
+        rows = [row(600, "call", 100), row(605, "call", 50),
+                row(600, "put", 0), row(605, "put", 0)]
+        expected_strike, expected_both = _compute_max_pain(rows)
+        result = compute_reference_max_pain(rows)
+        self.assertEqual(result["status"]["code"], "ok")
+        self.assertEqual(result["values"]["max_pain_strike"], expected_strike)
+        self.assertEqual(result["values"]["strikes_with_oi_both_sides"], expected_both)
 
     def test_reference_skew_matches_the_strategy_band(self):
         rows = chain()
@@ -211,6 +239,33 @@ class ImmutableJoin(unittest.TestCase):
         snapshot = MarketSnapshot.from_payload(
             "test://board", self.payload(build(), "0" * 64), b"{}")
         self.assertEqual(snapshot.readings_status, "digest_mismatch")
+
+    def test_malformed_reading_elements_are_invalid_not_a_crash(self):
+        good = build()[0]
+        for malformed in ([good, "not-a-dict"], [None], [1, 2], {"reading_id": "x"}):
+            snapshot = MarketSnapshot.from_payload(
+                "test://board", self.payload(malformed, "ignored"), b"{}")
+            self.assertEqual(snapshot.readings_status, "invalid")
+            self.assertIsNone(snapshot.readings_digest)
+            self.assertEqual(snapshot.readings_join["status"], "invalid")
+            self.assertEqual(snapshot.readings_join["reading_ids"], [])
+
+    def test_absent_readings_keep_the_legacy_absent_behavior(self):
+        payload = {k: v for k, v in self.payload().items()
+                   if k not in ("market_readings", "market_readings_digest")}
+        snapshot = MarketSnapshot.from_payload("test://board", payload, b"{}")
+        self.assertEqual(snapshot.readings_status, "absent")
+        self.assertIsNone(snapshot.readings_digest)
+        self.assertEqual(snapshot.readings_join["status"], "absent")
+        self.assertEqual(snapshot.readings_join["reading_ids"], [])
+
+    def test_join_filters_unchecked_elements_even_on_direct_construction(self):
+        built = build()
+        snapshot = MarketSnapshot.from_payload(
+            "test://board", self.payload(built, readings_digest(built)), b"{}")
+        object.__setattr__(snapshot, "readings", (built[0], "malformed", None))
+        join = snapshot.readings_join
+        self.assertEqual(join["reading_ids"], [built[0]["reading_id"]])
 
     def test_decision_base_carries_the_join_and_no_snapshot_is_explicit(self):
         built = build()

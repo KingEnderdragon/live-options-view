@@ -242,10 +242,22 @@ class MarketSnapshot:
         snapshot_key, key_status = _snapshot_key(payload)
         payload_readings = payload.get("market_readings")
         if isinstance(payload_readings, list):
-            readings = tuple(payload_readings)
-            digest = _readings_digest(list(readings))
-            published = payload.get("market_readings_digest")
-            readings_status = ("digest_mismatch" if published and published != digest else "valid")
+            # Additive audit data must never crash a trading cycle: a malformed
+            # element makes the whole reading set invalid (legacy payloads with
+            # no key remain "absent"), and the join reports that rather than
+            # hashing or dereferencing an unchecked element.
+            if not all(isinstance(r, dict) for r in payload_readings):
+                readings, digest, readings_status = (), None, "invalid"
+            else:
+                readings = tuple(payload_readings)
+                try:
+                    digest = _readings_digest(list(readings))
+                except (TypeError, ValueError):
+                    readings, digest, readings_status = (), None, "invalid"
+                else:
+                    published = payload.get("market_readings_digest")
+                    readings_status = ("digest_mismatch" if published and published != digest
+                                       else "valid")
         else:
             readings = ()
             digest = None
@@ -282,7 +294,8 @@ class MarketSnapshot:
             "snapshot_key_status": self.snapshot_key_status,
             "snapshot_timestamp": self.timestamp,
             "readings_digest": self.readings_digest,
-            "reading_ids": [r.get("reading_id") for r in self.readings],
+            "reading_ids": [r.get("reading_id") for r in self.readings
+                            if isinstance(r, dict)],
             "status": self.readings_status,
         }
 

@@ -125,6 +125,14 @@ tampered = MarketSnapshot.from_payload(
     {**payload, "market_readings_digest": "0" * 64}, b"{}")
 check("tampered digest is exposed", tampered.readings_status == "digest_mismatch")
 
+malformed = MarketSnapshot.from_payload(
+    "https://example.test/intraday/latest.json",
+    {**payload, "market_readings": [readings[0], "not-a-dict"]}, b"{}")
+check("malformed reading element is invalid, not a crash",
+      malformed.readings_status == "invalid"
+      and malformed.readings_join["status"] == "invalid"
+      and malformed.readings_join["reading_ids"] == [])
+
 absent = MarketSnapshot.from_payload(
     "https://example.test/intraday/latest.json",
     {k: v for k, v in payload.items() if k not in ("market_readings", "market_readings_digest")},

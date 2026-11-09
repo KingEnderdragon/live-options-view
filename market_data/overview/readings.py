@@ -97,14 +97,19 @@ def compute_reference_pcr(rows: list[dict[str, Any]]) -> dict[str, Any]:
 def compute_reference_max_pain(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """Max-pain strike over every candidate strike on the board.
 
-    Mirrors `max_pain_qqq._compute_max_pain`: calls and puts with nonzero open
-    interest contribute, ties go to the lower strike, and the both-sides
-    coverage count is reported independently of the strike.
+    Mirrors `max_pain_qqq._compute_max_pain` for every board that carries open
+    interest, so the supported formula stays parity-checked. A board with no
+    open-interest rows at all -- everything missing or zero, which this feed
+    cannot distinguish -- has no loss surface to minimise; returning the lowest
+    strike there would present an unsupported level as a reading. That case is
+    `no_data/no_open_interest_surface` with a null strike. The strategy's own
+    guard remains strategy-owned and is not changed by this reading.
     """
     calls = [r for r in rows if r.get("Type") == "call" and r.get("OpenInterest")]
     puts = [r for r in rows if r.get("Type") == "put" and r.get("OpenInterest")]
     strikes = sorted({r["Strike"] for r in rows if r.get("Strike") is not None})
     both_sides = len({r["Strike"] for r in calls} & {r["Strike"] for r in puts})
+    with_oi = len(calls) + len(puts)
 
     def payout_at(strike: float) -> float:
         total = 0.0
@@ -114,20 +119,29 @@ def compute_reference_max_pain(rows: list[dict[str, Any]]) -> dict[str, Any]:
             total += max(0.0, row["Strike"] - strike) * row["OpenInterest"]
         return total
 
-    strike = min(strikes, key=lambda k: (payout_at(k), k)) if strikes else None
+    if with_oi == 0:
+        strike = None
+        status = {"code": "no_data", "reason": "no_open_interest_surface"}
+    elif not strikes:
+        strike = None
+        status = {"code": "no_data", "reason": "no_strike_data"}
+    else:
+        strike = min(strikes, key=lambda k: (payout_at(k), k))
+        status = {"code": "ok", "reason": None}
     return {
         "values": {
             "max_pain_strike": strike,
             "candidate_strikes": len(strikes),
             "strikes_with_oi_both_sides": both_sides,
+            "rows_with_open_interest": with_oi,
         },
         "units": {
             "max_pain_strike": "USD",
             "candidate_strikes": "count",
             "strikes_with_oi_both_sides": "count",
+            "rows_with_open_interest": "count",
         },
-        "status": ({"code": "ok", "reason": None} if strike is not None
-                   else {"code": "no_data", "reason": "no_strike_data"}),
+        "status": status,
     }
 
 

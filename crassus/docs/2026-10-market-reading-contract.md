@@ -134,7 +134,7 @@ account thresholds, baselines and bands stay in the private ledger.
 | Trading momentum | (c) account-only; no shared series | unchanged `momentum_qqq` tracker and per-account thresholds; a decision's own metadata remains its record | existing momentum suite; the join does not copy reference momentum into it | none by decision |
 | Snapshot IV / Black-Scholes | (b) option buys only; no standing series until Greeks are timestamped | unchanged `annotate_buy_decision` on proposed buys; the decision record now also carries `market_readings_join` so the board it saw is exact | `verify_market_readings_join.py`; `verify_black_scholes.py` | timestamped Greeks before any series |
 | PCR | (a) ratio + OI totals, (b) by reference | `reference_pcr` over board rows; zero call OI is `undefined/zero_call_oi`; OI caveats travel | parity with `compute_pcr`; replay reader | none for the reference reading |
-| Max pain | (a) strike + coverage, (b) by reference | `reference_max_pain` over every candidate strike, lower strike on ties, both-sides coverage count | parity with `_compute_max_pain` | none for the reference reading |
+| Max pain | (a) strike + coverage, (b) by reference | `reference_max_pain` over every candidate strike, lower strike on ties, both-sides coverage count; a board with no open interest at all is `no_data/no_open_interest_surface` with a null strike rather than the lowest candidate | parity with `_compute_max_pain` on every board carrying OI; focused all-zero/all-missing and one-sided fixtures | none for supported boards; no-OI is explicitly unsupported |
 | 2% OI skew | (a) at the reference band, (b) by reference | `reference_oi_skew` at 2%, `account_specific = false`; account band/drift stay bot-local | parity with `_near_money_oi`; account-parameter separation test | none for the reference reading |
 
 **Immutable decision join.** `MarketSnapshot` now carries the collector's
@@ -145,8 +145,11 @@ ledger record: `snapshot_key`, `snapshot_key_status`, `snapshot_timestamp`,
 `absent`, `invalid`, `unavailable`). No values are copied into a strategy that
 did not use them, and a no-trade decision carries the join exactly like a buy.
 A replay re-hashes the fetched payload's `market_readings`; a mismatch is
-exposed, never repaired. Records written before this change have no join and
-keep the existing approximate timestamp lineage.
+exposed, never repaired. A malformed element in the additive reading list makes
+the set `invalid` with no reading ids and no digest instead of dereferencing an
+unchecked element, so audit data cannot fail a trading cycle. Records written
+before this change have no join and keep the existing approximate timestamp
+lineage.
 
 **Replay route.** `research/market_readings_series.py` reads the durable
 `snapshot_provenance.v1` sidecars (local tree, or a listing plus the public R2
@@ -158,9 +161,11 @@ per snapshot. The collector write loop is unchanged, so the series route adds
 no read-modify-write risk to collection.
 
 **Missing versus zero.** OI `None` and `0` produce identical readings and carry
-`oi_zero_or_missing_indistinguishable`; RVOL without history reports
-`insufficient_history` rather than zero; VWAP without an observation reports
-`no_data`; missing momentum anchors keep the existing status vocabulary.
+`oi_zero_or_missing_indistinguishable`; max pain over an all-zero/all-missing
+board is `no_data` with a null strike because there is no loss surface; RVOL
+without history reports `insufficient_history` rather than zero; VWAP without
+an observation reports `no_data`; missing momentum anchors keep the existing
+status vocabulary.
 
 Remaining: run the replay over a full retained listing to demonstrate
 multi-day coverage, and decide whether a consolidated day-level series object
