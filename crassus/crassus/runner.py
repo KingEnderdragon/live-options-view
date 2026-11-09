@@ -104,6 +104,40 @@ def _unresolved(outcome_class: str) -> bool:
     return outcome_class == Outcome.AMBIGUOUS
 
 
+def decision_base(*, decision_id: str, alias: str, strategy_id: str,
+                  strategy_version: str, snapshot: Any) -> dict[str, Any]:
+    """The identity every ledger record for one account/cycle carries.
+
+    Extracted so the immutable snapshot/readings join can be exercised without
+    standing up a full runner; the values are identical to what
+    `_run_account` records.
+    """
+    join = getattr(snapshot, "readings_join", None) if snapshot else None
+    if not isinstance(join, dict):
+        # Older/fake snapshot objects (and snapshots from before the collector
+        # published readings) have no join; say so rather than failing a cycle.
+        join = {
+            "schema_version": "market_readings_join.v1",
+            "snapshot_key": None,
+            "snapshot_key_status": "unavailable",
+            "snapshot_timestamp": None,
+            "readings_digest": None,
+            "reading_ids": [],
+            "status": "unavailable",
+        }
+    return {
+        "decision_id": decision_id,
+        "account_alias": alias,
+        "strategy_id": strategy_id,
+        "strategy_version": strategy_version,
+        "market_snapshot_timestamp": snapshot.timestamp if snapshot else None,
+        "market_snapshot_url_or_hash": snapshot.provenance if snapshot else None,
+        "market_snapshot_lineage": (snapshot.lineage if snapshot
+                                    else unavailable_lineage("unavailable")),
+        "market_readings_join": join,
+    }
+
+
 class Runner:
     def __init__(
         self,
@@ -392,14 +426,12 @@ class Runner:
         decision_id = self.ledger.new_decision_id()
         strategy = get_strategy(account.strategy_id)
 
-        base = dict(
+        base = decision_base(
             decision_id=decision_id,
-            account_alias=alias,
+            alias=alias,
             strategy_id=account.strategy_id,
             strategy_version=getattr(strategy, "strategy_version", "unknown"),
-            market_snapshot_timestamp=snapshot.timestamp if snapshot else None,
-            market_snapshot_url_or_hash=snapshot.provenance if snapshot else None,
-            market_snapshot_lineage=snapshot.lineage if snapshot else unavailable_lineage("unavailable"),
+            snapshot=snapshot,
         )
 
         # Reconcile first: the server's view of cash and trades is the only
@@ -500,7 +532,7 @@ class Runner:
         # to whichever one actually produced it, not the account's assigned
         # strategy_id, while keeping that assignment around separately so a
         # record can still be grouped by account/strategy.
-        decision_base = {
+        decision_fields = {
             **base,
             "strategy_id": decision.strategy_id,
             "strategy_version": decision.strategy_version,
@@ -510,7 +542,7 @@ class Runner:
         if not decision.is_trade:
             log.info("%s: no_trade -- %s", alias, decision.reason)
             self.ledger.record(
-                **decision_base,
+                **decision_fields,
                 outcome_class=Outcome.NO_TRADE,
                 decision=decision.to_dict(),
                 reason=decision.reason,
@@ -523,7 +555,7 @@ class Runner:
         if self.dry_run:
             log.info("%s: DRY RUN would %s %s x%s -- %s", alias, decision.action, decision.symbol, decision.quantity, decision.reason)
             self.ledger.record(
-                **decision_base,
+                **decision_fields,
                 outcome_class=Outcome.NO_TRADE,
                 decision=decision.to_dict(),
                 reason=f"[dry-run] {decision.reason}",
@@ -554,7 +586,7 @@ class Runner:
             pending = executor.pending_intent()
             request_id = pending.get("execution_request_id") if pending else None
             self._record_liquidation(
-                decision_base, exc, decision=decision, state_before=state_before, execution_request_id=request_id
+                decision_fields, exc, decision=decision, state_before=state_before, execution_request_id=request_id
             )
             if request_id:
                 # Only cleared now that the margin call is durably recorded.
@@ -563,7 +595,7 @@ class Runner:
             return
 
         self.ledger.record(
-            **decision_base,
+            **decision_fields,
             outcome_class=result.outcome_class,
             decision=decision.to_dict(),
             reason=decision.reason,

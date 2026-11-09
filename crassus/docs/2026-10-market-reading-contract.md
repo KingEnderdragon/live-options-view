@@ -119,20 +119,64 @@ boundaries, retries and decisions are unchanged; this adds no new error ledger
 paths. Old ledgers are never edited, and unknown historical lineage stays
 unknown. Timestamp-nearest historical matching remains approximate/unverified.
 
-## Remaining #107 work
+## G4 reconciliation against the merged #110 ownership table
 
-1. Durable per-snapshot VWAP/RVOL/underlying_market history; the key alone does
-   not recover those readings after latest.json advances.
-2. Collector PCR, max-pain and labeled 2% reference-skew publication/history,
-   with market_data/live_market/Crassus formula parity fixtures and this envelope.
-3. Wire future shared histories to exact snapshot keys and prove no-trade and
-   inactive-bot visibility, missing/stale/partial semantics, and replay coverage.
-4. Separately review symbol parsing, freshness and quote-check plumbing (item 5)
-   without changing strategy behavior.
+The seven families the board names, and the two it asks not to conflate, are
+resolved as follows. "Reference" means the reading is published by the
+collector under `interpretation.kind = reference` with `account_alias = null`;
+account thresholds, baselines and bands stay in the private ledger.
 
-#107 remains open. OI-skew multi-account behavior, #69 lifecycle, Phelps/Reddit,
-policy changes, production configuration, orders, deployment and historical
-rewrites are outside this PR. Black-Scholes remains buy-only.
+| Family | #110 decision | Implemented route | Evidence | Remaining |
+|---|---|---|---|---|
+| VWAP | (a) reference series, (b) by reference | `reference_vwap` reading with `vwap`, spot, distance, session volume and partial-session coverage; the published `underlying_market` block is copied into the provenance sidecar per snapshot | `tests/test_market_readings.py`; `research/market_readings_series.py` replay | multi-day replay against a full listing |
+| RVOL | (a) reference series, (b) by reference | `reference_rvol` with multiple, session/baseline volume and effective days used; parameters record 5-minute buckets, 20 **calendar** days, 5-sample minimum | same | same |
+| Reference momentum | (a) as is, (b) by reference | `reference_momentum` with return, anchor age, sample count; `neutral_band_use = display_only`; explicitly labelled reference, never a trading signal | same | same |
+| Trading momentum | (c) account-only; no shared series | unchanged `momentum_qqq` tracker and per-account thresholds; a decision's own metadata remains its record | existing momentum suite; the join does not copy reference momentum into it | none by decision |
+| Snapshot IV / Black-Scholes | (b) option buys only; no standing series until Greeks are timestamped | unchanged `annotate_buy_decision` on proposed buys; the decision record now also carries `market_readings_join` so the board it saw is exact | `verify_market_readings_join.py`; `verify_black_scholes.py` | timestamped Greeks before any series |
+| PCR | (a) ratio + OI totals, (b) by reference | `reference_pcr` over board rows; zero call OI is `undefined/zero_call_oi`; OI caveats travel | parity with `compute_pcr`; replay reader | none for the reference reading |
+| Max pain | (a) strike + coverage, (b) by reference | `reference_max_pain` over every candidate strike, lower strike on ties, both-sides coverage count; a board with no open interest at all is `no_data/no_open_interest_surface` with a null strike rather than the lowest candidate | parity with `_compute_max_pain` on every board carrying OI; focused all-zero/all-missing and one-sided fixtures | none for supported boards; no-OI is explicitly unsupported |
+| 2% OI skew | (a) at the reference band, (b) by reference | `reference_oi_skew` at 2%, `account_specific = false`; account band/drift stay bot-local | parity with `_near_money_oi`; account-parameter separation test | none for the reference reading |
+
+**Immutable decision join.** `MarketSnapshot` now carries the collector's
+`market_readings` and recomputes their canonical digest (sorted keys, compact
+separators, ASCII). `decision_base` puts `market_readings_join.v1` on every
+ledger record: `snapshot_key`, `snapshot_key_status`, `snapshot_timestamp`,
+`readings_digest`, `reading_ids` and a status (`valid`, `digest_mismatch`,
+`absent`, `invalid`, `unavailable`). No values are copied into a strategy that
+did not use them, and a no-trade decision carries the join exactly like a buy.
+A replay re-hashes the fetched payload's `market_readings`; a mismatch is
+exposed, never repaired. A malformed element in the additive reading list makes
+the set `invalid` with no reading ids and no digest instead of dereferencing an
+unchecked element, so audit data cannot fail a trading cycle. Records written
+before this change have no join and keep the existing approximate timestamp
+lineage.
+
+**Replay route.** `research/market_readings_series.py` reads the durable
+`snapshot_provenance.v1` sidecars (local tree, or a listing plus the public R2
+origin) and emits one row per reading per snapshot with units, parameters,
+status, freshness, observation and publication times. Sidecars written before
+`market_reading.v1` produce one explicitly labelled `legacy_underlying_market`
+row instead of pretending they had readings; digest mismatches are reported
+per snapshot. The collector write loop is unchanged, so the series route adds
+no read-modify-write risk to collection.
+
+**Missing versus zero.** OI `None` and `0` produce identical readings and carry
+`oi_zero_or_missing_indistinguishable`; max pain over an all-zero/all-missing
+board is `no_data` with a null strike because there is no loss surface; RVOL
+without history reports `insufficient_history` rather than zero; VWAP without
+an observation reports `no_data`; missing momentum anchors keep the existing
+status vocabulary.
+
+Remaining: run the replay over a full retained listing to demonstrate
+multi-day coverage, and decide whether a consolidated day-level series object
+is worth adding once that listing exists. Deployment and live acceptance remain
+Chej's reviewed-release step; this contract change is source-and-test evidence
+only.
+
+#107 remains open. OI-skew multi-account behavior is addressed under #69/#107
+tracker lifecycle; Phelps/Reddit, policy changes, production configuration,
+orders, deployment and historical rewrites are outside this work. Black-Scholes
+remains buy-only.
 
 ## Verification and deployment review (2026-10-04)
 
