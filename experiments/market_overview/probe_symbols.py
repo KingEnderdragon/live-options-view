@@ -168,7 +168,7 @@ def main() -> int:
         feed.stop()
 
     report = {
-        "probe": "experiments.market_overview.probe_symbols", "issue": 132, "read_only": True,
+        "probe": "probe_cross_market_symbols", "issue": 132, "read_only": True,
         "started_at": started.isoformat(), "finished_at": datetime.now(timezone.utc).isoformat(),
         "listen_seconds": args.seconds, "dxlink_ready": ready,
         "dxlink_health": {k: health.get(k) for k in ("authorized", "channel_open", "reconnect_count", "last_error")},

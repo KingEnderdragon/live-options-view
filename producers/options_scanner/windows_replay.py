@@ -258,7 +258,7 @@ def main() -> int:
                             volume=r.get("volume"), open_interest=r.get("oi")) for r in rs]
         contracts.append((info, path))
 
-    report = {"replay": "producers.options_scanner.windows_replay", "issue": 130, "read_only": True,
+    report = {"replay": "oa203_windows_replay", "issue": 130, "read_only": True,
               "calendar": {"name": "NYSE", "package": "pandas_market_calendars", "version": calendar_version},
               "policy": policy.as_dict(), "sessions": [{k: v for k, v in m.items() if k != "session"} for m in sessions_meta],
               "underlyings": sorted(unders), "contracts": len(contracts), "skipped_weeks": skipped,

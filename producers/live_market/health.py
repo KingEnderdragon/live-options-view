@@ -72,7 +72,7 @@ def push_health(s3, feed: DXLinkFeed, counters: Counters, tracker: SnapshotTrack
         "process_start_time": process_start.isoformat(),
         "updated_at":         now.isoformat(),
         "classification":     classification,
-        "producers.live_market": {
+        "collector": {
             "past_stop":      past_stop(),
             "loop_alive":     True,
             "last_loop_time": now.isoformat(),

@@ -58,7 +58,7 @@ def _classify_startup(s3, process_start: datetime) -> str:
     except Exception:
         return "clean_start"
 
-    if prior.get("producers.live_market", {}).get("past_stop", False):
+    if prior.get("collector", {}).get("past_stop", False):
         return "clean_start"
 
     prior_updated = prior.get("updated_at")

@@ -26,7 +26,7 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
     stream=sys.stdout,
 )
-log = logging.getLogger("producers.live_market")
+log = logging.getLogger("collector")
 
 
 # -- config -------------------------------------------------------------------
