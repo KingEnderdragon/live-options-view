@@ -10,10 +10,9 @@ from unittest import mock
 from datetime import date
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import oa203_return_scanner as scanner  # noqa: E402
-from scanners.oa203 import active as scanner_active  # noqa: E402
+import producers.options_scanner as scanner  # noqa: E402
+from producers.options_scanner import active as scanner_active  # noqa: E402
 
 DAY = date(2026, 10, 2)
 OPEN = 1790947800000

@@ -6,8 +6,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import market_overview as mo  # noqa: E402
-from market_overview import Observation as Obs  # noqa: E402
+import experiments.market_overview as mo  # noqa: E402
+from experiments.market_overview import Observation as Obs  # noqa: E402
 
 UTC = timezone.utc
 T = datetime(2026, 10, 9, 19, 0, tzinfo=UTC)          # Fri 15:00 ET

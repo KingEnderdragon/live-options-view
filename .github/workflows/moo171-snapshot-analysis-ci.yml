@@ -10,11 +10,11 @@ on:
   push:
     branches: [master]
     paths:
-      - "moo171_snapshot_analysis/**"
+      - "research/snapshot_research/studies/**"
       - ".github/workflows/moo171-snapshot-analysis-ci.yml"
   pull_request:
     paths:
-      - "moo171_snapshot_analysis/**"
+      - "research/snapshot_research/studies/**"
       - ".github/workflows/moo171-snapshot-analysis-ci.yml"
 
 jobs:
@@ -22,7 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: moo171_snapshot_analysis
+        working-directory: research/snapshot_analysis
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

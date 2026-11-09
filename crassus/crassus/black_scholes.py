@@ -8,7 +8,7 @@ this module knows nothing about `MarketSnapshot`, `ctx.params`, or accounts.
 It exists as a standalone tool two different callers can reach for:
 
 1. Directly, for ad hoc "what should this be worth" questions (backtests,
-   `synthetic_days/`, a one-off script) where the live DXLink feed's own
+   `research/synthetic_days/`, a one-off script) where the live DXLink feed's own
    Greeks (`collector.py`'s `"Greeks"` event -- `volatility`/`delta`/`gamma`/
    `theta`/`vega`, already carried through to snapshot rows as `IV`/`Delta`/
    `Gamma`/`Theta`/`Vega`) aren't available or aren't trusted.

@@ -1,7 +1,7 @@
 # Historical design and deployment records
 
-Use [Architecture](../ARCHITECTURE.md), the [collector guide](../collector/README.md),
-the [Worker guide](../worker/README.md) and [Tradier operations](../collectors/tradier/OPERATIONS.md)
+Use [Architecture](../ARCHITECTURE.md), the [collector guide](../producers/live_market/README.md),
+the [Worker guide](../worker/README.md) and [Tradier operations](../producers/tradier/OPERATIONS.md)
 for current navigation. The following immutable records preserve the detailed
 reasoning and evidence that used to sit at the repository root:
 

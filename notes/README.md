@@ -6,7 +6,7 @@
 
 [notes/specs](specs/README.md) holds the maintained repository-only product contracts: SPY collection, OA-203 qualified returns, active lookup, multi-session windows and cross-market overview. Paths named in code spans inside those specifications are repository-relative unless stated otherwise. The former root compatibility pointers are retired; use these maintained paths for new references. A specification's status is not evidence of a deployment.
 
-The [collector guide](../collector/README.md), [Worker guide](../worker/README.md) and [Tradier operations](../collectors/tradier/OPERATIONS.md) explain current implementation and operations. [Historical records](HISTORY.md) link to immutable pre-cleanup design and rollout documents. Keep subsystem documentation with its subsystem: [Crassus](../crassus/README.md), [Market MCP](../market_mcp/README.md), [synthetic days](../synthetic_days/README.md), [MOO-171](../moo171_snapshot_analysis/README.md) and [news tooling](../news_pin_bot/README.md).
+The [collector guide](../producers/live_market/README.md), [Worker guide](../worker/README.md) and [Tradier operations](../producers/tradier/OPERATIONS.md) explain current implementation and operations. [Historical records](HISTORY.md) link to immutable pre-cleanup design and rollout documents. Keep subsystem documentation with its subsystem: [Crassus](../crassus/README.md), [Market MCP](../market_mcp/README.md), [synthetic days](../research/synthetic_days/README.md), [MOO-171](../research/snapshot_analysis/README.md) and [news tooling](../experiments/news_pin_bot/README.md).
 
 ## Served reference material
 

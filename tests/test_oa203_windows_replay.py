@@ -4,12 +4,12 @@ import gzip
 import json
 from collections import defaultdict
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from unittest import mock
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import oa203_windows_replay as replay  # noqa: E402
+import producers.options_scanner.windows_replay as replay  # noqa: E402
 from test_oa203_windows import SESSIONS, ms, sess  # noqa: E402
 
 

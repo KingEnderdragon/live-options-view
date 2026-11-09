@@ -1,4 +1,4 @@
 
 __pycache__/
-news_pin_bot/.env
-news_pin_bot/db/*.sqlite3
+experiments/news_pin_bot/.env
+experiments/news_pin_bot/db/*.sqlite3

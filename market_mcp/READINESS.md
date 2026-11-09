@@ -68,9 +68,9 @@ Actual Railway production config was read without variable values:
 
 | Service | Source branch | Watch scope relevant to this patch |
 | --- | --- | --- |
-| `live-options-view` | master | Explicit collector/config paths; excludes these additions |
+| `live-options-view` | master | Explicit producers/live_market/config paths; excludes these additions |
 | `crassus-runner` | master | `/crassus/**`; excludes these additions |
-| `moo169-tradier-collector` | master | Explicit launcher/probe/collector/dependency paths; excludes these additions |
+| `moo169-tradier-collector` | master | Explicit launcher/probe/producers/live_market/dependency paths; excludes these additions |
 | `moo144-tradier-probe` | moo-144-probe-recovery | Different branch |
 | `oa203-banana-scanner-AWsT` | master | No watchPatterns supplied; current autodeploy enabled/paused state was not verified |
 
@@ -130,7 +130,7 @@ Before deployment:
    and independently test only the corresponding production listener/gateway
    configuration; do not reuse existing bridge secrets without authorization.
 4. Build/deploy the reviewed isolated service. Observe its exact deployment
-   success and verify no scanner/collector/trading deployment was triggered.
+   success and verify no scanner/producers/live_market/trading deployment was triggered.
 5. From Chej's actual MCP client, initialize, list tools, discover, run the
    three example queries and follow one reference. Verify unauthorized requests
    fail and source limitations/status/times survive the remote path.

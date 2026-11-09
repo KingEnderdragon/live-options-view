@@ -24,7 +24,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import collector  # noqa: E402
+import producers.live_market as collector  # noqa: E402
 
 
 def assert_equal(actual, expected, label):

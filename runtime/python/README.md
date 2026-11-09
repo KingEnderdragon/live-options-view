@@ -8,9 +8,9 @@ docker build -f runtime/python/Dockerfile .
 
 Service launch commands and provider settings are documented in:
 
-- [Live collector](../../collector/README.md): `python -m collector`.
-- [Tradier archive](../../collectors/tradier/OPERATIONS.md): `python -u -m collectors.tradier.launcher`.
-- [OA-203 scanner](../../scanners/oa203/README.md): `python -u scripts/oa203_return_scanner.py run`.
+- [Live collector](../../producers/live_market/README.md): `python -m producers.live_market`.
+- [Tradier archive](../../producers/tradier/OPERATIONS.md): `python -u -m producers.tradier.launcher`.
+- [OA-203 scanner](../../producers/options_scanner/README.md): `python -u -m producers.options_scanner run`.
 
 All three use repository-root build context and `runtime/python/Dockerfile`.
 Railway owns their build/start/watch settings and schedules; no `railway.toml`

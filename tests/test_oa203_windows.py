@@ -3,12 +3,12 @@ import unittest
 from dataclasses import replace
 from datetime import datetime, time
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from zoneinfo import ZoneInfo
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-import oa203_windows as w  # noqa: E402
-from oa203_returns import ContractInfo, Observation  # noqa: E402
+import producers.options_scanner.windows as w  # noqa: E402
+from producers.options_scanner.returns import ContractInfo, Observation  # noqa: E402
 
 ET = ZoneInfo("America/New_York")
 WEEK = ["2026-10-05", "2026-10-06", "2026-10-07", "2026-10-08", "2026-10-09"]

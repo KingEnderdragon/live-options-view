@@ -124,7 +124,7 @@ unknown. Timestamp-nearest historical matching remains approximate/unverified.
 1. Durable per-snapshot VWAP/RVOL/underlying_market history; the key alone does
    not recover those readings after latest.json advances.
 2. Collector PCR, max-pain and labeled 2% reference-skew publication/history,
-   with collector/Crassus formula parity fixtures and this envelope.
+   with producers/live_market/Crassus formula parity fixtures and this envelope.
 3. Wire future shared histories to exact snapshot keys and prove no-trade and
    inactive-bot visibility, missing/stale/partial semantics, and replay coverage.
 4. Separately review symbol parsing, freshness and quote-check plumbing (item 5)
@@ -209,7 +209,7 @@ workflow inspection on October 4 found:
 | QQQ collector | No match: live paths are `/collector.py`, `/market_signals.py`, `/crude_calibration.py`, `/requirements.txt`, `/Dockerfile`, `/railway.toml`; Wait for CI enabled. |
 | Cloudflare Worker | The plan now lives under `crassus/docs/`, outside `deploy.yml`'s `docs/**` path. The final PR diff has no Worker, web asset, or deploy-workflow path, so a master merge does not trigger that workflow. |
 | Big Banana (`oa203-banana-scanner-AWsT`) | **Potential unrelated rebuild/deploy**: live source master, no `watchPatterns` reported, Wait for CI false. Treat merge as deployment-sensitive; this PR does not repair configuration. |
-| MOO-169 collector | Watch paths only Tradier launcher/collector/probe, root requirements/Dockerfile; no match. |
+| MOO-169 collector | Watch paths only Tradier launcher/producers/live_market/probe, root requirements/Dockerfile; no match. |
 | MOO-144 probe | Source branch `moo-144-probe-recovery`, not this branch/master. |
 | R2 paper-trades recovery | Image-backed service, not this repository branch. |
 

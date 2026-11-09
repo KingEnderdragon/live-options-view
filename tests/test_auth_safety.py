@@ -29,7 +29,7 @@ def _install_import_stubs():
 
 
 _install_import_stubs()
-import collector
+import producers.live_market as collector
 
 
 class FakeResponse:
