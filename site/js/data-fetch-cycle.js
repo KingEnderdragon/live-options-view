@@ -23,11 +23,16 @@ async function fetchChain(symbol) {
 }
 
 let latestQqqRequest = 0;
+let latestSelectedRequest = 0;
 async function fetchLatest() {
   const token = chainSelection.token();
   // QQQ is always refreshed: paper trading, expiry settlement marks and the
   // QQQ price tile depend on it regardless of which chain is on screen.
   const qqqRequest = ++latestQqqRequest;
+  // Same-selection overlap guard: a second fetchLatest (timer, re-select)
+  // supersedes the first for the selected chain too, so a slow reply for
+  // the same selection cannot overwrite fresher data that already landed.
+  const selectedRequest = ++latestSelectedRequest;
   const qqq = await fetchChain('QQQ');
   // QQQ refreshes independently of the selected chain, but an older refresh
   // must not replace newer paper-trading, indicator or cached chain state.
@@ -46,7 +51,9 @@ async function fetchLatest() {
   if (token.symbol !== 'QQQ') {
     const other = await fetchChain(token.symbol);
     // The selection changed while this was in flight: drop the reply rather
-    // than render (or cache) it under whatever is selected now.
+    // than render (or cache) it under whatever is selected now. A newer
+    // fetchLatest for the same selection supersedes this one too.
+    if (selectedRequest !== latestSelectedRequest) return;
     if (!chainSelection.accepts(token)) return;
     if (other.data) {
       chainState[token.symbol] = { data: other.data, error: null };
