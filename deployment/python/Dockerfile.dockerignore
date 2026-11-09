@@ -1,0 +1,11 @@
+**
+!deployment/
+!deployment/python/
+!deployment/python/Dockerfile
+!deployment/python/Dockerfile.dockerignore
+!deployment/python/requirements.txt
+!market_data/
+!market_data/**
+market_data/**/__pycache__/
+market_data/**/.env
+market_data/**/.env.*

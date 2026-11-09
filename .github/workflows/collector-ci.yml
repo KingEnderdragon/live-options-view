@@ -125,4 +125,6 @@ jobs:
       - name: Verify actual producer image entry points (offline)
         run: |
           docker build -f deployment/python/Dockerfile -t producer-check .
-          docker run --rm producer-check python tests/producer_packaging.py
+          docker run --rm --network none \
+            -v "$PWD/tests/producer_packaging.py:/app/tests/producer_packaging.py:ro" \
+            producer-check python tests/producer_packaging.py
