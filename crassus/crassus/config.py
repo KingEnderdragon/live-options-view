@@ -62,6 +62,8 @@ class Account:
     password: str = field(repr=False)
     strategy_id: str
     params: dict[str, Any] = field(default_factory=dict)
+    paper_margin_limit: float = 1.0
+    paper_financing_rate: float = 0.0
 
     def __repr__(self) -> str:  # keep passwords out of tracebacks and logs
         return f"Account(alias={self.alias!r}, username={self.username!r}, strategy_id={self.strategy_id!r})"
@@ -103,6 +105,64 @@ def _merge_entries(
     return [by_username[username] for username in order]
 
 
+def _entries_for(
+    path: Path | None,
+    catalog_path: Path,
+    override_path: Path,
+) -> list[dict[str, Any]]:
+    """Resolve the exact catalog/override entries the runner would load."""
+    configured_path = path or (
+        Path(os.environ["CRASSUS_ACCOUNTS_FILE"])
+        if os.environ.get("CRASSUS_ACCOUNTS_FILE")
+        else None
+    )
+    if configured_path is not None:
+        if not configured_path.exists():
+            raise FileNotFoundError(f"No accounts file at {configured_path}.")
+        return _read_entries(configured_path)
+    if not catalog_path.exists():
+        raise FileNotFoundError(f"No bot catalog at {catalog_path}.")
+    catalog = _read_entries(catalog_path)
+    overrides = _read_entries(override_path) if override_path.exists() else []
+    return _merge_entries(catalog, overrides)
+
+
+def account_gaps(
+    path: Path | None = None,
+    *,
+    catalog_path: Path = DEFAULT_ACCOUNTS_CATALOG,
+    override_path: Path = DEFAULT_ACCOUNTS_OVERRIDE,
+    environ: dict[str, str] | None = None,
+) -> list[dict[str, str]]:
+    """List active accounts whose credentials are not provisioned.
+
+    Unlike ``load_accounts`` this reports every gap at once, so an operator
+    sees all missing Railway variables before a restart loop repeats the first
+    one. It never returns or logs a secret value.
+    """
+    environment = os.environ if environ is None else environ
+    gaps: list[dict[str, str]] = []
+    for entry in _entries_for(path, catalog_path, override_path):
+        if entry.get("active", True) is False:
+            continue
+        if entry.get("password"):
+            continue
+        env_name = entry.get("password_env")
+        if not env_name:
+            gaps.append({
+                "alias": str(entry.get("alias", "")),
+                "username": str(entry.get("username", "")),
+                "missing": "no password or password_env",
+            })
+        elif not environment.get(env_name):
+            gaps.append({
+                "alias": str(entry.get("alias", "")),
+                "username": str(entry.get("username", "")),
+                "missing": env_name,
+            })
+    return gaps
+
+
 def load_accounts(
     path: Path | None = None,
     *,
@@ -134,21 +194,7 @@ def load_accounts(
     alongside its password). An entry with no `"active"` key is active by
     default, matching every catalog entry from before this field existed.
     """
-    configured_path = path or (
-        Path(os.environ["CRASSUS_ACCOUNTS_FILE"])
-        if os.environ.get("CRASSUS_ACCOUNTS_FILE")
-        else None
-    )
-    if configured_path is not None:
-        if not configured_path.exists():
-            raise FileNotFoundError(f"No accounts file at {configured_path}.")
-        entries = _read_entries(configured_path)
-    else:
-        if not catalog_path.exists():
-            raise FileNotFoundError(f"No bot catalog at {catalog_path}.")
-        catalog = _read_entries(catalog_path)
-        overrides = _read_entries(override_path) if override_path.exists() else []
-        entries = _merge_entries(catalog, overrides)
+    entries = _entries_for(path, catalog_path, override_path)
 
     if not entries:
         raise FileNotFoundError(
@@ -157,6 +203,7 @@ def load_accounts(
         )
 
     accounts = []
+    missing: list[str] = []
     for entry in entries:
         if entry.get("active", True) is False:
             continue
@@ -164,11 +211,17 @@ def load_accounts(
         if not password and entry.get("password_env"):
             password = os.environ.get(entry["password_env"])
             if not password:
-                raise ValueError(
-                    f"Account {entry['alias']}: ${entry['password_env']} is not set"
-                )
+                missing.append(f"{entry['alias']}→${entry['password_env']}")
         if not password:
-            raise ValueError(f"Account {entry['alias']}: no password or password_env")
+            if not entry.get("password_env"):
+                missing.append(f"{entry['alias']}→no password or password_env")
+            continue
+        margin_limit = float(entry.get("paper_margin_limit", 1.0))
+        financing_rate = float(entry.get("paper_financing_rate", 0.0))
+        if not 1.0 <= margin_limit <= 4.0:
+            raise ValueError(f"Account {entry['alias']}: paper_margin_limit must be 1..4")
+        if not 0.0 <= financing_rate <= 1.0:
+            raise ValueError(f"Account {entry['alias']}: paper_financing_rate must be 0..1")
         accounts.append(
             Account(
                 alias=entry["alias"],
@@ -176,7 +229,17 @@ def load_accounts(
                 password=password,
                 strategy_id=entry["strategy_id"],
                 params=entry.get("params", {}),
+                paper_margin_limit=margin_limit,
+                paper_financing_rate=financing_rate,
             )
+        )
+
+    if missing:
+        raise ValueError(
+            "Missing bot credential configuration: " + "; ".join(missing) +
+            ". Provision every listed Railway variable (or mark the account "
+            "active:false) before starting the runner; it will not start with "
+            "incomplete credentials."
         )
 
     aliases = [a.alias for a in accounts]
