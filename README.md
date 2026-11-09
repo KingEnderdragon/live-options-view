@@ -17,7 +17,7 @@ Open [the website](https://options.moopertonic.net), then use the [system map](A
 | How does an assistant read it? | [market_mcp/README.md](market_mcp/README.md) | Bounded read-only tools over producer artifacts, not an alternate ranking engine |
 | What is offline research? | [synthetic_days](synthetic_days/README.md), [MOO-171 audit](moo171_snapshot_analysis/README.md), [news_pin_bot](news_pin_bot/README.md) | Separate simulation, audit and news tooling; not implied to be deployed |
 
-The script entry points above remain the current navigation baseline. All four organization changes are merged: [collector.py](collector.py) is a launch shim over [collector/](collector), [worker.js](worker.js) dispatches to [worker/](worker), the Tradier collector lives in [collectors/tradier/](collectors/tradier) behind its deployed launcher path, and the OA-203 scanner lives in [scanners/oa203/](scanners/oa203) behind [scripts/oa203_return_scanner.py](scripts/oa203_return_scanner.py). Each entry file still runs exactly as its deployment names it.
+The script entry points above remain the current navigation baseline. All four organization changes are merged: [collector.py](collector.py) is a launch shim over [collector/](collector), [worker/index.js](worker/index.js) dispatches to [worker/](worker), the Tradier collector lives in [collectors/tradier/](collectors/tradier) behind its deployed launcher path, and the OA-203 scanner lives in [scanners/oa203/](scanners/oa203) behind [scripts/oa203_return_scanner.py](scripts/oa203_return_scanner.py). Each entry file still runs exactly as its deployment names it.
 
 ## Where does a displayed value come from?
 

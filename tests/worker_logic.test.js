@@ -16,7 +16,7 @@ const UUID = '12345678-1234-4234-8234-123456789abc';
     USERNAME_RE, MIN_PASSWORD_LEN, MAX_PASSWORD_LEN, STARTING_BALANCE,
     netPositions, handleBots, handleBotMetadata, settleAllBots,
     default: worker, BOT_INDEX_KEY, updateBotIndex, handleBotIndexReconcile, repairLegacyBotMarker,
-  } = await import('../worker.js');
+  } = await import('../worker/index.js');
 
   function indexBucket(names = [], ready = true) {
     let value = JSON.stringify({ schema_version: 1, ready, members: names.sort() });

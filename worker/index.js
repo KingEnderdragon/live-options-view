@@ -1,17 +1,17 @@
-import { R2_ORIGIN } from './worker/common.js';
-import { BROWSER_DATA_PREFIX, handleBrowserData, handleLiveQuotes } from './worker/browser-data.js';
-import { handleSettle, settleAllBots, settlementPriceServer, validateSettleRequest } from './worker/settlement.js';
-import { handleBotIndexReconcile, handleBotMetadata, handleBots } from './worker/bots.js';
-import { handleLogin, handleLogout, handleMe, handleRegister } from './worker/auth.js';
-import { handlePaperTrade } from './worker/paper-trade.js';
+import { R2_ORIGIN } from './common.js';
+import { BROWSER_DATA_PREFIX, handleBrowserData, handleLiveQuotes } from './browser-data.js';
+import { handleSettle, settleAllBots, settlementPriceServer, validateSettleRequest } from './settlement.js';
+import { handleBotIndexReconcile, handleBotMetadata, handleBots } from './bots.js';
+import { handleLogin, handleLogout, handleMe, handleRegister } from './auth.js';
+import { handlePaperTrade } from './paper-trade.js';
 
 // Re-exported from worker/common.js so the Worker's public API (the 31
-// exports pinned by tests/worker_logic.test.js) stays on worker.js.
-export { BOT_USERNAME_RE, STARTING_BALANCE, STRATEGY_ID_RE, computeBookFromTrades, parseCookies } from './worker/common.js';
-export { settleAllBots, settlementPriceServer, validateSettleRequest } from './worker/settlement.js';
-export { EXECUTION_RESERVATION_LEASE_MS, exactShareQuote, executionIntentMatches, executionPriceForOrder, executionReservationExpired, existingExecutionResponse, finalizeExecutionRequest, renewExecutionReservation, reserveExecutionRequest, validateTradeIntent } from './worker/execution.js';
-export { BOT_INDEX_KEY, handleBotIndexReconcile, handleBotMetadata, handleBots, netPositions, repairLegacyBotMarker, updateBotIndex } from './worker/bots.js';
-export { MAX_PASSWORD_LEN, MIN_PASSWORD_LEN, USERNAME_RE, constantTimeEqual, derivePasswordHash, randomSaltBase64 } from './worker/auth.js';
+// exports pinned by tests/worker_logic.test.js) stays on worker/index.js.
+export { BOT_USERNAME_RE, STARTING_BALANCE, STRATEGY_ID_RE, computeBookFromTrades, parseCookies } from './common.js';
+export { settleAllBots, settlementPriceServer, validateSettleRequest } from './settlement.js';
+export { EXECUTION_RESERVATION_LEASE_MS, exactShareQuote, executionIntentMatches, executionPriceForOrder, executionReservationExpired, existingExecutionResponse, finalizeExecutionRequest, renewExecutionReservation, reserveExecutionRequest, validateTradeIntent } from './execution.js';
+export { BOT_INDEX_KEY, handleBotIndexReconcile, handleBotMetadata, handleBots, netPositions, repairLegacyBotMarker, updateBotIndex } from './bots.js';
+export { MAX_PASSWORD_LEN, MIN_PASSWORD_LEN, USERNAME_RE, constantTimeEqual, derivePasswordHash, randomSaltBase64 } from './auth.js';
 
 export default {
   async fetch(request, env) {

@@ -1,6 +1,6 @@
 # Website and paper-account Worker
 
-[worker.js](../worker.js) is the stable Cloudflare entry point. It dispatches to
+[worker/index.js](index.js) is the stable Cloudflare entry point. It dispatches to
 these modules; [wrangler.toml](../wrangler.toml) defines assets, bindings and cron.
 The browser's implementation lives separately in [site/](../site).
 
