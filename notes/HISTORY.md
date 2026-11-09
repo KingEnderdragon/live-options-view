@@ -18,3 +18,7 @@ These records remain in Git rather than being copied into another maintained
 manual. Current specifications live in [specs/](specs/README.md); their former
 root-level compatibility pointers have been removed. External links to those old
 branch-relative paths must use the maintained location or an immutable revision.
+
+The frozen MOO-171 research report and generator retain their original textual
+DESIGN.md citation to preserve the recorded source identity. That citation refers
+to the historical design record linked above, not a current root file.
