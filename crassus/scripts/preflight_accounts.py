@@ -4,16 +4,19 @@
 Reports every active account whose password environment variable is absent,
 every strategy_id the runner does not register, and whether
 BOT_REGISTRATION_KEY is present. With ``--probe`` it sends an intentionally
-empty registration request to the Worker: a 400 proves the key was accepted,
-a 403 "Invalid bot registration key" proves the Railway and Worker values have
-drifted, and a network error is reported as unreachable. The empty body cannot
-create an account.
+empty registration request to the Worker. Only HTTP 400 with
+``{"error":"Username must be 3-40 characters: letters, numbers, underscore"}``
+proves the supplied header passed the key guard; that exact 403
+``Invalid bot registration key`` proves a mismatch. Any other 400, a different
+403, 401, 404, 429, 5xx, 200, malformed body or network failure fails closed.
+The empty body cannot create an account.
 
     python scripts/preflight_accounts.py
     python scripts/preflight_accounts.py --probe --base-url https://...
 
-Exit codes: 0 ready, 2 missing account configuration, 3 Worker rejected the
-key, 4 Worker unreachable. No secret value is printed.
+Exit codes: 0 accepted, 2 missing account or key configuration, 3 Worker
+rejected the key, 4 Worker unreachable or returned an unaccepted response. No
+secret value is printed.
 """
 
 from __future__ import annotations
