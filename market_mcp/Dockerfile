@@ -2,6 +2,7 @@ FROM node:22-bookworm-slim
 WORKDIR /app
 ENV NODE_ENV=production
 COPY --chown=node:node market_mcp/auth.js market_mcp/production.js market_mcp/source.js market_mcp/consumer.js market_mcp/overview.js market_mcp/server.js market_mcp/http.js ./market_mcp/
+COPY --chown=node:node market_data/overview/universe.json ./market_data/overview/
 COPY --chown=node:node site/shared.js site/squeeze-calendar.json ./site/
 COPY --chown=node:node site/shared/ ./site/shared/
 USER node

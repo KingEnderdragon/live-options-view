@@ -225,17 +225,18 @@ class Consumer {
       if (id === 'cross_market_overview') {
         const p = probe.value;
         const listed = p ? overview.rows(p, this.now()) : null;
-        out.capabilities.push({ dataset: id, producer_schema: 'unversioned collector price strip (intraday/prices.json)',
+        out.capabilities.push({ dataset: id, producer_schema: 'collector price strip v2; legacy unversioned/v1 accepted',
           availability: probe.error ? (probe.error.code === 'missing_artifact' ? 'missing_publication' : 'failed') : 'available',
           actual: p ? { collector_cycle_at: p.timestamp, feed_stale: p.feed_stale } : null,
           freshness: p ? {...(Date.parse(p.timestamp) > this.now() ? {status:'invalid_time',observed_at:p.timestamp,age_seconds:null,stale_after_seconds:overview.STALE_SECONDS} : age(p.timestamp, this.now(), overview.STALE_SECONDS)),basis:'collector cycle time, not publication or quote observation'} : { status: 'unknown' },
           source_locator: key, error: probe.error, units: units[id], warnings: warnings[id],
           fields: ['label','id','asset_class','instrument_type','unit','source','source_symbol','price','price_basis','collector_received_at','observed_at','previous_close','change','freshness','gaps'],
           filters: ['asset_class', 'symbols', 'sort', 'limit', 'offset'], asset_classes: overview.ASSET_CLASSES,
-          instruments: listed ? listed.known.map(r => ({ label:r.label, id:r.id, asset_class:r.asset_class, instrument_type:r.instrument_type, unit:r.unit, source:r.source, available:r.price !== null })) : [],
+          universe_version:overview.universe.universe_version, universe_size:overview.universe.instruments.length,
+          instruments:(listed?.known ?? overview.rows({prices:{},timestamp:new Date(this.now()).toISOString(),feed_stale:true},this.now()).known).map(r => ({label:r.label,id:r.id,asset_class:r.asset_class,instrument_type:r.instrument_type,unit:r.unit,source:r.source,available:r.price !== null,enabled:r.enabled,coverage:r.coverage})),
           configured_labels: Object.keys(overview.INSTRUMENTS),
           source_dependent_identities: [{label:'JPY/USD',source:'yfinance',id:'fx.jpyusd',instrument_type:'spot_fx'},{label:'JPY/USD',source:'last-known without retained origin',id:'unknown.jpyusd',instrument_type:'unknown'}],
-          gaps: overview.GAPS, cadence: 'collector price loop about every 10 s during collector sessions; yfinance fills cached 60 s',
+          gaps:overview.gaps(listed?.known ?? overview.rows({prices:{},timestamp:new Date(this.now()).toISOString(),feed_stale:true},this.now()).known), cadence: 'collector price loop about every 10 s during collector sessions; yfinance fills cached 60 s',
           coverage: p ? { strip_labels: Object.keys(p.prices).length, identified:listed.known.length, unmapped:listed.unmapped.length } : null, historical_index: 'not_supported' });
         continue;
       }
@@ -305,7 +306,7 @@ class Consumer {
     const sort = a.sort ?? 'strip'; check(overview.SORTS.includes(sort), `sort must be one of ${overview.SORTS.join(', ')}.`, 'invalid_filter');
     const p = await q.json(overview.KEY); overview.validate(p);
     const now = this.now();
-    out.actual = { collector_cycle_at: p.timestamp, snapshot_time: p.snapshot_time ?? null, feed_stale: p.feed_stale, payload_sha256: q.evidence.at(-1).retrieved_sha256 };
+    out.actual = { universe_version:overview.universe.universe_version, producer_schema_version:p.schema_version ?? 1, collector_cycle_at: p.timestamp, snapshot_time: p.snapshot_time ?? null, feed_stale: p.feed_stale, payload_sha256: q.evidence.at(-1).retrieved_sha256 };
     out.producer_times = { observation: null, acquisition_start: p.timestamp, acquisition_end: null, publication: null };
     out.freshness = { ...(Date.parse(p.timestamp) > now ? {status:'invalid_time',observed_at:p.timestamp,age_seconds:null,stale_after_seconds:overview.STALE_SECONDS} : age(p.timestamp, now, overview.STALE_SECONDS)), basis: 'collector cycle start, before fallbacks and artifact upload; each row carries its own collector receipt age' };
     const { known, unmapped } = overview.rows(p, now);
@@ -317,12 +318,18 @@ class Consumer {
     }
     const paged = slice(filtered, limit, offset); out.pagination = { ...paged.pagination, sort, ranked_over: sort === 'strip' ? null : 'all matching rows; rows without a percent change sort last' };
     out.rows = paged.rows.map(row => ({ ...row, detail_reference: this.reference({ dataset: 'cross_market_overview', row, actual: out.actual, evidence: [...q.evidence] }) }));
-    const gapIds = new Set(overview.GAPS.map(g => g.id));
-    out.gaps = overview.GAPS.filter(g => (!a.asset_class || g.asset_class === a.asset_class) && (!wanted || wanted.has(g.id)));
+    const gaps = overview.gaps(known);
+    const gapIds = new Set(gaps.map(g => g.id));
+    out.gaps = gaps.filter(g => (!a.asset_class || g.asset_class === a.asset_class) && (!wanted || wanted.has(g.id) || wanted.has(g.label)));
     out.unmatched_symbols = wanted ? [...wanted].filter(s => !known.some(r => r.label === s || r.id === s) && !gapIds.has(s)).map(s => ({ symbol: s, status: 'not_in_price_strip' })) : [];
     out.unmapped_labels = unmapped;
-    out.coverage = { strip_labels: Object.keys(p.prices).length, identified: known.length, matched_rows: filtered.length, named_gaps: overview.GAPS.length, matching_gaps: out.gaps.length,
-      live_rows: filtered.filter(r => r.freshness.live).length, unavailable_changes: filtered.filter(r => r.change.status !== 'ok').length };
+    const counts = rows => ({rows:rows.length, available_prices:rows.filter(r => r.price !== null).length, missing_prices:rows.filter(r => r.price === null).length,
+      live_rows:rows.filter(r => r.freshness.live).length, ok_changes:rows.filter(r => r.change.status === 'ok').length,
+      partial_changes:rows.filter(r => r.change.status === 'partial').length, unavailable_changes:rows.filter(r => r.change.status === 'unavailable').length,
+      numeric_changes:rows.filter(r => r.change.absolute !== null).length});
+    out.coverage = { universe_version:overview.universe.universe_version, universe_size:known.length, full_universe:counts(known),
+      strip_labels:Object.keys(p.prices).length, identified:known.length, published_identified:known.filter(r => Object.hasOwn(p.prices,r.label)).length,
+      matched_rows:filtered.length, named_gaps:gaps.length, matching_gaps:out.gaps.length, ...counts(filtered) };
     if (p.feed_stale) out.warnings.push('Producer marked the DXLink feed stale when this strip was written.');
     if (unmapped.length) out.warnings.push(`Strip labels without a reviewed identity are withheld: ${unmapped.join(', ')}.`);
     out.status = out.coverage.unavailable_changes || out.coverage.live_rows < filtered.length || out.gaps.length || unmapped.length ? 'partial' : filtered.length ? 'available' : 'empty';
@@ -635,7 +642,9 @@ class Consumer {
       out.coverage={scope:'one cached row from the exact queried payload'};out.warnings.push('Detail uses retained queried JSON. The archived CSV has not been read or verified.');return out;
     }
     if(v.dataset==='cross_market_overview') {
-      out.producer_times={observation:null,collector_receipt:v.row.collector_received_at,acquisition_start:v.actual.collector_cycle_at,acquisition_end:null,publication:null};
+      out.producer_times={observation:v.row.observed_at,observation_date:v.row.observation_date ?? null,observation_timezone:v.row.observation_timezone ?? null,
+        collector_receipt:v.row.collector_received_at,acquisition_start:v.actual.collector_cycle_at,acquisition_end:v.row.acquired_at ?? null,publication:null,
+        last_success_at:v.row.last_success_at ?? null,last_attempt_at:v.row.last_attempt_at ?? null};
       out.freshness={...v.row.freshness,note:'freshness as of the originating query; repeat market_overview for current age'};
       out.coverage={scope:'one retained row from the exact queried price strip'};
       out.warnings.push('Detail uses the retained queried row; a newer strip publication does not change it.');return out;
