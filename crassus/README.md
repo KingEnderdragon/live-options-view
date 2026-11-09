@@ -138,6 +138,25 @@ Register the strategy in `crassus/strategies`, add at least one public account d
 
 The UI has no bot or strategy whitelist, and the ignored `accounts.json` is only an overlay. That means a stale private config cannot hide bots added to the checked-in catalog by later PRs.
 
+### Strategy observation state and replay boundaries
+
+`put_call_ratio_qqq`, `momentum_qqq` and `oi_skew_qqq` keep rolling observation
+history at module scope. That is correct for one continuous chronological
+replay and for the live runner, where time only moves forward. It is wrong for
+an independent replay that starts again at an earlier date in the same
+interpreter — a parameter sweep, a walk-forward fold, a repeated CI run — where
+the carried-over baseline silently suppresses later trades (#69).
+
+`crassus/replay.py` owns that boundary. A harness calls
+`reset_strategy_state()` once at the start of each independent run;
+`research/synthetic_days/backtest_bridge.py` does this in `run_backtest()`. The
+live runner never calls it, so single-run behavior is unchanged. As a safety
+net, a snapshot dated before the newest recorded reading starts a new epoch on
+its own; an identical same-day replay still needs the explicit reset, because
+its timestamps are indistinguishable from a stalled feed.
+`scripts/verify_strategy_state.py` proves the boundary, the guard and that a
+stateless strategy is unaffected.
+
 ## Account ↔ strategy mapping (target, once P3 lands)
 
 | Account | Strategy | |

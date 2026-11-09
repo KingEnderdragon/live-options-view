@@ -25,6 +25,9 @@ jobs:
       - name: Run integrity invariant suite
         working-directory: crassus
         run: python scripts/verify_invariants.py
+      - name: Run strategy-state lifecycle and per-account tracker suite
+        working-directory: crassus
+        run: python scripts/verify_strategy_state.py
       - name: Run reddit_sentiment_qqq strategy suite
         working-directory: crassus
         run: python scripts/verify_reddit_sentiment.py

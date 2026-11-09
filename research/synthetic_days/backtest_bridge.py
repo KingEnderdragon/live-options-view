@@ -42,6 +42,7 @@ sys.path.insert(0, str(REPO_ROOT / "crassus"))
 from crassus.client import Book  # noqa: E402
 from crassus.flatten import maybe_flatten  # noqa: E402
 from crassus.market import MarketSnapshot, Quote  # noqa: E402
+from crassus.replay import reset_strategy_state  # noqa: E402
 from crassus.strategy import StrategyContext  # noqa: E402
 import crassus.strategies  # noqa: E402  (registers every strategy_id into crassus.strategy.REGISTRY)
 from crassus.strategy import REGISTRY  # noqa: E402
@@ -65,6 +66,14 @@ def run_strategy_on_day(strategy_id: str, day: dict, params: dict | None = None)
     buy/sell decisions at the synthetic ask/bid. Returns a small trade log
     plus end-of-day realized P&L (closed round-trips only; an unresolved
     position at 4pm ET is marked-to-bid, not counted as realized).
+
+    This is one *day inside a caller-owned run*: it deliberately does not
+    reset strategy state, because a stateful strategy's rolling history is
+    meant to span consecutive days of one replay (a 24h PCR baseline, a 60m
+    momentum window, a session's OI-skew anchor). A caller starting an
+    independent run -- a parameter sweep, a walk-forward fold, a repeated
+    comparison -- calls `run_backtest()` or `reset_strategy_state()` first;
+    see `crassus/replay.py` and issue #69.
     """
     strategy = REGISTRY[strategy_id]
     trades: list[dict] = []
@@ -140,6 +149,20 @@ def _realized_pnl(trades: list[dict]) -> float:
     return round(pnl, 2)
 
 
+def run_backtest(strategy_id: str, days: list[dict], params: dict | None = None) -> list[dict]:
+    """Run `days` chronologically as one independent, declared replay.
+
+    The boundary is the point of this function: strategies such as
+    `put_call_ratio_qqq`, `momentum_qqq` and `oi_skew_qqq` keep rolling
+    observation history at module scope, so a second sweep in the same
+    interpreter would otherwise score its first day against the previous
+    sweep's last day (#69). Resetting here does not erase intended history
+    *within* the run -- every day still sees the days before it.
+    """
+    reset_strategy_state(strategy_id)
+    return [run_strategy_on_day(strategy_id, day, params) for day in days]
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--strategy", required=True, help=f"one of: {sorted(REGISTRY)}")
@@ -157,7 +180,7 @@ def main():
         print(f"No synthetic_*.json files in {args.days} -- run day_generator.py first.", file=sys.stderr)
         sys.exit(1)
 
-    results = [run_strategy_on_day(args.strategy, load_day(p), params) for p in day_files]
+    results = run_backtest(args.strategy, [load_day(p) for p in day_files], params)
 
     n_trades_days = sum(1 for r in results if r["trades"])
     total_pnl = sum(r["realized_pnl"] for r in results)
