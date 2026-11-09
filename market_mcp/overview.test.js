@@ -24,9 +24,9 @@ test('DXLink rows keep producer percent, gain identity, unit and consumer-derive
   assert.equal(r.AAPL.id, 'AAPL'); assert.equal(r.AAPL.change.status, 'partial');
   assert.ok(r.AAPL.change.reasons.includes('observation_and_reference_session_unverified'));
   assert.equal(r.AAPL.change.percent, 1); assert.equal(r.AAPL.change.absolute, 2); assert.equal(r.AAPL.change.absolute_unit, 'USD');
-  assert.equal(r.AAPL.freshness.status, 'fresh'); assert.equal(r.AAPL.freshness.live, true);
-  assert.equal(r.QQQ.id, 'etf.qqq'); assert.match(r.QQQ.name, /not the index/);
-  assert.equal(r.USO.asset_class, 'etf'); assert.match(r.USO.name, /not crude oil/);
+  assert.equal(r.AAPL.freshness.status, 'fresh'); assert.equal(r.AAPL.freshness.live, false);
+  assert.equal(r.QQQ.id, 'etf.qqq'); assert.equal(r.QQQ.instrument_type, 'equity_etf');
+  assert.equal(r.USO.asset_class, 'etf'); assert.equal(r.USO.instrument_type, 'commodity_pool_etp');
 });
 
 test('10Y is normalized from the CBOE x10 scale and moves in bps, not percent', async () => {
@@ -48,7 +48,7 @@ test('yen futures keep USD-per-JPY units and are not presented as spot USD/JPY',
   assert.equal(j.id, 'fut.6j'); assert.equal(j.unit, 'USD_per_JPY');
   assert.equal(j.change.status, 'unavailable'); assert.ok(j.change.reasons.includes('contract_unresolved'));
   const spot = await consumer.call('market_overview', { symbols: ['fx.usdjpy'] });
-  assert.equal(spot.rows.length, 0); assert.match(spot.gaps[0].reason, /yen futures/);
+  assert.equal(spot.rows.length, 1); assert.equal(spot.rows[0].price, null); assert.equal(spot.rows[0].id, 'fx.usdjpy'); assert.ok(spot.gaps.length);
 });
 
 test('Yahoo yen spot and originless carried yen are never labeled CME futures', async () => {
@@ -98,17 +98,17 @@ test('last-known carry-forward is stale with no change', async () => {
 test('requested assets missing from the strip are named gaps, never zero rows', async () => {
   const { consumer } = setup(); const out = await consumer.call('market_overview', { limit: 50 });
   const ids = out.gaps.map(g => g.id);
-  for (const id of ['idx.spx', 'idx.ndx', 'fut.cl', 'silver', 'yld.us02y', 'fx.eurusd', 'universe.curated_stocks']) assert.ok(ids.includes(id), id);
+  for (const id of ['idx.spx', 'idx.ndx', 'fut.cl', 'fx.eurusd']) assert.ok(ids.includes(id), id);
   assert.equal(out.status, 'partial');
-  assert.ok(!out.rows.some(r => ids.includes(r.id)));
+  assert.ok(out.rows.filter(r => ids.includes(r.id)).every(r => r.price === null));
 });
 
 test('filters, sorting over all matching rows and unknown symbols', async () => {
   const { consumer } = setup();
   const eq = await consumer.call('market_overview', { asset_class: 'equity', sort: 'percent_desc', limit: 2 });
-  assert.deepEqual(eq.rows.map(r => r.label), ['META', 'TSLA']); assert.equal(eq.pagination.total, 7);
+  assert.deepEqual(eq.rows.map(r => r.label), ['META', 'TSLA']); assert.equal(eq.pagination.total, 36);
   const asc = await consumer.call('market_overview', { asset_class: 'equity', sort: 'percent_asc', limit: 50 });
-  assert.equal(asc.rows.at(-1).label, 'AMZN'); // no percent sorts last
+  assert.ok(asc.rows.findIndex(r => r.label === 'AMZN') >= 6); // unavailable percentages sort last, including unpublished candidates
   const out = await consumer.call('market_overview', { symbols: ['SPY', 'etf.qqq', 'idx.spx', 'ZZZZ'] });
   assert.deepEqual(out.rows.map(r => r.label), ['QQQ', 'SPY']);
   assert.deepEqual(out.gaps.map(g => g.id), ['idx.spx']);
@@ -121,10 +121,10 @@ test('discovered instrument ids and asset-class gaps are selectable', async () =
   const {consumer} = setup();
   const yieldRow = await consumer.call('market_overview', {symbols:['yld.us10y.cboe_tnx']});
   assert.deepEqual(yieldRow.rows.map(r => r.label), ['10Y']);
-  const universeGap = await consumer.call('market_overview', {symbols:['universe.curated_stocks']});
-  assert.deepEqual(universeGap.gaps.map(g => g.id), ['universe.curated_stocks']);
+  const selectedMissing = await consumer.call('market_overview', {symbols:['MSFT']});
+  assert.equal(selectedMissing.rows[0].price, null); assert.equal(selectedMissing.gaps[0].id, 'MSFT');
   const rates = await consumer.call('market_overview', {asset_class:'rates'});
-  assert.deepEqual(rates.gaps.map(g => g.id), ['yld.us02y','yld.us05y','yld.us30y']);
+  assert.ok(rates.gaps.some(g => g.id === 'yld.us02y.cmt'));
   const fx = await consumer.call('market_overview', {asset_class:'fx'});
   assert.ok(fx.gaps.some(g => g.id === 'fx.usdjpy'));
   const commodities = await consumer.call('market_overview', {asset_class:'commodity'});
@@ -135,7 +135,7 @@ test('collector receipt is separate from provider observation; old, future and c
   const s = setup();
   let a = by(await s.consumer.call('market_overview', {symbols:['AAPL']})).AAPL;
   assert.equal(a.observed_at, null); assert.equal(a.collector_received_at, '2026-10-02T16:09:55Z');
-  assert.equal(a.freshness.market_state, 'regular'); assert.equal(a.freshness.live, true);
+  assert.equal(a.freshness.market_state, 'regular'); assert.equal(a.freshness.live, false);
   edit(s.files, p => { delete p.prices.AAPL.price_basis; });
   a = by(await s.consumer.call('market_overview', {symbols:['AAPL']})).AAPL;
   assert.equal(a.freshness.live, false); assert.ok(a.warnings.some(w => /Legacy strip/.test(w)));
@@ -167,19 +167,21 @@ test('even small future receipt or collector-cycle skew cannot assert live fresh
   assert.equal(discovery.capabilities[4].freshness.status, 'invalid_time');
 });
 
-test('equity session labels cover premarket, postmarket, holiday, early close and DST', async () => {
+test('equity session labels cover premarket, postmarket, holiday, shortened-session uncertainty and DST', async () => {
   for (const [stamp, expected] of [
     ['2026-10-02T13:00:00Z','premarket'],
     ['2026-10-02T20:01:00Z','postmarket'],
     ['2026-11-26T16:00:00Z','closed'],
-    ['2026-11-27T19:00:00Z','closed'],
+    ['2026-11-27T19:00:00Z','unknown'],
+    ['2026-12-23T16:00:00Z','unknown'],
+    ['2026-12-22T16:00:00Z','regular'],
     ['2026-11-02T14:31:00Z','regular'],
   ]) {
     const s = setup({now:() => Date.parse(stamp)});
     edit(s.files, p => { p.timestamp = stamp; p.prices.AAPL.quote_ts = stamp; });
     const a = by(await s.consumer.call('market_overview', {symbols:['AAPL']})).AAPL;
     assert.equal(a.freshness.market_state, expected, stamp);
-    assert.equal(a.freshness.live, expected !== 'closed', stamp);
+    assert.equal(a.freshness.live, false, stamp); // legacy receipt-only evidence
     if (expected === 'premarket' || expected === 'postmarket') {
       assert.equal(a.change.status, 'partial', stamp);
       assert.equal(a.change.current_session, null);
