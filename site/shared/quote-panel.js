@@ -70,8 +70,10 @@ function normalizeQuoteRow(label, row, receivedAt, nowMs) {
 // Snapshots re-decorate retained rows so an outage ages cards and removes them
 // from movers instead of freezing a one-hour-old quote as live.
 function decorateQuoteRow(row, nowMs) {
-  const ageMs = row.observedMs !== null ? nowMs - row.observedMs
-    : row.receiptMs !== null ? nowMs - row.receiptMs : null;
+  // Receipt time is not observation time. A streaming row without a provider
+  // event timestamp is `unknown`, never live, even if the collector just
+  // received it; otherwise a current bid/ask receipt would freshen an old print.
+  const ageMs = row.observedMs !== null ? nowMs - row.observedMs : null;
   let state;
   if (row.missing) state = 'missing';
   else if (row.stale || row.refreshError) state = 'stale';
@@ -79,6 +81,7 @@ function decorateQuoteRow(row, nowMs) {
   else if (row.session && !QUOTE_ACTIVE_SESSIONS.includes(row.session)) {
     state = row.session === 'maintenance' ? 'maintenance' : 'closed';
   } else if (!row.session) state = 'unknown';
+  else if (row.observedMs === null) state = 'unknown';
   else if (ageMs !== null && (ageMs < -30_000 || ageMs > QUOTE_STALE_MS)) state = 'stale';
   else state = 'live';
   return { ...row, ageMs, state };
@@ -161,11 +164,19 @@ class QuoteStore {
   }
 }
 
+function quoteModeLabel(mode, lane) {
+  const status = lane?.sessions?.[mode]?.status ?? lane?.sessions?.equities?.status;
+  if (mode === 'equities' && ['premarket', 'regular', 'afterhours'].includes(status)) {
+    return `${QUOTE_SESSION_LABELS[status]} · US equities`;
+  }
+  return QUOTE_MODE_LABELS[mode];
+}
+
 function quoteSessionMode(snapshot) {
   const { rows, meta, nowMs } = snapshot;
   const laneMode = meta?.lane?.mode;
   if (laneMode && QUOTE_MODE_LABELS[laneMode]) {
-    return { mode: laneMode, label: QUOTE_MODE_LABELS[laneMode], source: 'producer' };
+    return { mode: laneMode, label: quoteModeLabel(laneMode, meta.lane), source: 'producer' };
   }
   // Without a producer lane, a row's `session` is the last trade/observation
   // session, not proof that the market is open now. Only fresh rows may name
@@ -215,6 +226,7 @@ function computeMovers(snapshot, { mode = null, count = 3, maxAgeMs = QUOTE_MOVE
   if (!group) return { up: [], down: [], eligible: 0, group: mode || 'none', label: null };
   const eligible = snapshot.rows.filter(row => {
     if (!row.asset_class || !group.classes.includes(row.asset_class)) return false;
+    if (row.state !== 'live') return false;
     if (row.price === null || quoteNumber(row.changePct) === null) return false;
     if (row.stale || row.refreshError) return false;
     if (!quoteReferenceUsable(row)) return false;

@@ -97,7 +97,9 @@ function paintQuoteCard(card, row) {
   changeEl.textContent = formatQuotePercent(row.changePct);
   changeEl.className = `chg ${row.changePct === null ? 'flat' : row.changePct > 0 ? 'up' : row.changePct < 0 ? 'down' : 'flat'}`;
   stateEl.textContent = quoteStateText(row);
-  ageEl.textContent = row.ageMs === null ? (row.daily ? 'daily' : '') : `updated ${formatQuoteAge(row.ageMs)} ago`;
+  ageEl.textContent = row.ageMs === null
+    ? (row.daily ? 'daily' : 'time unknown')
+    : `updated ${formatQuoteAge(row.ageMs)} ago`;
   el.title = quoteCardTitle(row);
   el.dataset.state = row.state;
   el.setAttribute('aria-label', `${row.name}, ${formatQuotePrice(row)}, ${formatQuotePercent(row.changePct)}, ${quoteStateText(row)}`);
