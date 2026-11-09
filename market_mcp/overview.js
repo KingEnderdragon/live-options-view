@@ -79,6 +79,9 @@ function validate(p) {
   check(object(p) && iso(p.timestamp) && typeof p.feed_stale === 'boolean' && object(p.prices), 'Unsupported prices contract.');
   check(p.schema_version == null || [1,2].includes(p.schema_version), 'Unsupported prices schema version.');
   check(p.universe_version == null || p.universe_version === universe.universe_version, 'Unknown universe version.');
+  if (p.price_lane != null) check(object(p.price_lane) && typeof p.price_lane.writer_id === 'string' && p.price_lane.writer_id.length <= 200 &&
+    typeof p.price_lane.mode === 'string' && object(p.price_lane.groups_open) && object(p.price_lane.sessions) &&
+    typeof p.price_lane.eligible === 'boolean', 'Invalid price lane metadata.');
   const labels = Object.keys(p.prices);
   check(labels.length <= MAX_LABELS, 'Price strip exceeds the label limit.', 'excessive_or_malformed_artifact');
   for (const label of labels) {
@@ -113,6 +116,17 @@ function validate(p) {
       if (r.reference != null) check(object(r.reference) && num(r.reference.value) && observationValid(r.reference) &&
         [undefined,null,'dxlink','yfinance','treasury'].includes(r.reference.source) && (r.reference.resolved_contract == null || object(r.reference.resolved_contract)) &&
         ['source','source_symbol','instrument_id','price_basis','session','adjustment_basis'].every(k => r.reference[k] == null || typeof r.reference[k] === 'string'), `Invalid reference provenance for ${label}.`);
+      // #178 additive rolling reference: only crypto carries it, and only a
+      // bounded 24-hour sample is acceptable. Unknown extra fields elsewhere
+      // stay ignored for v2 compatibility.
+      if (r.rolling_reference != null) check(object(r.rolling_reference) && num(r.rolling_reference.value) && r.rolling_reference.value > 0 &&
+        iso(r.rolling_reference.observed_at) && r.rolling_reference.price_basis === 'rolling_24h' &&
+        r.rolling_reference.source === 'rolling_history' &&
+        [undefined,null,'continuous'].includes(r.rolling_reference.session) &&
+        ['instrument_id','source_symbol','sample_clock','observation_time_reason'].every(k => r.rolling_reference[k] == null || typeof r.rolling_reference[k] === 'string'),
+        `Invalid rolling reference for ${label}.`);
+      check(r.market_session == null || ['premarket','regular','afterhours','overnight','maintenance','closed','holiday','continuous','daily','unknown'].includes(r.market_session),
+        `Unknown market session for ${label}.`);
     }
     check(r.price_basis == null || (origin === 'dxlink' && ['last_trade', 'bid_ask_midpoint'].includes(r.price_basis)) ||
       (origin === 'treasury' && p.schema_version === 2 && r.price_basis === 'daily_close') ||
@@ -230,6 +244,32 @@ function dateInZone(ms, tz) {
   const parts = new Intl.DateTimeFormat('en-CA', {timeZone:tz,year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(ms);
   return ['year','month','day'].map(k => parts.find(p => p.type === k).value).join('-');
 }
+function rolling24h(out, r, now, inst) {
+  const ref = r.rolling_reference ?? null;
+  const unavailable = reason => ({ status: 'unavailable', reasons: [reason], percent: null,
+    absolute: null, absolute_unit: null, reference_at: null, reference_basis: 'rolling_24h',
+    reference_age_seconds: null, sample_clock: null });
+  if (inst.asset_class !== 'crypto') return unavailable('not_a_continuous_instrument');
+  if (r.source !== 'dxlink' || r.stale === true || out.price == null) return unavailable('current_observation_unusable');
+  if (!ref) return unavailable('rolling_reference_missing');
+  const sampleMs = Date.parse(ref.observed_at);
+  const age = Number.isFinite(sampleMs) ? (now - sampleMs) / 1000 : null;
+  if (age == null || age < 23.5 * 3600 || age > 24.6 * 3600) return unavailable('rolling_reference_outside_24h_window');
+  if (ref.value == null || !Number.isFinite(ref.value) || ref.value <= 0) return unavailable('invalid_rolling_reference');
+  if (ref.instrument_id != null && ref.instrument_id !== out.id) return unavailable('rolling_reference_identity_mismatch');
+  const percent = 100 * (out.price - ref.value) / ref.value;
+  if (!Number.isFinite(percent)) return unavailable('nonfinite_arithmetic');
+  const reasons = [];
+  if (ref.sample_clock && ref.sample_clock !== 'provider_event_clock') reasons.push('sample_clock_is_collector_receipt');
+  return { status: reasons.length ? 'partial' : 'ok', reasons,
+    percent: round(percent, 6), absolute: round(out.price - ref.value, 6),
+    absolute_unit: USD_UNITS.has(inst.unit) ? 'USD' : inst.unit,
+    reference_at: ref.observed_at, reference_basis: 'rolling_24h',
+    reference_age_seconds: round(age, 1), sample_clock: ref.sample_clock ?? null,
+    derivation: 'consumer: (normalized price - same-instrument 24h historical sample) / sample x 100' };
+}
+
+
 function enrich(out, r, p, now) {
   const inst = INSTRUMENTS[out.label], v2 = p.schema_version === 2;
   const market = inst.profile === 'E' ? equitySession(now) : inst.profile === 'C' ? 'continuous_market' : 'unknown';
@@ -340,6 +380,8 @@ function enrich(out, r, p, now) {
     current_session:r.session ?? null, adjustment_basis:ref.adjustment_basis ?? null, collector_receipt_window:out.change.collector_receipt_window,
     derivation:{absolute:'consumer: normalized price - normalized reference.value',percent:'consumer: 100 x absolute / reference',bps:'consumer: normalized yield difference x 100'}};
   out.warnings = out.warnings.filter(w => !/Undated yfinance|Nonpositive current|Legacy strip/.test(w));
+  out.market_session = r.market_session ?? null;
+  if (inst.asset_class === 'crypto') out.change_24h = rolling24h(out, r, now, inst);
   if (r.refresh_error) out.warnings.push('Newer refresh failed; the retained observation and its original date/time are unchanged.');
   if (futureObservation) out.warnings.push('Provider observation is in the future; live status and comparisons are withheld.');
   return out;
@@ -368,7 +410,7 @@ function rows(p, now, members = universe.instruments) {
 }
 
 const units = { price: 'row.unit (10Y normalized to percent; fut.6j and fx.jpyusd in USD per JPY)', 'change.absolute': 'row.change.absolute_unit (USD only for USD-denominated rows)',
-  'change.percent': 'percent; v2 consumer-normalized pair arithmetic, legacy producer-rounded to 2 dp', 'change.bps': 'basis points (yield rows only; no percent-of-yield)', 'freshness.age_seconds': 'v2 seconds since provider event at query time; legacy receipt age only, never live' };
+  'change.percent': 'percent; v2 consumer-normalized pair arithmetic, legacy producer-rounded to 2 dp', 'change.bps': 'basis points (yield rows only; no percent-of-yield)', 'change_24h.percent': 'percent against a bounded same-instrument rolling 24-hour sample (crypto only; sample tolerance ±30 minutes)', 'freshness.age_seconds': 'v2 seconds since provider event at query time; legacy receipt age only, never live' };
 const warnings = ['Source is the dashboard price artifact (intraday/prices.json); all 100 configured instruments are returned, including explicit missing candidates. Selection is not proof of provider support.',
   'Rows are asynchronous observations, not a simultaneous snapshot. quote_ts is collector receipt time, never provider observation time. Legacy receipt-only rows are never live.',
   'Date-only daily bars have no synthetic intraday timestamp. Unknown calendars and incomplete reference provenance remain explicit; partial numeric comparisons are not verified session moves.',
