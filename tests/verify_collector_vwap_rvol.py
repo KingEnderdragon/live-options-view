@@ -247,15 +247,27 @@ def test_underlying_market_freshness_reflects_feed_staleness():
 
 
 def test_resolve_underlying_spot_pairs_price_with_its_own_timestamp():
-    # bid/ask present -> mid price, paired with bid/ask timestamps, not last_ts
-    # (which could be stale/unrelated if only a Quote event, no Trade, fired).
+    # bid/ask present -> mid price, stamped with the OLDER contributing side's
+    # receipt. A fresh ask must not rejuvenate an older bid (#146).
     spot, ts = collector._resolve_underlying_spot(
         {"bid": 400.0, "ask": 400.2, "bid_ts": "2026-07-30T14:00:00+00:00",
          "ask_ts": "2026-07-30T14:00:01+00:00", "last_ts": "2026-07-29T10:00:00+00:00"},
         last_spot_price=None, last_spot_ts=None,
     )
     assert_equal(spot, 400.1, "mid of bid/ask")
-    assert_equal(ts, "2026-07-30T14:00:01+00:00", "paired with bid/ask timestamps, not the unrelated last_ts")
+    assert_equal(ts, "2026-07-30T14:00:00+00:00", "paired with the older contributing side, not the newer ask or an unrelated last_ts")
+
+
+def test_resolve_underlying_spot_midpoint_without_a_side_receipt_is_unstamped():
+    # Both sides exist but one contributing receipt is missing: the midpoint
+    # stays usable, earns no receipt, and is not silently stamped with the
+    # other (fresher) side.
+    spot, ts = collector._resolve_underlying_spot(
+        {"bid": 400.0, "ask": 400.2, "ask_ts": "2026-07-30T14:00:01+00:00"},
+        last_spot_price=None, last_spot_ts=None,
+    )
+    assert_equal(spot, 400.1, "midpoint still computed")
+    assert_equal(ts, None, "no receipt when a contributing leg has none")
 
 
 def test_resolve_underlying_spot_last_price_paired_with_last_ts():
@@ -449,6 +461,7 @@ def run():
         test_finalize_rvol_baseline_skips_when_no_readings,
         test_underlying_market_freshness_reflects_feed_staleness,
         test_resolve_underlying_spot_pairs_price_with_its_own_timestamp,
+        test_resolve_underlying_spot_midpoint_without_a_side_receipt_is_unstamped,
         test_resolve_underlying_spot_last_price_paired_with_last_ts,
         test_resolve_underlying_spot_last_resort_fallback_paired_with_its_own_timestamp,
         test_resolve_underlying_spot_nothing_available,
