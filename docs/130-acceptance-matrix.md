@@ -1,8 +1,8 @@
 # #130 offline acceptance matrix (A1/A2 end state)
 
 Branch `nova/130-multi-session`, base master `96d59b48`. Inert, non-deploying.
-Local head `281802f`; MSI single commit `bb119e73` (to be updated with this
-round's commits). No push, no PR, no deployment, no collector runs.
+Local head `3e39c18`; MSI single commit `362e1d63`. Identical file contents,
+verified by blob hash. No push, no PR, no deployment, no collector runs.
 
 Chej engineering review (2026-11-09) confirms the v1 definitions below for
 inert/offline use only. They are NOT Owen release approval. D1-D5, D7 and
