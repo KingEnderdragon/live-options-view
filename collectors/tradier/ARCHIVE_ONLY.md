@@ -12,7 +12,7 @@ The `moo169-tradier-collector` Railway service starts
 `python -u tradier_cron_launcher.py`. The 2026-09-18 deployment receipt records
 its schedule as `15 12 * * 1-5` UTC and notes that acceptance was still open
 then; the schedule lives on the service, not in this repository
-(`TRADIER_DEPLOYMENT.md`). The service's watch list covers `collectors/**` as of
+([operations guide](OPERATIONS.md)). The service's watch list covers `collectors/**` as of
 2026-11-08, so a change confined to this package redeploys it.
 
 The launcher re-runs the collector after a non-zero exit, up to ten retries and

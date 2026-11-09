@@ -4,7 +4,7 @@
 Builds weekly, overnight and rolling two/three-session windows over the
 daily OA-203 archive, and measures one contract's return across a window
 without stitching contracts, looking ahead, or interpolating endpoints. See
-OA203_MULTI_SESSION_WINDOWS.md for the design and the open decisions D1-D9.
+notes/specs/OA203_MULTI_SESSION_WINDOWS.md for the design and the open decisions D1-D9.
 
 **Every D1-D9 choice is an explicit WindowPolicy field.** The defaults are the
 design doc's *recommended* values and are marked provisional in every output
