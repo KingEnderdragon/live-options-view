@@ -14,6 +14,12 @@ import {
 import { botUsernames } from './bots.js';
 
 const SETTLEMENT_ID_PREFIX = 'settle';
+const UNDERLYINGS = new Set(['QQQ', 'SPY', 'IBIT']);
+export function settlementMark(b, marks) {
+  const underlying = b.underlying ?? 'QQQ'; // pre-migration books were QQQ only
+  const value = marks[`${underlying}:${b.exp}`] ?? (underlying === 'QQQ' ? marks[b.exp] : null);
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
+}
 
 // Longs settle worthless -- this book has no exercise capacity, so an ITM
 // long must be closed before expiration to realize value. Shorts don't get
@@ -23,7 +29,7 @@ const SETTLEMENT_ID_PREFIX = 'settle';
 // expiration.
 export function settlementPriceServer(b, spotMarks) {
   if (b.pos > 0) return 0;
-  const spot = spotMarks[b.exp];
+  const spot = settlementMark(b, spotMarks);
   if (spot == null) return 0;
   return b.type === 'call' ? Math.max(spot - b.strike, 0) : Math.max(b.strike - spot, 0);
 }
@@ -35,7 +41,8 @@ export function validateSettleRequest(body) {
     return 'spot_marks must be an object';
   }
   for (const [exp, spot] of Object.entries(body.spot_marks)) {
-    if (!ISO_DATE.test(exp)) return 'spot_marks keys must be ISO dates';
+    const [root, date] = exp.includes(':') ? exp.split(':') : ['QQQ', exp];
+    if (!UNDERLYINGS.has(root) || !ISO_DATE.test(date) || exp.split(':').length > 2) return 'spot_marks keys must be ISO dates or UNDERLYING:ISO-date';
     if (typeof spot !== 'number' || !Number.isFinite(spot) || spot < 0) return 'spot_marks values must be non-negative numbers';
   }
   return null;
@@ -70,7 +77,7 @@ async function settleAccount(env, username, as_of, spot_marks) {
     // mark set (the next cron sweep, or a dashboard load for that date)
     // picks them back up. Longs are unaffected: they always settle at 0
     // regardless of spot (see settlementPriceServer).
-    const pending = settleable.filter(([, b]) => b.pos > 0 || spot_marks[b.exp] != null);
+    const pending = settleable.filter(([, b]) => b.pos > 0 || settlementMark(b, spot_marks) != null);
 
     if (!pending.length) {
       return { result: { settled: [], balance_cash: record.balance_cash, liquidated: false } };
@@ -96,6 +103,7 @@ async function settleAccount(env, username, as_of, spot_marks) {
         execution_request_id: `${SETTLEMENT_ID_PREFIX}:${sym}:${b.exp}`,
         ts: new Date().toISOString(),
         sym, strike: b.strike, type: b.type, exp: b.exp,
+        underlying: b.underlying,
         instrument_type: 'option', multiplier: 100,
         side, qty: Math.abs(b.pos), price,
         note: price > 0 ? 'exercised against (assigned)' : 'expired worthless',
@@ -162,7 +170,36 @@ function settlementAsOfNY(now = new Date()) {
 // worker's own routes since this runs server-side, not from a browser.
 // Only the UnderlyingPrice of the expiration's own 0DTE chain is needed, so
 // this stops at the first matching row instead of parsing the whole CSV.
-async function fetchSpotMarkForDate(dateStr) {
+// The publisher only writes a mark from a timed 16:00-16:15 ET post-close
+// observation (see market_data/live_market/settlement_marks.py). The
+// consumer re-checks that window in New York time, so a manually written R2
+// object -- or a publisher bug -- with a midday observation and an
+// otherwise-correct schema cannot become an expiration's mark. The ET date
+// (not the UTC date prefix) is what must match the expiration.
+function observedAtInPostCloseWindow(observedAt, dateStr) {
+  const ms = Date.parse(observedAt);
+  if (!Number.isFinite(ms)) return false;
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/New_York',
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+    }).formatToParts(new Date(ms)).filter(part => part.type !== 'literal').map(part => [part.type, part.value]),
+  );
+  return `${parts.year}-${parts.month}-${parts.day}` === dateStr &&
+    Number(parts.hour) === 16 && Number(parts.minute) <= 15;
+}
+export async function fetchSpotMarkForDate(dateStr, underlying = 'QQQ') {
+  if (!UNDERLYINGS.has(underlying)) return null;
+  if (underlying !== 'QQQ') {
+    const response = await fetch(`${R2_ORIGIN}/settlement/${underlying.toLowerCase()}/${dateStr}.json`, { cf: { cacheTtl: 0 } });
+    if (!response.ok) return null;
+    const mark = await response.json();
+    if (mark.symbol !== underlying || mark.expiration !== dateStr || mark.date !== dateStr ||
+        mark.price_basis !== 'first_observed_post_close' || mark.source !== 'dxlink' ||
+        !observedAtInPostCloseWindow(mark.observed_at, dateStr)) return null;
+    return typeof mark.spot === 'number' && Number.isFinite(mark.spot) && mark.spot > 0 ? mark.spot : null;
+  }
   const key = dateStr.replace(/-/g, '');
   for (const path of [`raw/qqq_chain_${key}.csv`, `raw/opex/qqq_chain_${key}.csv`]) {
     const response = await fetch(`${R2_ORIGIN}/${path}`, { cf: { cacheTtl: 0 } });
@@ -204,15 +241,18 @@ export async function settleAllBots(env, now = new Date()) {
       b.instrument_type === 'option' && b.pos !== 0 && b.exp && b.exp < asOf);
     if (!expired.length) continue;
     pendingByUsername.set(username, true);
-    for (const [, b] of expired) neededExpirations.add(b.exp);
+    for (const [, b] of expired) neededExpirations.add(`${b.underlying}:${b.exp}`);
   }
 
   if (!pendingByUsername.size) return;
 
   const spotMarks = {};
-  for (const exp of neededExpirations) {
-    const spot = await fetchSpotMarkForDate(exp);
-    if (spot != null) spotMarks[exp] = spot;
+  for (const identity of neededExpirations) {
+    const [underlying, exp] = identity.split(':');
+    try {
+      const spot = await fetchSpotMarkForDate(exp, underlying);
+      if (spot != null) spotMarks[identity] = spot;
+    } catch { /* A failed source leaves only its own obligations pending. */ }
   }
 
   for (const username of pendingByUsername.keys()) {
@@ -240,7 +280,22 @@ export async function handleSettle(request, env) {
 
   const { as_of, spot_marks } = bodyResult.body;
 
-  const kvOutcome = await settleAccount(env, session.username, as_of, spot_marks);
+  // New underlyings use the same durable marks as cron. Never let a browser
+  // visit time (or a nearest-expiry snapshot) become the expiration's mark.
+  const marks = Object.fromEntries(Object.entries(spot_marks).filter(([key]) =>
+    ISO_DATE.test(key) || key.startsWith('QQQ:')));
+  const book = computeBookFromTrades(session.record.trades);
+  for (const b of Object.values(book)) {
+    if (b.instrument_type !== 'option' || b.pos >= 0 || !b.exp || b.exp >= as_of || b.underlying === 'QQQ') continue;
+    const key = `${b.underlying}:${b.exp}`;
+    if (Object.hasOwn(marks, key)) continue;
+    try {
+      const spot = await fetchSpotMarkForDate(b.exp, b.underlying);
+      if (spot != null) marks[key] = spot;
+    } catch { /* Leave this underlying pending, independently of other marks. */ }
+  }
+
+  const kvOutcome = await settleAccount(env, session.username, as_of, marks);
 
   if (kvOutcome.error === 'insolvent') {
     await liquidateAccount(env, session.username, session.token);

@@ -998,6 +998,7 @@
   <select id="underlying-select" aria-label="Options chain underlying">
     <option value="QQQ">QQQ</option>
     <option value="SPY">SPY</option>
+    <option value="IBIT">IBIT</option>
   </select>
   <span id="title">QQQ 0DTE Live OI</span>
   <span id="price">—</span>
@@ -1231,15 +1232,13 @@
 <script src="shared.js?v=050c96a265673ac3"></script>
 <script src="shared/csv-ranges.js?v=2037c69afbe5d94b"></script>
 <script src="shared/heatmap.js?v=c4a883a5bc99b558"></script>
-<script src="shared/quotes.js?v=8eefeac90dfd88bf"></script>
+<script src="shared/quotes.js?v=734ed3e60dc3333c"></script>
 <script src="shared/format.js?v=132e6deb03cda939"></script>
 <script src="shared/instruments.js?v=860821b9e03c4a08"></script>
 <script src="shared/quote-panel.js?v=3806793be069e8a7"></script>
-<script src="shared/chain.js?v=cb4a1bb1bb828c64"></script>
-<script>
-// ── stale-page protection ──────────────────────────────────────────────────────
-// Cache-Control: no-store (set by the Worker) stops new responses from being
-// cached, but it can't evict a copy a device already cached before that header
+<script src="shared/chain.js?v=477ee1ce1d6f08f2"></script>
+<script>// ── stale-page protection ──────────────────────────────────────────────────────
+// Cache-Control: no-store (set by the Worker) stops new responses from being// cached, but it can't evict a copy a device already cached before that header
 // existed, and it does nothing for iOS Safari's back-forward cache (bfcache),
 // which can restore a frozen page snapshot with zero network request. Both show
 // up as "stuck on an old version" on mobile, so this page self-heals instead of
@@ -1307,7 +1306,7 @@ let timerHandle = null;
 // so the page's script order is unchanged. No test slices up to this banner;
 // it stays here as the section's marker.
 </script>
-<script src="js/render-heatmap.js?v=97e7d3a7dfb9b53f"></script>
+<script src="js/render-heatmap.js?v=749be5273663fc72"></script>
 <script>
 
 // ── paper trading ─────────────────────────────────────────────────────────────
@@ -1315,7 +1314,7 @@ let timerHandle = null;
 // so the page's script order is unchanged. The banner stays here as
 // the section's marker.
 </script>
-<script src="js/paper-trading.js?v=c4b77cd16efe880e"></script>
+<script src="js/paper-trading.js?v=e818b25d06e43ab5"></script>
 <script>
 
 // ── auth ───────────────────────────────────────────────────────────────────────
@@ -1331,7 +1330,7 @@ let timerHandle = null;
 // so the page's script order is unchanged. The banner stays here as
 // the section's marker.
 </script>
-<script src="js/trade-ticket.js?v=2b37b3770bf70527"></script>
+<script src="js/trade-ticket.js?v=85fc34910f5d761f"></script>
 <script>
 
 // ── data fetch cycle ──────────────────────────────────────────────────────────
@@ -1340,7 +1339,7 @@ let timerHandle = null;
 // loads the module instead of slicing up to the countdown banner; the banner
 // stays here as the section's marker.
 </script>
-<script src="js/data-fetch-cycle.js?v=cd8743d8e85b8594"></script>
+<script src="js/data-fetch-cycle.js?v=80a9bb163ca7c436"></script>
 <script>
 
 // ── countdown timer ───────────────────────────────────────────────────────────
@@ -1360,9 +1359,7 @@ let timerHandle = null;
 <script src="js/quote-panel.js?v=0db84bc42f6b9006"></script>
 <script src="js/price-strip.js?v=85303bf410ddc98c"></script>
 <script>
-
-// EIA STEO crude calibration + OVX regime — moved to js/steo-fetch.js (B2),
-// loaded below in the same position, so the page's script order is unchanged.
+// EIA STEO crude calibration + OVX regime — moved to js/steo-fetch.js (B2),// loaded below in the same position, so the page's script order is unchanged.
 // The steo tests load the module instead of slicing fetchSteoCalibration out
 // of the page.
 </script>
@@ -1391,7 +1388,7 @@ let timerHandle = null;
 // so the page's script order is unchanged. The banner stays here as
 // the section's marker.
 </script>
-<script src="js/bots-panel.js?v=9172729f772c2119"></script>
+<script src="js/bots-panel.js?v=fd3e0136fdd9b9d5"></script>
 <script>
 
 // ── historical panel ─────────────────────────────────────────────────────────
@@ -1423,6 +1420,4 @@ let timerHandle = null;
 // so the page's script order is unchanged. The banner stays here as
 // the section's marker.
 </script>
-<script src="js/boot.js?v=1a582324e77c6419"></script>
-</body>
-</html>
+<script src="js/boot.js?v=1a582324e77c6419"></script></body></html>

@@ -227,7 +227,7 @@ function renderBots() {
       const ppnl = mark != null && p.avg_price != null
         ? (mark - p.avg_price) * p.qty * 100 : null;
       return `<tr>
-        <td>QQQ ${p.strike} ${p.type === 'call' ? 'C' : 'P'}</td>
+        <td>${occRoot(p.sym || p.symbol) || p.underlying || 'QQQ'} ${p.strike} ${p.type === 'call' ? 'C' : 'P'}</td>
         <td>${p.qty > 0 ? '+' : ''}${p.qty}</td>
         <td>${p.avg_price != null ? fmtQ(p.avg_price) : '—'}</td>
         <td>${mark != null ? fmtQ(mark) : '—'}</td>

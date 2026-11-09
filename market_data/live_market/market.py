@@ -35,7 +35,7 @@ from .config import (
     log,
 )
 from .feed import DXLinkFeed
-from .quotes import _fresh_spy_spot, _observed_spy_price_with_basis, _spy_subscription_coverage
+from .quotes import _fresh_spy_spot, _observed_spy_price_with_basis, _provider_observed_spy_price, _spy_subscription_coverage
 from .state import (
     Counters,
     QQQ_SESSION,
@@ -385,13 +385,16 @@ def take_snapshot(s3, feed: DXLinkFeed, strikes: list[dict],
     if us.symbol == "SPY":
         spy_price, spy_ts, spy_basis = _observed_spy_price_with_basis(quote)
         if spy_price is not None:
+            # Provider time pairs with the same input that produced the
+            # price: a midpoint needs both sides (older wins); a last trade
+            # needs its own event time. This is the time the settlement
+            # mark is stamped with -- never the collector receipt time.
+            _, spy_provider, _ = _provider_observed_spy_price(quote)
             selection = UnderlyingSelection(
                 price=spy_price,
                 receipt_ts=spy_ts,
                 basis=spy_basis,
-                provider_observed_at=_older_observed(
-                    ("bid", quote.get("bid_observed_at")), ("ask", quote.get("ask_observed_at")))
-                if spy_basis == "bid_ask_midpoint" else None,
+                provider_observed_at=spy_provider,
                 selection_rule="spy_quote_required_older_receipt",
                 contributing=_quote_contributing(quote),
             )
@@ -411,6 +414,28 @@ def take_snapshot(s3, feed: DXLinkFeed, strikes: list[dict],
 
     underlying, spot_ts_str = selection.price, selection.receipt_ts
     atm = round(underlying) if underlying else None
+    from .settlement_marks import publish_settlement_mark, contributing_provider_times_valid
+    # Settlement marks need the PROVIDER's event time
+    # (selection.provider_observed_at), not the collector receipt time
+    # (spot_ts_str): a fresh receipt of an unknown-age price must stay
+    # pending, never become an irreversible mark. Unknown/preclose/stale/
+    # future/mixed-side provider evidence stays pending; a remembered spot
+    # has no provider time and can never publish. QQQ never publishes.
+    # The provider time is the OLDEST contributing leg, which proves the
+    # oldest leg isn't stale but hides a future newer leg -- so EVERY
+    # contributing provider timestamp must pass the window/now check, not
+    # just the oldest one. A valid bid plus a FUTURE ask must not publish.
+    contributing = selection.contributing or {}
+    if selection.basis in ("bid_ask_midpoint", "bid_ask_midpoint_unstamped"):
+        provider_times = [contributing.get("bid_observed_at"), contributing.get("ask_observed_at")]
+    elif selection.basis == "last_trade":
+        provider_times = [contributing.get("last_observed_at")]
+    else:
+        provider_times = []
+    publish_observed_at = (selection.provider_observed_at
+                           if contributing_provider_times_valid(provider_times, exp_date, ts_utc)
+                           else None)
+    publish_settlement_mark(s3, us.symbol, exp_date, underlying, publish_observed_at, ts_utc)
 
     underlying_market = _compute_underlying_market(
         s3, quote, underlying, spot_ts_str, ts_et, ts_utc, today, us, selection)
@@ -442,7 +467,7 @@ def take_snapshot(s3, feed: DXLinkFeed, strikes: list[dict],
                 "Strike":          strike,
                 "Type":            option_type,
                 "OptionSymbol":    s[occ_key],
-                "DTE":             0,
+                "DTE":             (date.fromisoformat(exp_date) - today).days,
                 "OpenInterest":    data.get("oi", 0) or 0,
                 "Volume":          vol,
                 "VolDelta":        vol_delta,
@@ -565,7 +590,7 @@ def take_snapshot(s3, feed: DXLinkFeed, strikes: list[dict],
         "market_readings":  readings,
         "market_readings_digest": readings_sha,
     }
-    if us.symbol == "SPY":
+    if us.symbol != "QQQ":
         payload["subscription_coverage"] = _spy_subscription_coverage(
             us.subscription_coverage, _fresh_spy_spot(quote, ts_utc)[0])
 

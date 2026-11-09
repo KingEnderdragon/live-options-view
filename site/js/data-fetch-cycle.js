@@ -23,11 +23,16 @@ async function fetchChain(symbol) {
 }
 
 let latestQqqRequest = 0;
+let latestSelectedRequest = 0;
 async function fetchLatest() {
   const token = chainSelection.token();
   // QQQ is always refreshed: paper trading, expiry settlement marks and the
   // QQQ price tile depend on it regardless of which chain is on screen.
   const qqqRequest = ++latestQqqRequest;
+  // Same-selection overlap guard: a second fetchLatest (timer, re-select)
+  // supersedes the first for the selected chain too, so a slow reply for
+  // the same selection cannot overwrite fresher data that already landed.
+  const selectedRequest = ++latestSelectedRequest;
   const qqq = await fetchChain('QQQ');
   // QQQ refreshes independently of the selected chain, but an older refresh
   // must not replace newer paper-trading, indicator or cached chain state.
@@ -46,13 +51,15 @@ async function fetchLatest() {
   if (token.symbol !== 'QQQ') {
     const other = await fetchChain(token.symbol);
     // The selection changed while this was in flight: drop the reply rather
-    // than render (or cache) it under whatever is selected now.
+    // than render (or cache) it under whatever is selected now. A newer
+    // fetchLatest for the same selection supersedes this one too.
+    if (selectedRequest !== latestSelectedRequest) return;
     if (!chainSelection.accepts(token)) return;
     if (other.data) {
       chainState[token.symbol] = { data: other.data, error: null };
       // Interests first: the quote cache only keeps wanted (visible) symbols.
       updateQuoteInterests();
-      publishSnapshotQuotes(other.data);
+      ingestSnapshotQuotes(other.data);
     } else {
       chainState[token.symbol] = {
         data: other.transient ? chainState[token.symbol]?.data ?? null : null,
@@ -82,7 +89,9 @@ function clearChain(message) {
 }
 
 function renderChainTitle(symbol) {
-  document.getElementById('title').textContent = `${symbol} 0DTE Live OI`;
+  const data = chainState[symbol]?.data;
+  const expiry = data?.expiration;
+  document.getElementById('title').textContent = `${symbol} ${expiry ? (expiry === data.date ? '0DTE' : `exp ${expiry}`) : 'Options'} Live OI`;
   document.title = `${symbol} Live OI — moopertonic`;
   const select = document.getElementById('underlying-select');
   if (select.value !== symbol) select.value = symbol;
@@ -111,11 +120,12 @@ function renderSelectedChain() {
   const hasBids = data.rows.some(r => r.Bid != null);
   // Dot color carries live/stale; text is just a small timestamp note —
   // deeper diagnosis lives in diag.html, not the main view.
-  setStatus(snapAge > 2 || !hasBids || state.error ? 'stale' : 'live', data.snapshot_time);
+  setStatus(!Number.isFinite(snapAge) || snapAge < -1 || snapAge > 2 || !hasBids || state.error ? 'stale' : 'live', data.snapshot_time);
 }
 
 function selectUnderlying(symbol) {
   if (!chainSelection.select(symbol)) return;
+  if (typeof closeTicket === 'function') closeTicket();
   try { localStorage.setItem(UNDERLYING_KEY, chainSelection.symbol); } catch (e) {}
   // Clear immediately so nothing from the previous underlying stays on screen
   // under the new heading, then fetch the new one right away.

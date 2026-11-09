@@ -175,6 +175,7 @@ export async function handlePaperTrade(request, env) {
     bid_ts: quoteResult.bidTs,
     ask_ts: quoteResult.askTs,
     sym: body.sym,
+    underlying: /^([A-Z]+)\d{6}[CP]\d{8}$/.exec(body.sym)?.[1] ?? body.sym,
     instrument_type: body.instrument_type ?? 'option',
     multiplier: quoteResult.multiplier,
     strike: quoteResult.strike,

@@ -15,16 +15,17 @@ const shared = require('../site/shared.js');
 const { chainLatestPath, occRoot, validateChainPayload, ChainSelection, relativeOiRanges, summarizeSpyHealth } = shared;
 
 const NOW = Date.now();
-function snapshot(symbol, { declare = true, price = symbol === 'SPY' ? 670.2 : 600.1, rows, ts = new Date(NOW).toISOString() } = {}) {
+function snapshot(symbol, { declare = true, price = symbol === 'SPY' ? 670.2 : 600.1, rows, ts = new Date(NOW).toISOString(), date = '2026-10-06', expiration = date } = {}) {
   const strike = Math.round(price);
+  const occDate = expiration.slice(2).replaceAll('-', '');
   return {
     ...(declare ? { symbol } : {}),
-    timestamp: ts, snapshot_time: '10:30 ET', date: '2026-10-06', tier: '0DTE_Regular',
+    timestamp: ts, snapshot_time: '10:30 ET', date, expiration, tier: '0DTE_Regular',
     underlying_price: price,
     underlying_market: { symbol, spot: price },
     rows: rows || [
-      { OptionSymbol: `${symbol.padEnd(6)}261006C00${strike}000`.replace(/ /g, ' '), Strike: strike, Type: 'call', OpenInterest: 10, Bid: 1, Ask: 1.2 },
-      { OptionSymbol: `${symbol}261006P00${strike}000`, Strike: strike, Type: 'put', OpenInterest: 20, Bid: 1, Ask: 1.2 },
+      { OptionSymbol: `${symbol.padEnd(6)}${occDate}C00${strike}000`.replace(/ /g, ' '), Strike: strike, Type: 'call', OpenInterest: 10, Bid: 1, Ask: 1.2, Expiration: expiration },
+      { OptionSymbol: `${symbol}${occDate}P00${strike}000`, Strike: strike, Type: 'put', OpenInterest: 20, Bid: 1, Ask: 1.2, Expiration: expiration },
     ],
   };
 }
@@ -354,17 +355,15 @@ const settle = () => new Promise(r => setImmediate(r));
     assert.deepEqual(h.calls.heatmap.at(-1), { symbol: 'QQQ', dataSymbol: 'QQQ', price: 600.1 });
 
     h.api.selectUnderlying('SPY');
-    assert.equal(h.el('title').textContent, 'SPY 0DTE Live OI', 'heading switches immediately');
+    assert.equal(h.el('title').textContent, 'SPY Options Live OI', 'heading switches immediately without inventing expiry');
     assert.equal(h.el('heatmap-body').innerHTML, '', 'QQQ rows cleared on switch');
     assert.equal(h.el('no-data').textContent, 'Loading SPY…');
     await settle(); await settle();
     assert.deepEqual(h.calls.heatmap.at(-1), { symbol: 'SPY', dataSymbol: 'SPY', price: 670.2 });
     assert.equal(h.doc.title, 'SPY Live OI — moopertonic');
-    assert.ok(h.calls.ingested.every(s => s === 'QQQ'), 'only QQQ snapshots reach paper-trading settlement');
+    assert.ok(h.calls.ingested.includes('SPY'), 'SPY reaches underlying-specific paper state');
     assert.ok(h.calls.qqqLine.every(s => s === 'QQQ'), 'QQQ tile lines only ever get QQQ readings');
-    const spyAt = h.calls.published.indexOf('SPY');
-    assert.ok(spyAt > 0 && h.calls.published[spyAt - 1] === 'interests', 'SPY contracts registered as visible before their quotes are published');
-    assert.deepEqual(h.calls.published.filter(x => x !== 'interests'), ['SPY'], 'SPY rows seed display quotes only');
+
 
     h.api.selectUnderlying('QQQ');
     await settle(); await settle();
@@ -508,6 +507,70 @@ const settle = () => new Promise(r => setImmediate(r));
     await h.api.fetchLatest();
     assert.equal(h.el('status-text').textContent, 'unavailable');
     assert.equal(h.el('no-data').textContent, 'QQQ snapshot could not be loaded.');
+  }
+
+  // IBIT nearest-expiry: a valid snapshot renders under its own expiry
+  // heading (never labeled 0DTE), with rows whose expirations all match.
+  {
+    const h = harness('IBIT');
+    h.routes['intraday/latest.json'] = h.reply(snapshot('QQQ'));
+    const ibit = snapshot('IBIT', { price: 50, date: '2026-11-09', expiration: '2026-11-13', rows: [
+      { OptionSymbol: 'IBIT261113C00050000', Strike: 50, Type: 'call', OpenInterest: 10, Bid: 1, Ask: 1.2, Expiration: '2026-11-13' },
+      { OptionSymbol: 'IBIT261113P00050000', Strike: 50, Type: 'put', OpenInterest: 20, Bid: 1, Ask: 1.2, Expiration: '2026-11-13' },
+    ] });
+    h.routes['intraday/ibit/latest.json'] = h.reply(ibit);
+    await h.api.fetchLatest();
+    assert.equal(h.el('title').textContent, 'IBIT exp 2026-11-13 Live OI', 'nearest expiry is labeled by its date, never 0DTE');
+    assert.deepEqual(h.calls.heatmap.at(-1), { symbol: 'IBIT', dataSymbol: 'IBIT', price: 50 });
+    assert.ok(h.calls.ingested.includes('IBIT'), 'IBIT reaches underlying-specific paper state');
+  }
+
+  // IBIT without an expiration is rejected, never rendered as a chain.
+  {
+    const h = harness('IBIT');
+    h.routes['intraday/latest.json'] = h.reply(snapshot('QQQ'));
+    const noExp = snapshot('IBIT', { price: 50, date: '2026-11-09', expiration: '2026-11-13', rows: [
+      { OptionSymbol: 'IBIT261113C00050000', Strike: 50, Type: 'call', OpenInterest: 10, Bid: 1, Ask: 1.2, Expiration: '2026-11-13' },
+      { OptionSymbol: 'IBIT261113P00050000', Strike: 50, Type: 'put', OpenInterest: 20, Bid: 1, Ask: 1.2, Expiration: '2026-11-13' },
+    ] });
+    delete noExp.expiration;
+    h.routes['intraday/ibit/latest.json'] = h.reply(noExp);
+    await h.api.fetchLatest();
+    assert.equal(h.calls.heatmap.length, 0, 'nothing rendered for an IBIT snapshot without an expiration');
+    assert.match(h.el('no-data').textContent, /missing or mixed expiration/);
+    assert.equal(h.el('status-text').textContent, 'unavailable');
+  }
+
+  // IBIT with mixed row expirations is rejected.
+  {
+    const h = harness('IBIT');
+    h.routes['intraday/latest.json'] = h.reply(snapshot('QQQ'));
+    const mixed = snapshot('IBIT', { price: 50, date: '2026-11-09', expiration: '2026-11-13', rows: [
+      { OptionSymbol: 'IBIT261113C00050000', Strike: 50, Type: 'call', OpenInterest: 10, Bid: 1, Ask: 1.2, Expiration: '2026-11-13' },
+      { OptionSymbol: 'IBIT261120P00050000', Strike: 50, Type: 'put', OpenInterest: 20, Bid: 1, Ask: 1.2, Expiration: '2026-11-20' },
+    ] });
+    h.routes['intraday/ibit/latest.json'] = h.reply(mixed);
+    await h.api.fetchLatest();
+    assert.equal(h.calls.heatmap.length, 0, 'nothing rendered for mixed-expiration IBIT rows');
+    assert.match(h.el('no-data').textContent, /missing or mixed expiration/);
+  }
+
+  // Same-selection overlap: two concurrent SPY fetches; the slower (older)
+  // reply must not overwrite the fresher data that already landed.
+  {
+    const h = harness('SPY');
+    h.routes['intraday/latest.json'] = h.reply(snapshot('QQQ'));
+    const slow = h.deferred();
+    h.routes['intraday/spy/latest.json'] = slow.route;
+    const old = h.api.fetchLatest();
+    await settle(); await settle();
+    h.routes['intraday/spy/latest.json'] = h.reply(snapshot('SPY', { price: 671.5 }));
+    await h.api.fetchLatest();
+    assert.equal(h.scope.chainState.SPY.data.underlying_price, 671.5, 'newer SPY data landed');
+    slow.resolve(snapshot('SPY', { price: 670.2 }));
+    await old;
+    assert.equal(h.scope.chainState.SPY.data.underlying_price, 671.5, 'late same-selection SPY reply dropped');
+    assert.deepEqual(h.calls.heatmap.at(-1), { symbol: 'SPY', dataSymbol: 'SPY', price: 671.5 });
   }
 
   console.log('chain_underlying: all checks passed');

@@ -28,8 +28,8 @@ if (typeof module !== 'undefined' && typeof require === 'function') {
 // QQQ keeps its original artifact; SPY has its own tree (see
 // SPY_COLLECTION.md). Anything not listed is unsupported -- never mapped
 // onto QQQ's file.
-const CHAIN_UNDERLYINGS = ['QQQ', 'SPY'];
-const CHAIN_LATEST_PATHS = { QQQ: 'intraday/latest.json', SPY: 'intraday/spy/latest.json' };
+const CHAIN_UNDERLYINGS = ['QQQ', 'SPY', 'IBIT'];
+const CHAIN_LATEST_PATHS = { QQQ: 'intraday/latest.json', SPY: 'intraday/spy/latest.json', IBIT: 'intraday/ibit/latest.json' };
 
 function chainLatestPath(symbol) {
   return Object.hasOwn(CHAIN_LATEST_PATHS, symbol) ? CHAIN_LATEST_PATHS[symbol] : null;
@@ -52,6 +52,8 @@ function validateChainPayload(data, symbol) {
   const marketSymbol = data.underlying_market?.symbol;
   if (marketSymbol != null && marketSymbol !== symbol) return { ok: false, reason: `underlying readings belong to ${marketSymbol}` };
   if (data.rows.some(row => occRoot(row?.OptionSymbol) !== symbol)) return { ok: false, reason: `snapshot contains non-${symbol} contracts` };
+  if (symbol === 'IBIT' && (!/^\d{4}-\d{2}-\d{2}$/.test(data.expiration || '') ||
+      data.rows.some(row => row.Expiration !== data.expiration))) return { ok: false, reason: 'missing or mixed expiration' };
   return { ok: true, reason: null };
 }
 

@@ -136,6 +136,7 @@ export function computeBookFromTrades(trades) {
     const multiplier = t.multiplier ?? (instrumentType === 'share' ? 1 : 100);
     const b = book[t.sym] ?? (book[t.sym] = {
       pos: 0, avg: 0, realized: 0,
+      underlying: /^([A-Z]+)\d{6}[CP]\d{8}$/.exec(t.sym)?.[1] ?? t.underlying ?? 'QQQ',
       instrument_type: instrumentType, multiplier,
       strike: t.strike, type: t.type, exp: t.exp,
     });

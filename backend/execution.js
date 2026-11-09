@@ -196,6 +196,8 @@ export function exactShareQuote(payload, symbol, side, nowMs) {
   };
 }
 function exactContractQuote(payload, symbol, side, nowMs) {
+  const identity = /^([A-Z]+)(\d{2})(\d{2})(\d{2})([CP])(\d{8})$/.exec(symbol);
+  if (!identity) return { error: 'Invalid OCC contract identity', status: 409 };
   const row = Array.isArray(payload?.quotes)
     ? payload.quotes.find(candidate => candidate.symbol === symbol)
     : null;
@@ -215,6 +217,10 @@ function exactContractQuote(payload, symbol, side, nowMs) {
     return { error: 'Exact contract quote is invalid', status: 409 };
   }
   const strike = Number(row.strike);
+  if (strike !== Number(identity[6]) / 1000 || row.type !== (identity[5] === 'C' ? 'call' : 'put') ||
+      row.exp !== `20${identity[2]}-${identity[3]}-${identity[4]}`) {
+    return { error: 'Quote metadata does not match OCC contract', status: 409 };
+  }
   if (!Number.isFinite(strike) || strike <= 0 || !['call', 'put'].includes(row.type) ||
       typeof row.exp !== 'string' || !ISO_DATE.test(row.exp)) {
     return { error: 'Exact contract metadata is invalid', status: 409 };

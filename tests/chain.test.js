@@ -38,9 +38,10 @@ assert.equal(entry.CHAIN_LATEST_PATHS, undefined, 'CHAIN_LATEST_PATHS stays a br
 assert.equal(chain.CHAIN_LATEST_PATHS, undefined, 'CHAIN_LATEST_PATHS is not a Node export either');
 
 // --- chainLatestPath / occRoot: the #121 routing. ---
-assert.deepEqual(chain.CHAIN_UNDERLYINGS, ['QQQ', 'SPY']);
+assert.deepEqual(chain.CHAIN_UNDERLYINGS, ['QQQ', 'SPY', 'IBIT']);
 assert.equal(chain.chainLatestPath('QQQ'), 'intraday/latest.json');
 assert.equal(chain.chainLatestPath('SPY'), 'intraday/spy/latest.json');
+assert.equal(chain.chainLatestPath('IBIT'), 'intraday/ibit/latest.json');
 assert.equal(chain.chainLatestPath('AAPL'), null);
 assert.equal(chain.occRoot('QQQ260116C00600000'), 'QQQ');
 assert.equal(chain.occRoot(' SPY 260116C00600000'), 'SPY');

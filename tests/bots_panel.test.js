@@ -11,6 +11,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { createHash } = require('node:crypto');
+const { occRoot } = require('../site/shared.js');
 
 const html = fs.readFileSync(path.join(__dirname, '..', 'site', 'index.html'), 'utf8');
 const source = fs.readFileSync(path.join(__dirname, '..', 'site', 'js', 'bots-panel.js'), 'utf8');
@@ -50,6 +51,7 @@ const scope = {
   setInterval: () => 1,
   clearInterval: () => {},
   liveQuotes,
+  occRoot,
   fmtQ: (v) => (v == null ? '' : v < 10 ? v.toFixed(2) : v.toFixed(1)),
   fmtMoney: (v) => `${v < 0 ? '−' : v > 0 ? '+' : ''}$${Math.abs(v).toFixed(2)}`,
   pnlClass: (v) => (v > 0 ? 'pnl-up' : v < 0 ? 'pnl-down' : ''),

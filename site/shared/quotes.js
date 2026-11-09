@@ -87,6 +87,8 @@ class LiveQuoteService {
         type: quote.type,
         exp: quote.exp,
         observedAt: quoteObservedAt,
+        bid_ts: quote.bid_ts ?? null,
+        ask_ts: quote.ask_ts ?? null,
         source,
       });
       changed = true;

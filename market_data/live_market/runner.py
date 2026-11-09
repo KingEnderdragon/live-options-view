@@ -19,6 +19,7 @@ import market_data.live_market as _entry  # entry indirection for main()'s test 
 
 from .config import (
     COLLECT_SPY,
+    COLLECT_IBIT,
     ET,
     HEALTH_SECS,
     PRICE_LANE_ENABLED,
@@ -100,11 +101,12 @@ def _run_session(token_manager: OAuthTokenManager, quote_registry: LiveQuoteRegi
     # Extra 0DTE chains (#121). Each is optional: a failure here disables
     # only that underlying for this session and never touches QQQ.
     extra_chains: list[tuple[UnderlyingSession, list[dict], str]] = []
-    pending_spy: tuple[UnderlyingSession, list[dict], str] | None = None
+    pending_chains = []
+    extra_contexts = {}
     spy_context = {"status": "disabled" if not COLLECT_SPY else "unavailable",
                    "reason": "COLLECT_SPY=0" if not COLLECT_SPY else "chain_not_loaded"}
     for sym, us in UNDERLYING_SESSIONS.items():
-        if us is QQQ_SESSION or (sym == "SPY" and not COLLECT_SPY):
+        if us is QQQ_SESSION or (sym == "SPY" and not COLLECT_SPY) or (sym == "IBIT" and not COLLECT_IBIT):
             continue
         try:
             us_strikes, us_exp, _, _ = load_chain(auth["access_token"], today, ticker=sym, include_weekly=False)
@@ -117,12 +119,10 @@ def _run_session(token_manager: OAuthTokenManager, quote_registry: LiveQuoteRegi
         restore_state(s3, today, us)
         us.rvol_baseline = load_rvol_baseline(s3, us)
         us.rvol_today = {}
-        if sym == "SPY":
-            us.subscription_coverage = None
-            pending_spy = (us, us_strikes, us_exp)
-            spy_context.update(status="awaiting_spot", reason="waiting_for_fresh_spy_spot")
-        else:
-            extra_chains.append((us, us_strikes, us_exp))
+        us.subscription_coverage = None
+        pending_chains.append((us, us_strikes, us_exp))
+        extra_contexts[sym] = spy_context if sym == "SPY" else {}
+        extra_contexts[sym].update(status="awaiting_spot", reason="waiting_for_fresh_spot")
 
     option_syms = []
     contracts = {}
@@ -160,7 +160,7 @@ def _run_session(token_manager: OAuthTokenManager, quote_registry: LiveQuoteRegi
     # added to PRICE_TICKERS (the price strip and its health counts).
     price_syms = list(dict.fromkeys(
         [s for s in PRICE_TICKERS.values() if s] + [us.symbol for us, _, _ in extra_chains]
-        + (["SPY"] if COLLECT_SPY else [])
+        + [us.symbol for us, _, _ in pending_chains]
     ))
     log.info(f"subscribing to {len(option_syms)} option symbols + {len(price_syms)} price tickers")
     for label, sym in PRICE_TICKERS.items():
@@ -180,24 +180,24 @@ def _run_session(token_manager: OAuthTokenManager, quote_registry: LiveQuoteRegi
     else:
         log.warning("no feed data within 15s -- proceeding anyway")
 
-    if pending_spy:
-        us, us_strikes, us_exp = pending_spy
+    for us, us_strikes, us_exp in pending_chains:
+        context = extra_contexts[us.symbol]
         deadline = time.monotonic() + 15
         spot, spot_ts = None, None
         while time.monotonic() < deadline:
-            spot, spot_ts = _fresh_spy_spot(feed.get_state().get("SPY", {}), datetime.now(timezone.utc))
+            spot, spot_ts = _fresh_spy_spot(feed.get_state().get(us.symbol, {}), datetime.now(timezone.utc))
             if spot is not None:
                 break
             time.sleep(0.5)
         if spot is None:
-            observed, observed_ts = _observed_spy_price(feed.get_state().get("SPY", {}))
-            spy_context.update(status="stale_startup_spot" if observed_ts else "spot_unavailable",
+            observed, observed_ts = _observed_spy_price(feed.get_state().get(us.symbol, {}))
+            context.update(status="stale_startup_spot" if observed_ts else "spot_unavailable",
                                reason="fresh_spy_spot_not_observed_within_15s")
             log.warning("SPY options unavailable: no fresh timed startup spot within 15s")
         else:
             selected = _select_spy_strikes(us_strikes, spot)
             if not selected:
-                spy_context.update(status="empty_chain", reason="no_valid_spy_strikes")
+                context.update(status="empty_chain", reason="no_valid_spy_strikes")
                 log.warning("SPY options unavailable: no valid strikes in today's chain")
             else:
                 coverage = {
@@ -212,7 +212,7 @@ def _run_session(token_manager: OAuthTokenManager, quote_registry: LiveQuoteRegi
                     "max_strike": selected[-1]["strike"],
                 }
                 us.subscription_coverage = coverage
-                spy_context["subscription_coverage"] = coverage
+                context["subscription_coverage"] = coverage
                 extra_chains.append((us, selected, us_exp))
                 for row in selected:
                     for side in ("call", "put"):
@@ -226,7 +226,7 @@ def _run_session(token_manager: OAuthTokenManager, quote_registry: LiveQuoteRegi
                 symbols = list(dict.fromkeys(row[f"{side}_sym"] for row in selected for side in ("call", "put")))
                 added = feed.add_option_subscriptions(symbols)
                 pending = feed.get_subscription_delivery()["pending_event_pairs"]
-                spy_context.update(status="subscription_pending" if pending else "collecting",
+                context.update(status="subscription_pending" if pending else "collecting",
                                    reason="subscription_delivery_incomplete" if pending else None)
                 log.info(f"SPY fixed startup window: {len(us_strikes)} chain strikes, "
                          f"{len(selected)} selected strikes, {len(symbols)} option symbols, "
@@ -299,10 +299,11 @@ def _run_session(token_manager: OAuthTokenManager, quote_registry: LiveQuoteRegi
                 raise
         feed.restart_if_dead()
 
-        if spy_context.get("status") == "subscription_pending":
-            feed.retry_pending_option_subscriptions()
-            if not feed.get_subscription_delivery()["pending_event_pairs"]:
-                spy_context.update(status="collecting", reason=None)
+        for context in extra_contexts.values():
+            if context.get("status") == "subscription_pending":
+                feed.retry_pending_option_subscriptions()
+                if not feed.get_subscription_delivery()["pending_event_pairs"]:
+                    context.update(status="collecting", reason=None)
 
         tracker.check_missed()
         try:
@@ -310,7 +311,7 @@ def _run_session(token_manager: OAuthTokenManager, quote_registry: LiveQuoteRegi
         except Exception as e:
             log.error(f"snapshot error: {e}")
         for us, us_strikes, us_exp in extra_chains:
-            if us.symbol == "SPY" and spy_context.get("status") != "collecting":
+            if extra_contexts.get(us.symbol, {}).get("status") != "collecting":
                 continue
             us_counters, us_tracker = extra_trackers[us.symbol]
             us_tracker.check_missed()
