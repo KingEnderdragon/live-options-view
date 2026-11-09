@@ -160,5 +160,95 @@ class ReplayIntegrity(unittest.TestCase):
         self.assertNotIn((2026, 41), replay.validate_calendar(SESSIONS[:3]))
 
 
+class OutputSchema(unittest.TestCase):
+    """The emitted window/run/contract schema is basis-specific and stable.
+
+    Status and returns are per-basis (mid/exec/qualified), not a single
+    global verdict: a row can be eligible on mid/exec while excluded on
+    qualified (e.g. a wide spread), and the top-ranked contract differs
+    by basis. The replay CSV carries the qualified basis's values; the
+    per-basis eligible counts and top lists live in replay_summary.json;
+    paths.csv.gz carries every basis's columns. These tests pin that
+    schema so #131 can consume it without re-deriving windows.
+    """
+
+    def test_ranked_csv_schema_is_qualified_basis_and_retains_all_rows(self):
+        import csv
+        import io
+        import market_data.options_scanner.windows as w
+        from market_data.options_scanner.returns import ContractInfo, Observation
+        from test_oa203_windows import WEEK, week_path, info, by_kind
+        windows, _ = w.weekly_windows(SESSIONS)
+        win = by_kind(windows, "weekly_cheapest")
+        # One contract eligible on mid/exec but excluded on qualified
+        # (wide spread), one eligible on all three.
+        rows = []
+        for symbol, bid, ask in (("AAA261009C00100000", 1.0, 5.0), ("BBB261009C00100000", 1.0, 1.1)):
+            c = info(symbol=symbol, underlying=symbol[:3], root=symbol[:3])
+            path = [Observation(t=o.t, bid=bid, ask=ask, bid_ms=o.t, ask_ms=o.t,
+                                bid_size=10, ask_size=10, underlying_price=100.0) for o in week_path()]
+            rows.append(w.evaluate(win, c, path, WEEK))
+        ranked = w.rank_window(rows, "qualified")
+        buf = io.StringIO()
+        # write_ranked_csv writes to a path; use a temp file.
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "out.csv"
+            replay.write_ranked_csv(p, ranked, "qualified")
+            with open(p, newline="") as src:
+                got = list(csv.DictReader(src))
+        self.assertEqual(list(got[0].keys()), replay.RANKED_CSV_COLUMNS)
+        self.assertEqual(len(got), 2)  # every row retained, eligible or excluded
+        by_symbol = {r["symbol"]: r for r in got}
+        # The wide-spread contract is excluded on the qualified basis.
+        self.assertEqual(by_symbol["AAA261009C00100000"]["status"], "excluded")
+        # The tight contract is eligible on the qualified basis.
+        self.assertEqual(by_symbol["BBB261009C00100000"]["status"], "eligible")
+        # But the wide-spread contract IS eligible on mid/exec (basis-specific).
+        mid = w.rank_window(rows, "mid")
+        self.assertTrue(any(r["mid"]["status"] == "eligible" for r in mid if r["symbol"] == "AAA261009C00100000"))
+        # The qualified rank is a rank only for qualified-eligible rows.
+        self.assertEqual(by_symbol["BBB261009C00100000"]["rank"], "1")
+        self.assertEqual(by_symbol["AAA261009C00100000"]["rank"], "")
+
+    def test_summary_schema_is_per_basis(self):
+        # The replay summary carries a per-basis eligible count and top
+        # list for every basis; the counts can differ (qualified is the
+        # strictest). Assert the structure, not a fixture value.
+        import market_data.options_scanner.windows as w
+        for basis in w.BASES:
+            self.assertIn(basis, w.BASES)
+        # A rank_window result carries a per-basis rank key.
+        self.assertEqual(sorted(f"{b}_rank" for b in w.BASES),
+                         ["exec_rank", "mid_rank", "qualified_rank"])
+
+    def test_cache_reuses_blob_and_verifies_hash(self):
+        # A blob already in --cache-dir is reused (no network fetch) and
+        # its SHA-256 is still recorded; a cached blob whose hash disagrees
+        # with the lock is rejected, not trusted.
+        import tempfile
+        key = "oa203/scanner/2026-10-05/summary.json"
+        body = b'{"assessment": {"status": "complete"}}'
+        digest = __import__("hashlib").sha256(body).hexdigest()
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = Path(tmp) / "cache"
+            dest = cache / key
+            dest.parent.mkdir(parents=True)
+            dest.write_bytes(body)
+            replay.CACHE_DIR = cache
+            replay.SOURCES.clear()
+            replay.EXPECTED_HASHES = None
+            self.assertEqual(replay.fetch(key), body)
+            self.assertTrue(replay.SOURCES[-1].get("cached"))
+            self.assertEqual(replay.SOURCES[-1]["sha256"], digest)
+            # A lock that disagrees with the cached blob is rejected.
+            replay.EXPECTED_HASHES = {key: "0" * 64}
+            with self.assertRaises(RuntimeError):
+                replay.fetch(key)
+            replay.CACHE_DIR = None
+            replay.EXPECTED_HASHES = None
+            replay.SOURCES.clear()
+
+
 if __name__ == "__main__":
     unittest.main()

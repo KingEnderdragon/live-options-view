@@ -1,0 +1,278 @@
+{
+  "batches": 14,
+  "expected_total_contracts": 71818,
+  "windows": {
+    "overnight-2026-10-05_2026-10-06": {
+      "contracts": 71764,
+      "eligible": 17488,
+      "excluded": 54276,
+      "deduped_symbols": 54,
+      "top_exclusion_reasons": {
+        "missing_session": 41372,
+        "close_endpoint_missing": 16803,
+        "entry_bid_invalid": 12164,
+        "expires_before_exit": 6264,
+        "entry_spread": 5124
+      },
+      "top": [
+        {
+          "rank": "1",
+          "symbol": "CEG261009C00280000",
+          "pct": "15.866667",
+          "entry": "1.5",
+          "exit": "25.3"
+        },
+        {
+          "rank": "2",
+          "symbol": "CEG261009C00277500",
+          "pct": "9.8",
+          "entry": "2.5",
+          "exit": "27.0"
+        },
+        {
+          "rank": "3",
+          "symbol": "CEG261009C00275000",
+          "pct": "9.654545",
+          "entry": "2.75",
+          "exit": "29.3"
+        },
+        {
+          "rank": "4",
+          "symbol": "VST261009C00157500",
+          "pct": "5.606061",
+          "entry": "0.33",
+          "exit": "2.18"
+        },
+        {
+          "rank": "5",
+          "symbol": "CEG261009C00272500",
+          "pct": "5.5625",
+          "entry": "4.8",
+          "exit": "31.5"
+        }
+      ]
+    },
+    "overnight-2026-10-06_2026-10-07": {
+      "contracts": 71764,
+      "eligible": 18208,
+      "excluded": 53556,
+      "deduped_symbols": 54,
+      "top_exclusion_reasons": {
+        "missing_session": 41742,
+        "close_endpoint_missing": 18639,
+        "entry_bid_invalid": 13615,
+        "expires_before_exit": 9994,
+        "entry_spread": 5296
+      },
+      "top": [
+        {
+          "rank": "1",
+          "symbol": "SLV261007P00054500",
+          "pct": "5.8",
+          "entry": "0.1",
+          "exit": "0.68"
+        },
+        {
+          "rank": "2",
+          "symbol": "IBIT261007P00048000",
+          "pct": "5.428571",
+          "entry": "0.14",
+          "exit": "0.9"
+        },
+        {
+          "rank": "3",
+          "symbol": "MU261007P01010000",
+          "pct": "4.555556",
+          "entry": "0.9",
+          "exit": "5.0"
+        },
+        {
+          "rank": "4",
+          "symbol": "MU261007P01015000",
+          "pct": "4.403226",
+          "entry": "1.24",
+          "exit": "6.7"
+        },
+        {
+          "rank": "5",
+          "symbol": "GS261009P00870000",
+          "pct": "4.357143",
+          "entry": "1.54",
+          "exit": "8.25"
+        }
+      ]
+    },
+    "sessions2-2026-10-05_2026-10-06": {
+      "contracts": 71764,
+      "eligible": 17683,
+      "excluded": 54081,
+      "deduped_symbols": 54,
+      "top_exclusion_reasons": {
+        "missing_session": 41372,
+        "open_endpoint_missing": 19355,
+        "entry_bid_invalid": 12425,
+        "entry_spread": 7657,
+        "expires_before_exit": 6264
+      },
+      "top": [
+        {
+          "rank": "1",
+          "symbol": "CCJ261009C00092000",
+          "pct": "9.4",
+          "entry": "0.2",
+          "exit": "2.08"
+        },
+        {
+          "rank": "2",
+          "symbol": "CCJ261009C00091000",
+          "pct": "8.133333",
+          "entry": "0.3",
+          "exit": "2.74"
+        },
+        {
+          "rank": "3",
+          "symbol": "CSCO261009C00118000",
+          "pct": "7.733333",
+          "entry": "0.15",
+          "exit": "1.31"
+        },
+        {
+          "rank": "4",
+          "symbol": "VST261009C00152500",
+          "pct": "6.836538",
+          "entry": "1.04",
+          "exit": "8.15"
+        },
+        {
+          "rank": "5",
+          "symbol": "CCJ261009C00090000",
+          "pct": "6.444444",
+          "entry": "0.45",
+          "exit": "3.35"
+        }
+      ]
+    },
+    "sessions2-2026-10-06_2026-10-07": {
+      "contracts": 71764,
+      "eligible": 17880,
+      "excluded": 53884,
+      "deduped_symbols": 54,
+      "top_exclusion_reasons": {
+        "missing_session": 41742,
+        "open_endpoint_missing": 21225,
+        "entry_bid_invalid": 13893,
+        "expires_before_exit": 9994,
+        "entry_spread": 7978
+      },
+      "top": [
+        {
+          "rank": "1",
+          "symbol": "TEM261009P00080000",
+          "pct": "10.410256",
+          "entry": "0.78",
+          "exit": "8.9"
+        },
+        {
+          "rank": "2",
+          "symbol": "TEM261009P00081000",
+          "pct": "8.245283",
+          "entry": "1.06",
+          "exit": "9.8"
+        },
+        {
+          "rank": "3",
+          "symbol": "ARKG261009P00057000",
+          "pct": "7.266667",
+          "entry": "0.75",
+          "exit": "6.2"
+        },
+        {
+          "rank": "4",
+          "symbol": "TEM261009P00082000",
+          "pct": "7.015267",
+          "entry": "1.31",
+          "exit": "10.5"
+        },
+        {
+          "rank": "5",
+          "symbol": "SKHY261009P00177500",
+          "pct": "5.710526",
+          "entry": "0.38",
+          "exit": "2.55"
+        }
+      ]
+    },
+    "sessions3-2026-10-05_2026-10-07": {
+      "contracts": 71764,
+      "eligible": 16077,
+      "excluded": 55687,
+      "deduped_symbols": 54,
+      "top_exclusion_reasons": {
+        "missing_session": 62436,
+        "open_endpoint_missing": 17596,
+        "entry_bid_invalid": 11374,
+        "expires_before_exit": 9994,
+        "entry_spread": 6919
+      },
+      "top": [
+        {
+          "rank": "1",
+          "symbol": "VST261009C00160000",
+          "pct": "13.375",
+          "entry": "0.48",
+          "exit": "6.9"
+        },
+        {
+          "rank": "2",
+          "symbol": "VST261009C00170000",
+          "pct": "13.1",
+          "entry": "0.1",
+          "exit": "1.41"
+        },
+        {
+          "rank": "3",
+          "symbol": "VST261009C00152500",
+          "pct": "12.076923",
+          "entry": "1.04",
+          "exit": "13.6"
+        },
+        {
+          "rank": "4",
+          "symbol": "VST261009C00155000",
+          "pct": "9.0",
+          "entry": "1.09",
+          "exit": "10.9"
+        },
+        {
+          "rank": "5",
+          "symbol": "VST261009C00149000",
+          "pct": "8.88024",
+          "entry": "1.67",
+          "exit": "16.5"
+        }
+      ]
+    }
+  },
+  "files": {
+    "overnight-2026-10-05_2026-10-06.csv": {
+      "sha256": "a1548af38958c1b4d8fb8f3697095df4366348adeb60feb74db700698078d4d5",
+      "bytes": 8072371
+    },
+    "overnight-2026-10-06_2026-10-07.csv": {
+      "sha256": "e676f5063fef6c43f3ec4ab48d6b4cb291bf3220814e98833311473465ae5f63",
+      "bytes": 8345342
+    },
+    "sessions2-2026-10-05_2026-10-06.csv": {
+      "sha256": "5cd8644c8add06e2903dd1daf8c9e5454f4cd04e90dfe30d3e04b1de2affc257",
+      "bytes": 8058035
+    },
+    "sessions2-2026-10-06_2026-10-07.csv": {
+      "sha256": "13553e78e4b32a74c8e84f28e35e4c76745a06fdd0930cd2fea166911e36a4b4",
+      "bytes": 8310403
+    },
+    "sessions3-2026-10-05_2026-10-07.csv": {
+      "sha256": "712af8fc650ae39a3ca5fabefcd6355fd82f7c69671627adc119c3a0ba3aec32",
+      "bytes": 8600280
+    }
+  }
+}

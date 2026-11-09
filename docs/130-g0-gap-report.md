@@ -85,11 +85,17 @@ mapping; this section is the summary.
   policy; full-universe ranking and legacy-output regressions pass. (Matrix
   Box 5: 6 tests.)
 - [x] A documented replay produces inspectable rankings with exact evidence,
-  coverage and calculation versions. (Matrix Box 6: top-50 replay Oct 5–7
-  in `/tmp/replay-130-c`; prior 3-underlying sample in `/tmp/replay-130-b`.)
+  coverage and calculation versions. (Matrix Box 6: full-universe replay
+  Oct 5–7 — 14 batches covering the 661-underlying union, globally
+  re-ranked, 71,764 unique contracts/window; combined output in
+  `replay-130-full-combined/` with sha256 hashes; PSKY/SKYD 54-symbol
+  dedup found and resolved. Prior top-50 sample superseded.)
 - [x] Monthly evidence requirements and current historical limitations are
-  documented. (Matrix Box 7: monthly requirements + precise limitations;
-  no complete calendar week exists in the archive; Oct 8 week not invented.)
+  documented. (Matrix Box 7: monthly evidence = retained raw chronological
+  paths / expiry / deliverable / coverage for possible monthly-horizon
+  research, no validated monthly metric; precise Oct 5–9 receipts —
+  Oct 5/6/7/9 complete, Oct 8 partial — so the inspected week Oct 5–9 is
+  not a complete week; no other week checked; Oct 8 week not invented.)
 - [x] D8 fixtures verify SPY/QQQ same-contract continuity across
   Friday-to-Monday expiry-selection changes, including Oct 16–19, 2026,
   within the approved two-chain limit. (Added

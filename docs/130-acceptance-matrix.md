@@ -1,7 +1,7 @@
 # #130 offline acceptance matrix (A1/A2 end state)
 
 Branch `nova/130-multi-session`, base master `96d59b48`. Inert, non-deploying.
-Local head `b1bb6a5`; MSI single commit `19c05ddd` (to be updated with this
+Local head `281802f`; MSI single commit `bb119e73` (to be updated with this
 round's commits). No push, no PR, no deployment, no collector runs.
 
 Chej engineering review (2026-11-09) confirms the v1 definitions below for
@@ -106,86 +106,171 @@ policy; full-universe ranking and legacy-output regressions pass
 - `test_full_universe_keeps_negative_and_excluded` — ranking keeps the
   full universe, including zero/negative returns and excluded contracts;
   deterministic tie-break.
-- `test_shortlist_is_cut_after_full_ranking` (outputs) — the shortlist is
-  cut only after the full ranking.
-- `test_every_path_written_including_non_winners` (outputs) — every path
-  is written, including non-winners; losses and exclusions are retained.
-- `test_layout_and_summary`, `test_states`, `test_deterministic_content`
-  (outputs) — legacy-output regression: layout, summary, states and
-  deterministic content unchanged.
+- `test_shortlist_is_cut_after_full_ranking` (windows outputs) — the
+  shortlist is cut only after the full ranking.
+- `test_every_path_written_including_non_winners` (windows outputs) —
+  every path is written, including non-winners; losses and exclusions
+  are retained.
+- **Legacy daily regression — actual legacy daily outputs, not the new
+  windows writer.** The windows v1 work must not change the legacy daily
+  scanner's outputs. These tests exercise the real legacy daily code
+  (`market_data/options_scanner/returns.py` `contract_metrics` /
+  `qualified_metrics` and `outputs.py` `build_contract_rows` /
+  `write_outputs`):
+  - `tests/test_oa203_return_scanner.py` (94 tests) — legacy return
+    calculations, ranking and the qualified policy, including
+    `test_qualified_winner_outside_legacy_shortlist`, which calls the
+    actual `write_outputs` and verifies the real legacy daily files
+    (`leaderboard.csv`, `qualified_ask_bid_v1.csv`) contain the right
+    rows.
+  - `tests/test_oa203_active.py` (14 tests) — `build_contract_rows` on
+    the legacy daily archive (early/late cutoff, full-day rows, ranking
+    stability).
+  - The windows writer tests (`test_layout_and_summary`, `test_states`,
+    `test_deterministic_content` in `test_oa203_windows_outputs.py`)
+    cover the NEW windows writer layout only; they are not the legacy
+    daily regression.
 - `test_stale_is_distinct_from_impossible_future_evidence` — unknown vs
   stale are distinct; neither fabricates a result.
 
 ### Box 6 — A documented replay produces inspectable rankings with exact
 evidence, coverage and calculation versions
-- Real-data replay, Oct 5–7 2026, **top-50 underlyings by OCC rank** (the
-  tool's `MAX_UNDERLYINGS=50` bound; see the limitation below). Output in
-  `/tmp/replay-130-c` (this round). Prior 3-underlying sample in
-  `/tmp/replay-130-b` (5 windows over 2,280 contracts, exit 0).
-- **Top-50 results (15,536 contracts per window; losses and exclusions
-  retained in every CSV):**
-  - overnight Oct 5→6: 2,019 eligible / 13,517 excluded.
-  - overnight Oct 6→7: 3,327 eligible / 12,209 excluded.
-  - sessions_2 Oct 5→6: 2,058 eligible / 13,478 excluded.
-  - sessions_2 Oct 6→7: 3,162 eligible / 12,374 excluded.
-  - sessions_3 Oct 5→7: 1,934 eligible / 13,602 excluded.
+- **Full-universe replay, Oct 5–7 2026.** The top-50 run was a sample;
+  MAX_UNDERLYINGS=50 is a per-run bound, not a rescope. The full universe
+  is the union of all selected archived underlyings for Oct 5–7:
+  **661 underlyings** (500 selected per day; the selection changes daily).
+  Run as **14 bounded batches** of at most 50 underlyings
+  (`run-full-universe-batches.sh`), each a standard replay with
+  `--cache-dir` reusing the source blobs (no repeated downloads). All
+  contract rows were concatenated per window, **globally re-ranked before
+  any shortlist** (`combine-full-universe.py`, same ranking as
+  `windows.rank_window`: qualified pct descending, symbol ascending for
+  ties), losses and exclusions retained in every row.
+- **Results (71,764 unique contracts per window; 71,818 raw rows minus 54
+  deduplicated symbols, see below):**
+  - overnight Oct 5→6: 17,488 eligible / 54,276 excluded.
+  - overnight Oct 6→7: 18,208 eligible / 53,556 excluded.
+  - sessions_2 Oct 5→6: 17,683 eligible / 54,081 excluded.
+  - sessions_2 Oct 6→7: 17,880 eligible / 53,884 excluded.
+  - sessions_3 Oct 5→7: 16,077 eligible / 55,687 excluded.
   - Weekly W41 correctly skipped (incomplete week). Dominant exclusions:
     `missing_session` (universe reselected daily) and
     `expires_before_exit`. Excluded final sweeps recorded per day
     (Oct 5: 5,580 rows/50 chains; Oct 6: 16,682/150; Oct 7: 1,856/50).
-  - Rows kept: Oct 5: 621,072; Oct 6: 632,168; Oct 7: 634,752.
+  - Global top ranks (qualified basis) differ from the top-50 sample, as
+    expected: overnight Oct 5→6 rank 1 is `CEG261009C00280000` (pct 15.87);
+    sessions_3 rank 1 is `VST261009C00160000` (pct 13.38). The full
+    universe surfaces names the top-50 sample did not contain.
   - Policy: `oa203-windows-v1`,
     `D1-D5_D7_D8_approved; D6_D9_opening_tolerance_continuity_chej_engineering_reviewed_offline_only`.
   - Calendar: NYSE, pandas_market_calendars 5.6.0.
-- **Hashes (sha256, `/tmp/replay-130-c`):**
-  - `replay_summary.json`: `58bd0f1d316c9af45dc5e119e72ce04cbd1e2a88b27511d270bc45830e63e79a`
-  - `source_lock.json`: `72eeba5047ea6de307bf03228bb784a83da50b4e3d3eff5fd021a84a699f9846`
-  - `overnight-2026-10-05_2026-10-06.csv`: `428aaa8a1111c40f94602e35386d8a0a785e7c1a8a5d36ea64d9ed349340b0ee`
-  - `overnight-2026-10-06_2026-10-07.csv`: `edc65e7fde02150e74cc561c3e54d1e8e2e55f9f23cc234532536b7099c6c5f3`
-  - `sessions2-2026-10-05_2026-10-06.csv`: `0905f0c0dd505f387eab7fdbaad446e574a744f06fedb92302e65d9973c71eb0`
-  - `sessions2-2026-10-06_2026-10-07.csv`: `88ecd43ed1478cac7c9f22661258412da9518a86fe01a54ac3c527c02cfe40b4`
-  - `sessions3-2026-10-05_2026-10-07.csv`: `6b75546f2e3a0f248e231c83b6f3414326869d0eea9b4febd9a05ce9ae053b2e`
+- **No duplicate / no missing assertion.** The combine asserts each
+  window's row count equals the sum of the 14 batch summaries (71,818)
+  minus deduplicated symbols, and that no symbol repeats. It passed.
+  **Data-quality finding: 54 OCC symbols are attributed to two
+  underlyings in the source archive — PSKY and SKYD share 54 SKYD-rooted
+  symbols** (the same contract appears under both the PSKY chain and the
+  SKYD chain). This is the only duplicate pattern. Resolution: deduped
+  by symbol, keeping the row whose underlying matches the symbol root
+  (SKYD, the canonical attribution); the PSKY attribution is the
+  source-data quirk. The dedup count (54 per window) is recorded in the
+  summary. No contract is double-counted.
+- **Hashes (sha256, `replay-130-full-combined/`):**
+  - `full_universe_summary.json`: `20f1a531a9bea21121f9b3b18ef9ff03fc37f0021ccad29056afd35e7e572fef`
+  - `overnight-2026-10-05_2026-10-06.csv`: `a1548af38958c1b4d8fb8f3697095df4366348adeb60feb74db700698078d4d5`
+  - `overnight-2026-10-06_2026-10-07.csv`: `e676f5063fef6c43f3ec4ab48d6b4cb291bf3220814e98833311473465ae5f63`
+  - `sessions2-2026-10-05_2026-10-06.csv`: `5cd8644c8add06e2903dd1daf8c9e5454f4cd04e90dfe30d3e04b1de2affc257`
+  - `sessions2-2026-10-06_2026-10-07.csv`: `13553e78e4b32a74c8e84f28e35e4c76745a06fdd0930cd2fea166911e36a4b4`
+  - `sessions3-2026-10-05_2026-10-07.csv`: `712af8fc650ae39a3ca5fabefcd6355fd82f7c69671627adc119c3a0ba3aec32`
+- **Source lock:** each batch's `source_lock.json` records every fetched
+  blob with its SHA-256 (240 source blobs per batch: 77 sweeps × 3 days
+  + summary/universe/manifest per day). The cache (`replay-cache/`,
+  329MB) holds the same blobs; a cached blob whose hash disagrees with
+  the lock is rejected, not trusted (`test_cache_reuses_blob_and_verifies_hash`).
+- **Artifacts (directly accessible, not a private /tmp path).** The
+  combined outputs and the summary are on the MSI worktree
+  (`live-options-view-130/replay-130-full-combined/`, committed summary +
+  hashes; the 40MB CSVs are on the MSI filesystem in the worktree).
+  The batch runner, combine script and batch lists are committed in the
+  worktree (`run-full-universe-batches.sh`, `combine-full-universe.py`,
+  `replay-130-batches.json`, `replay-130-union.json`). The local copies
+  are in the worktree (`replay-130-full/`, `replay-130-full-combined/`).
+  Prior top-50 sample in `/tmp/replay-130-c` (5 windows over 15,536
+  contracts) is superseded by the full-universe result.
 - Replay tests: `test_extra_rows_require_successful_manifest_and_exact_count`,
   `test_sweep_bounds_inclusive_session_close_exclusive`,
   `test_row_after_matched_sweep_end_is_rejected`,
   `test_occ_identity_rejects_stitched_metadata`,
   `test_manifest_cutoff_requires_complete_contiguous_sweeps`,
   `test_truncated_final_sweep_rows_excluded`,
-  `test_calendar_rejects_missing_session_and_wrong_bounds`.
+  `test_calendar_rejects_missing_session_and_wrong_bounds`,
+  plus the new `OutputSchema` tests (ranked CSV schema, per-basis
+  summary, cache reuse + hash verification).
 - Each replay report records `policy` (version `oa203-windows-v1` and
   `decisions_status`), `window` (id, kind, sessions), `sources`
   (R2 prefix, manifest sha), and `excluded_final_sweep` rows/chains.
-- **MSI replay limitation (environment, not code):** The top-50 replay command
-  is documented above and is correct, but on the MSI the replay's HTTPS
-  fetch fails with `SSL: CERTIFICATE_VERIFY_FAILED: certificate has
-  expired` from the MSI's Python 3.14 `urllib`. The R2 certificate is
-  valid: PowerShell `Invoke-WebRequest` on the same MSI returns HTTP 200,
-  and the local Python replay succeeds. The MSI's Python CA bundle is
-  stale/mismatched (certifi 2026.05.20 is installed; upgrading it did not
-  resolve it). SSL verification is NOT bypassed. The MSI test suite
-  (156 tests) passes, validating the code on the MSI; the replay evidence
-  is the local run above, with hashes. Fixing the MSI's Python CA store
-  is an environment task, not a #130 code change.
+- **MSI replay limitation (environment, not code):** The replay command
+  is correct, but on the MSI the replay's HTTPS fetch fails with
+  `SSL: CERTIFICATE_VERIFY_FAILED: certificate has expired` from the
+  MSI's Python 3.14 `urllib`. The R2 certificate is valid: PowerShell
+  `Invoke-WebRequest` on the same MSI returns HTTP 200, and the local
+  Python replay succeeds. The MSI's Python CA bundle is stale/mismatched
+  (certifi 2026.05.20 is installed; upgrading it did not resolve it).
+  SSL verification is NOT bypassed. **Workaround used:** PowerShell
+  verified HTTPS can download source blobs into a local cache without
+  disabling TLS and without global CA changes — the MSI run therefore
+  uses a pre-populated cache (`replay-cache/`, copied to the MSI) so the
+  replay reads blobs from disk. The MSI test suite (159 tests) passes,
+  validating the code on the MSI. Fixing the MSI's Python CA store is an
+  environment task, not a #130 code change.
+- **Limitation (precise):** a single replay run caps at 50 underlyings
+  (`MAX_UNDERLYINGS=50`) and 10 sessions. The full-universe result is
+  produced by the 14 bounded batches plus the global re-rank, not by
+  rescoping the bound. No coverage is invented: Oct 8 is
+  `assessment: partial` and is correctly refused.
 
 ### Box 7 — Monthly evidence requirements and current historical limitations
 documented
-- **Monthly evidence requirements** (from the design doc, unchanged):
-  re-run the replay for the new complete calendar week; confirm the D7
-  close-tolerance behaviour on the new week's data; re-check the D8
-  second-expiry selection for SPY/QQQ; re-run the OA-203 suite; record the
-  new replay's source lock and report hash alongside the prior month's.
-- **Current historical limitations (precise):**
-  - No complete calendar week exists in the archive for a full weekly
-    replay: Oct 5–7 are complete, Oct 8 is `assessment: partial`
-    (71 sweeps), Oct 9 is not in the archive set checked. The weekly
-    window is therefore validated only on deterministic fixtures, not on a
-    real complete week. **The incomplete Oct 8 week is not invented.**
+- **Monthly evidence means retained raw chronological paths / expiry /
+  deliverable / coverage, for possible monthly-horizon research.** It is
+  NOT rerunning the weekly checks once a month, and there is NO validated
+  monthly metric. The monthly evidence is the retained record that makes
+  a monthly-horizon question answerable later: the raw chronological
+  observation paths per contract, each contract's expiry and deliverable
+  (root / adjusted-deliverable status), and the per-day coverage
+  (which sessions were complete, which sweeps were truncated/excluded,
+  which contracts were sampled). The replay's source lock and report
+  hashes are the retention receipts. No monthly return, win rate or
+  ranking is claimed or validated by this work.
+- **Current historical limitations (precise, restricted to the inspected
+  date range Oct 5–9, 2026):**
+  - Inspected receipts (each day's `summary.json` fetched from the R2
+    origin, HTTP 200):
+    - Oct 5: `assessment.status` `complete`, 76 complete sweeps / 77 in
+      session, universe_coverage 1.0.
+    - Oct 6: `complete`, 76/77, coverage 1.0.
+    - Oct 7: `complete`, 76/77, coverage 1.0.
+    - Oct 8: `partial`, 70 complete sweeps / 71 in session, reasons
+      `['sweep_gaps:2']`, gaps_ms [699398, 842321], coverage 1.0.
+    - Oct 9: `complete`, 76/77, coverage 1.0. (Oct 9's files exist and
+      are complete; an earlier draft wrongly said Oct 9 was not checked.
+      Corrected here.)
+  - The inspected calendar week Oct 5–9 (Mon–Fri) is therefore NOT a
+    complete week, because Oct 8 is partial. A real full-week replay for
+    that week is not possible without inventing Oct 8's missing sweeps,
+    so it is not done. **The incomplete Oct 8 week is not invented.**
+  - No other week was checked. No claim is made about any other week's
+    completeness, and no broad archive census was performed.
+  - The weekly window is therefore validated only on deterministic
+    fixtures, not on a real complete week. A real complete-week replay
+    is a held check pending an archive week with all five sessions
+    `assessment: complete`.
   - Deterministic full-week/holiday fixtures (Box 1/2 tests above) cover
     the weekly construction, holiday rule, weekend gaps, early close and
-    DST. A real complete-week replay is a held check pending an archive
-    week with all five sessions `assessment: complete`.
+    DST.
   - The replay's `MAX_UNDERLYINGS=50` bound (Box 6) limits a single run
-    to the top 50 underlyings by OCC rank.
+    to 50 underlyings; the full-universe result is produced by bounded
+    batches (see Box 6) rather than by rescoping the bound.
 
 ### Box 8 — D8 fixtures (checked, prior round)
 - `test_d8_friday_to_monday_same_contract_continuity` — the Oct 23
@@ -200,7 +285,12 @@ documented
 ## Stable window/run/contract contract (for #131)
 
 The on-demand lookup (#131) consumes the same contract the replay writes.
-The contract is stable across the offline replay and the future lookup:
+The contract is stable across the offline replay and the future lookup.
+**Status and returns are basis-specific** (mid / exec / qualified), not a
+single global verdict. A row can be eligible on `mid`/`exec` while
+excluded on `qualified` (e.g. a wide spread), and the top-ranked contract
+differs by basis. The earlier draft's claim that "a row is eligible only
+if every basis passes" was wrong and is corrected here.
 
 - **Window:** `window_id` (`<kind>-<entry_day>_<exit_day>`), `kind`
   (`weekly_cheapest`, `weekly_fixed`, `weekly_cheapest_best_exit`,
@@ -208,28 +298,70 @@ The contract is stable across the offline replay and the future lookup:
   `{day, open_ms, close_ms, early_close}`), `policy` (version
   `oa203-windows-v1`, `decisions_status`, `close_tolerance_s=900`,
   `qualified_endpoint_policy.max_quote_age_s=1800`).
-- **Run:** `generated` (ISO timestamp), `sources` (R2 prefix + manifest
-  sha per day), `excluded_final_sweep` (rows/chains per day), `window`
-  (as above), `ranked` rows.
-- **Contract (per row):** `symbol`, `underlying`, `root`, `expiration`,
-  `strike`, `type`, `contract_size`, `status` (`eligible`/`excluded`),
-  `reasons` (exclusion reasons), `flags`, `pct`, `entry`, `exit`,
-  `entry_ms`, `exit_ms`, `entry_session`, `exit_session`,
-  `contract_exclusions`, `qualification_scope`.
-- A row is `eligible` only if every basis passes; an `excluded` row keeps
-  its raw observations and its reasons. No row is deleted.
+- **Run (`replay_summary.json`):** `replay`, `issue`, `read_only`,
+  `calendar` (name/package/version), `policy`, `sessions` (per day:
+  `sweeps`, `rows_kept`, `final`, `assessment`, `excluded_final_sweep`,
+  `universe_selection_version`, `occ_sha256`), `underlyings` (count),
+  `contracts` (count), `skipped_weeks`, `label`, `windows` (per window:
+  `window_id`, `kind`, `sessions`, `evaluated`, and per-basis
+  `mid`/`exec`/`qualified` each with `eligible`, `exclusion_reasons`,
+  `top`).
+- **Contract (per row, replay CSV `<window_id>.csv`):** the CSV carries
+  the **qualified basis's** values. Columns:
+  `rank, symbol, underlying, option_type, strike, expiration, pct, entry,
+  exit, abs_change_per_contract, entry_session, exit_session, entry_ms,
+  exit_ms, flags, status, reasons`. `rank` is the qualified rank
+  (empty when the row is excluded on the qualified basis); `status` is
+  the qualified status (`eligible`/`excluded`); `pct`/`entry`/`exit` are
+  the qualified values. Every ranked row is written, eligible or
+  excluded, so losses and exclusions are retained. No row is deleted.
+- **Per-basis values** live in `replay_summary.json` (each basis's
+  `eligible` count, `exclusion_reasons` and `top` list) and in
+  `paths.csv.gz` (per-basis columns `mid_status`, `mid_pct`,
+  `exec_status`, `exec_pct`, `qualified_status`, `qualified_pct`, …).
+- **Real output sample** (top-50 replay, `overnight-2026-10-05_2026-10-06.csv`,
+  rank 1, qualified basis):
+  `rank=1, symbol=XLU261009C00040500, underlying=XLU, option_type=call,
+  strike=40.5, expiration=2026-10-09, pct=2.2, entry=0.15, exit=0.48,
+  abs_change_per_contract=33.0, entry_session=2026-10-05,
+  exit_session=2026-10-06, entry_ms=1791229787876,
+  exit_ms=1791293734798, flags=, status=eligible, reasons=`.
+  The same window's per-basis eligible counts differ:
+  mid=2,510, exec=2,510, qualified=2,019 — proving the bases are
+  distinct. The mid top-ranked contract is `NBIS261009P00155000`
+  (pct 33.33), the exec top is `XLU261009C00041000` (pct 0.83), and the
+  qualified top is `XLU261009C00040500` (pct 2.2).
+- **Schema assertions** (tests, `tests/test_oa203_windows_replay.py`,
+  class `OutputSchema`):
+  `test_ranked_csv_schema_is_qualified_basis_and_retains_all_rows`
+  (columns match `RANKED_CSV_COLUMNS`; all rows retained; a wide-spread
+  contract is excluded on qualified but eligible on mid/exec; qualified
+  rank is 1 only for qualified-eligible rows),
+  `test_summary_schema_is_per_basis` (per-basis rank keys
+  `mid_rank`/`exec_rank`/`qualified_rank`), and
+  `test_cache_reuses_blob_and_verifies_hash` (cached blob reuse and
+  lock verification).
 - The lookup (#131) reads the same `window_id`/`symbol`/`expiration`/
   `strike` identity and the same policy version; it does not re-derive
-  windows.
+  windows. It must name the basis it consumes (`qualified` for the
+  CSV; `mid`/`exec` from the summary or paths file).
 
 ## Legacy-output regression and no-look-ahead evidence
 
-- Legacy output: `test_layout_and_summary`,
+- **Legacy daily regression — actual legacy daily outputs.** The windows
+  v1 work must not change the legacy daily scanner's outputs:
+  `tests/test_oa203_return_scanner.py` (94 tests) covers the legacy
+  return calculations and ranking, including
+  `test_qualified_winner_outside_legacy_shortlist`, which calls the
+  actual `write_outputs` and verifies the real legacy daily files
+  (`leaderboard.csv`, `qualified_ask_bid_v1.csv`). `tests/test_oa203_active.py`
+  (14 tests) covers `build_contract_rows` on the legacy daily archive.
+  The windows writer tests (`test_layout_and_summary`,
   `test_every_path_written_including_non_winners`,
   `test_shortlist_is_cut_after_full_ranking`, `test_states`,
-  `test_deterministic_content` (all in `test_oa203_windows_outputs.py`).
-  The writer's layout, summary, states and deterministic content are
-  unchanged by the windows v1 work.
+  `test_deterministic_content` in `test_oa203_windows_outputs.py`) cover
+  the NEW windows writer layout only; they are not the legacy daily
+  regression.
 - No-look-ahead: `test_no_look_ahead_on_entry`,
   `test_fixed_and_best_exit_variants_stay_separate`,
   `test_overnight_rejects_future_entry_and_exit_sides`,
@@ -239,8 +371,10 @@ The contract is stable across the offline replay and the future lookup:
 
 - **Monthly limits:** the offline replay is bounded to 10 sessions and
   50 underlyings per run; the collector is not run; no production config
-  or account changes; no deployment, publication or activation. The
-  monthly evidence run is the replay + suite + source-lock/hash record.
+  or account changes; no deployment, publication or activation. Monthly
+  evidence is the retained raw chronological paths / expiry / deliverable
+  / coverage (Box 7), not a rerun of weekly checks; there is no validated
+  monthly metric.
 - **Held D7 release protocol:** the post-merge live D7 check (10- vs
   15-minute close coverage) is HELD. It requires a deployed collector run
   and is prepared as an explicit held check, not a pass. No merge to
@@ -255,8 +389,17 @@ The contract is stable across the offline replay and the future lookup:
   (local) and the MSI worktree `live-options-view-130`.
 - Gap report: `docs/130-g0-gap-report.md`.
 - This matrix: `docs/130-acceptance-matrix.md`.
-- Replay output: `/tmp/replay-130-c` (top-50, Oct 5–7); prior sample
-  `/tmp/replay-130-b` (3 underlyings, Oct 5–7).
+- Full-universe combined output: `replay-130-full-combined/` (5 CSVs +
+  `full_universe_summary.json`, 40MB) — in the worktree and on the MSI
+  worktree filesystem. Per-batch outputs: `replay-130-full/batch-*/`
+  (14 batches, each with 5 CSVs + `replay_summary.json` +
+  `source_lock.json`). Source cache: `replay-cache/` (329MB, 237 blobs).
+  All three are gitignored (data, not source); the runner, combine
+  script and batch lists are committed (`run-full-universe-batches.sh`,
+  `combine-full-universe.py`, `replay-130-batches.json`,
+  `replay-130-union.json`).
+- The `full_universe_summary.json` is committed in the MSI worktree so
+  its hashes are inspectable without the 40MB CSVs.
 - Source lock / report / output hashes and the exact MSI replay commands
   are recorded in the replay report and in the return message.
 
@@ -269,14 +412,33 @@ Run from the MSI worktree
 C:\Python314\python.exe -m unittest tests.test_oa203_windows tests.test_oa203_windows_outputs tests.test_oa203_windows_replay tests.test_oa203_return_scanner tests.test_oa203_active tests.test_oa203_active_budget
 ```
 
-Top-50 replay (Oct 5–7, 50 underlyings by OCC rank):
+Full-universe batches (Oct 5–7, 661 underlyings in 14 batches of ≤50).
+The MSI's Python cannot fetch from R2 (stale CA bundle; see Box 6), so
+the source blobs are pre-populated into `replay-cache/` with PowerShell
+(HTTPS, TLS verified, no CA changes) and the replay reads them from disk:
 
 ```powershell
+# Populate the cache with PowerShell (TLS verified, no CA changes):
+$days = '2026-10-05','2026-10-06','2026-10-07'
+foreach ($d in $days) {
+  foreach ($k in @("oa203/scanner/$d/summary.json", "oa203/scanner/$d/universe.json", "oa203/scanner/$d/sweeps/manifest.jsonl")) {
+    $dest = "replay-cache\$k"; New-Item -ItemType Directory -Force (Split-Path $dest) | Out-Null
+    Invoke-WebRequest -Uri "https://pub-4d5c916b8cb74ffb8c0abd7dfadb02cf.r2.dev/$k" -OutFile $dest -UseBasicParsing
+  }
+  $man = Get-Content "replay-cache\oa203\scanner\$d\sweeps\manifest.jsonl" | ConvertFrom-Json
+  foreach ($m in $man) {
+    $k = "oa203/scanner/$d/sweeps/$($m.file)"; $dest = "replay-cache\$k"
+    Invoke-WebRequest -Uri "https://pub-4d5c916b8cb74ffb8c0abd7dfadb02cf.r2.dev/$k" -OutFile $dest -UseBasicParsing
+  }
+}
+# Then run the batches (reads blobs from replay-cache/):
 $env:PYTHONPATH = '.'
-C:\Python314\python.exe market_data/options_scanner/windows_replay.py --days 2026-10-05 2026-10-06 2026-10-07 --underlyings SPY QQQ SPX NVDA TSLA IWM SPCX TLT AAPL EWZ MU VIX INTC MSTR IBIT AMZN AMD NKE HYG GOOGL META AVGO HOOD MSFT TQQQ ORCL SOXL SLV PLTR NFLX SMH SMCI GME XLU ETHA MARA SOFI GLD USO CRWV IREN XSP COIN SNDK GOOG TSLL WULF RKLB NBIS DRAM --out C:\Users\Owen\Documents\Codex\2026-11-08\nova-owen-authorizes-starting-your-multi\work\live-options-view-130\replay-130-c
+.\run-full-universe-batches.sh
+# Then combine and globally re-rank:
+C:\Python314\python.exe combine-full-universe.py
 ```
 
 The replay fetches from the R2 origin
 `https://pub-4d5c916b8cb74ffb8c0abd7dfadb02cf.r2.dev` with User-Agent
-`oa203-windows-replay/1`. It is read-only: no collector runs, no
-production config or account changes.
+`oa203-windows-replay/1` when a blob is not cached. It is read-only: no
+collector runs, no production config or account changes.
