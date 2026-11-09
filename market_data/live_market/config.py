@@ -170,6 +170,7 @@ __all__ = [
     "TASTY_BASE",
     "TICKER",
     "CHAIN_UNDERLYINGS",
+    "COLLECT_IBIT",
     "COLLECT_SPY",
     "STRIKE_WINDOW",
     "SPY_MAX_STRIKES",
