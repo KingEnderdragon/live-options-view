@@ -1,0 +1,12 @@
+{
+  "focusedBefore": true,
+  "activeElementAfterRefresh": true,
+  "sameFocusNode": true,
+  "sameCardNode": true,
+  "sameControlNode": true,
+  "cardIdentityBefore": "SMH",
+  "cardIdentityAfter": "SMH",
+  "activeTag": "BUTTON",
+  "activeLabel": "Move SMH right",
+  "measuredAt": "2026-11-09T06:55:10.116Z"
+}

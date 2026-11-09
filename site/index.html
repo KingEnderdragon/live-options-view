@@ -198,22 +198,72 @@
   /* ── price strip ─────────────────────────────────────────────────────── */
   #price-strip {
     display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
+    flex-direction: column;
+    gap: 0.75rem;
     margin-bottom: 1rem;
   }
-  .price-group {
+  .quote-section {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+  }
+  .quote-section + .quote-section {
+    border-top: 1px solid var(--border);
+    padding-top: 0.7rem;
+  }
+  .quote-heading-row {
+    display: flex;
+    align-items: baseline;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+  }
+  .quote-section h2 {
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    color: var(--dim);
+    margin: 0;
+  }
+  .quote-section h3 {
+    font-size: 0.62rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--dim);
+    margin: 0 0 0.25rem;
+  }
+  .quote-session {
+    font-size: 0.62rem;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    padding: 1px 7px;
+    border-radius: 9px;
+    background: rgba(88,166,255,0.14);
+    color: #58a6ff;
+  }
+  .quote-session[data-mode="crypto"] { background: rgba(210,153,34,0.16); color: #d29922; }
+  .quote-session[data-mode="none"] { background: rgba(139,148,158,0.16); color: var(--dim); }
+  .quote-updated {
+    margin-left: auto;
+    font-size: 0.62rem;
+    color: var(--dim);
+  }
+  .quote-note {
+    font-size: 0.6rem;
+    color: var(--dim);
+    margin: 0.2rem 0 0;
+  }
+  .quote-section .price-group {
     display: flex;
     gap: 6px;
     flex-wrap: wrap;
     align-items: center;
   }
-  .price-group + .price-group::before {
-    content: '';
-    width: 1px;
-    height: 38px;
-    background: var(--border);
-    align-self: center;
+  #qp-pin-add {
+    align-self: flex-start;
+    font-size: 0.64rem;
+    padding: 2px 8px;
   }
   .ticker-btn {
     display: flex;
@@ -249,6 +299,126 @@
     line-height: 1;
   }
   .ticker-btn.sm .px { font-size: 0.78rem; }
+  .ticker-btn .quote-age {
+    font-size: 0.48rem;
+    color: var(--dim);
+    line-height: 1;
+    margin-top: 2px;
+  }
+  .pin-controls {
+    display: flex;
+    gap: 2px;
+    margin-top: 3px;
+  }
+  .pin-controls button {
+    font-size: 0.56rem;
+    line-height: 1;
+    min-width: 22px;
+    min-height: 22px;
+    padding: 1px 4px;
+    background: var(--panel);
+    color: var(--dim);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .pin-controls button:hover:not(:disabled),
+  .pin-controls button:focus-visible { color: var(--bright); border-color: #58a6ff; }
+  .pin-controls button:disabled { opacity: 0.35; cursor: default; }
+  .movers-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+  }
+  .mover-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    max-width: 620px;
+  }
+  .mover {
+    display: grid;
+    grid-template-columns: 1.1rem 1fr auto auto;
+    gap: 0.45rem;
+    align-items: baseline;
+    font-size: 0.72rem;
+    padding: 2px 0;
+    border-bottom: 1px dotted var(--border);
+  }
+  .mover-rank { color: var(--dim); font-variant-numeric: tabular-nums; }
+  .mover-name { font-weight: 700; color: var(--bright); }
+  .mover-price, .mover-change { font-variant-numeric: tabular-nums; }
+  .mover-change.up { color: #00cc55; }
+  .mover-change.down { color: #ee3300; }
+  .quote-dialog {
+    position: fixed;
+    inset: 0;
+    z-index: 200;
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    padding: 2rem 1rem;
+    background: rgba(0,0,0,0.65);
+  }
+  .quote-dialog[hidden] { display: none; }
+  .quote-dialog-body {
+    width: min(560px, 100%);
+    max-height: 85vh;
+    overflow: auto;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem;
+  }
+  .quote-dialog-body h2 {
+    margin: 0 0 0.6rem;
+    font-size: 0.95rem;
+  }
+  #qp-pin-search {
+    width: 100%;
+    margin-bottom: 0.6rem;
+  }
+  .pin-candidates {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .pin-candidate {
+    display: grid;
+    grid-template-columns: auto 5.5rem 1fr auto;
+    gap: 0.5rem;
+    align-items: baseline;
+    padding: 3px 0;
+    border-bottom: 1px dotted var(--border);
+    font-size: 0.72rem;
+  }
+  .pin-candidate-name { color: var(--dim); font-size: 0.66rem; }
+  .pin-candidate-price { font-variant-numeric: tabular-nums; }
+  #qp-pin-close { margin-top: 0.75rem; }
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0,0,0,0);
+    white-space: nowrap;
+    border: 0;
+  }
+  @media (max-width: 640px) {
+    .movers-grid { grid-template-columns: 1fr; }
+    .ticker-btn { min-width: 62px; padding: 4px 7px; }
+    .quote-updated { margin-left: 0; }
+    .pin-candidate { grid-template-columns: auto 1fr auto; }
+    .pin-candidate-name { display: none; }
+  }
 
   /* ── crude calibration panel ─────────────────────────────────────────── */
   #steo-panel {
@@ -847,12 +1017,52 @@
 
 <div id="cal-error">Calibration data (OIranges.csv) failed to load — heatmap colors are unreliable. OI level 5 (wall) may be shown for all nonzero cells.</div>
 
-<div id="price-strip">
-  <div class="price-group" id="px-main">
-    <!-- QQQ USO VIX OVX SMH IGV — large -->
-  </div>
-  <div class="price-group" id="px-secondary">
-    <!-- BTC/USD META GOOGL AMZN TSLA — small -->
+<div id="price-strip" aria-label="Quote cards">
+  <section class="quote-section" aria-labelledby="qp-core-heading">
+    <div class="quote-heading-row">
+      <h2 id="qp-core-heading">Core markets</h2>
+      <span id="qp-session" class="quote-session">Session unknown</span>
+      <span id="qp-updated" class="quote-updated" role="status">Waiting for prices</span>
+    </div>
+    <div class="price-group" id="qp-core"></div>
+  </section>
+  <section class="quote-section" aria-labelledby="qp-pins-heading">
+    <div class="quote-heading-row">
+      <h2 id="qp-pins-heading">Pinned</h2>
+      <span id="qp-pin-count" class="quote-session"></span>
+      <button id="qp-pin-add" type="button">+ Pin instrument</button>
+    </div>
+    <div class="price-group" id="qp-pins"></div>
+    <p id="qp-pins-empty" class="quote-note" hidden>Pin an instrument from the 100-name tracked universe to keep it here.</p>
+    <p id="qp-pin-scope" class="quote-note">Pins are saved in this browser only, not to your account.</p>
+    <p id="qp-pin-message" class="quote-note" role="status"></p>
+  </section>
+  <section class="quote-section" aria-labelledby="qp-movers-heading">
+    <div class="quote-heading-row">
+      <h2 id="qp-movers-heading">Movers</h2>
+      <span id="qp-movers-scope" class="quote-session">No active group</span>
+    </div>
+    <div class="movers-grid">
+      <div>
+        <h3>Top gainers</h3>
+        <ol id="qp-movers-up" class="mover-list"></ol>
+      </div>
+      <div>
+        <h3>Top losers</h3>
+        <ol id="qp-movers-down" class="mover-list"></ol>
+      </div>
+    </div>
+    <p id="qp-movers-note" class="quote-note">Ranked within our tracked universe, not the whole market.</p>
+  </section>
+  <div id="qp-announce" class="sr-only" aria-live="polite"></div>
+</div>
+
+<div id="qp-pin-dialog" class="quote-dialog" role="dialog" aria-modal="true" aria-labelledby="qp-pin-title" hidden>
+  <div class="quote-dialog-body">
+    <h2 id="qp-pin-title">Pin instruments</h2>
+    <input id="qp-pin-search" type="search" placeholder="Search 100 tracked instruments" aria-label="Search tracked instruments">
+    <ul id="qp-pin-list" class="pin-candidates"></ul>
+    <button id="qp-pin-close" type="button">Done</button>
   </div>
 </div>
 
@@ -1023,6 +1233,8 @@
 <script src="shared/heatmap.js?v=c4a883a5bc99b558"></script>
 <script src="shared/quotes.js?v=8eefeac90dfd88bf"></script>
 <script src="shared/format.js?v=132e6deb03cda939"></script>
+<script src="shared/instruments.js?v=860821b9e03c4a08"></script>
+<script src="shared/quote-panel.js?v=2ee3b1cb4611d76f"></script>
 <script src="shared/chain.js?v=cb4a1bb1bb828c64"></script>
 <script>
 // ── stale-page protection ──────────────────────────────────────────────────────
@@ -1145,7 +1357,8 @@ let timerHandle = null;
 // module instead of slicing fetchPrices out of the page; the banner stays
 // here as the section's marker.
 </script>
-<script src="js/price-strip.js?v=9a6cab8c6585f356"></script>
+<script src="js/quote-panel.js?v=3fe07ab6cc1d6d5e"></script>
+<script src="js/price-strip.js?v=48a521f5747b73af"></script>
 <script>
 
 // EIA STEO crude calibration + OVX regime — moved to js/steo-fetch.js (B2),
@@ -1210,6 +1423,6 @@ let timerHandle = null;
 // so the page's script order is unchanged. The banner stays here as
 // the section's marker.
 </script>
-<script src="js/boot.js?v=4c9a1bd5ea8e6341"></script>
+<script src="js/boot.js?v=1a582324e77c6419"></script>
 </body>
 </html>
