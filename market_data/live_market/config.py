@@ -65,6 +65,7 @@ PRICE_LANE_MIN_BACKOFF_SECS = 60
 PRICE_LANE_MAX_BACKOFF_SECS = 1800
 PRICE_LANE_MAX_AUTH_CYCLES = 4          # per retry window, then a long sleep
 PRICE_LANE_RETRY_WINDOW_SECS = 3600
+PRICE_LANE_CONTRACT_REFRESH_SECS = 6 * 3600  # daily/roll reconciliation while healthy
 ROLLING_REFERENCE_KEY = "intraday/price_references.json"
 
 # Keep the weekly archive byte-for-byte compatible with qqq-data-pipeline's
@@ -189,6 +190,7 @@ __all__ = [
     "PRICE_LANE_MAX_BACKOFF_SECS",
     "PRICE_LANE_MAX_AUTH_CYCLES",
     "PRICE_LANE_RETRY_WINDOW_SECS",
+    "PRICE_LANE_CONTRACT_REFRESH_SECS",
     "ROLLING_REFERENCE_KEY",
     "PIPELINE_CHAIN_COLUMNS",
     "EIA_API_KEY",

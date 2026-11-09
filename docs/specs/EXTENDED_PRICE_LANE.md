@@ -55,7 +55,14 @@ holiday/early-close rules are an explicit table, not a weekday heuristic.
 
 `market_data/live_market/price_sessions.py` is deliberately ET-wall-clock based,
 so daylight saving changes move the UTC offset, not the 04:00/09:30/16:00/20:00
-boundaries.
+boundaries. `PriceLane` keeps its production clock in UTC for publication and
+history, and converts each instant to ET before any calendar or session call.
+
+Futures contracts are reconciled while the feed stays healthy. The lane
+re-resolves on a bounded six-hour/ET-day cadence, compares the shared mapping
+with its own subscription snapshot, and replaces only its own DXLink connection
+when a roll or a chain-session resolution changes the active month. The payload
+therefore names the contract the lane is actually subscribed to.
 
 ## Provider capabilities and cadence
 

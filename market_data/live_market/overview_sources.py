@@ -59,6 +59,18 @@ def resolve_futures(access_token, *, force=False):
         return dict(RESOLVED_CONTRACTS)
 
 
+def futures_snapshot():
+    """Atomic label->streamer-symbol view of the shared futures mapping.
+
+    The price lane compares this each cycle so a chain-session resolution (or a
+    daily roll) is reconciled into its own subscription instead of being read
+    only at authentication.
+    """
+    with _RESOLVE_LOCK:
+        return {r['label']: PRICE_TICKERS.get(r['label'])
+                for r in INSTRUMENTS if r['profile'] == 'FU' and r['enabled']}
+
+
 def treasury_observation(xml, now=None):
     """2-year constant-maturity yield, percent; official dated observation, not a trade."""
     now = now or datetime.now(timezone.utc).isoformat()

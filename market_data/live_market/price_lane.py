@@ -24,10 +24,10 @@ from typing import Optional
 import market_data.live_market as _entry
 from market_data.overview import INSTRUMENTS
 from .config import (
-    COLLECT_SPY, PRICES_SECS, PRICE_TICKERS, PRICE_LANE_HEALTH_KEY,
+    COLLECT_SPY, ET, PRICES_SECS, PRICE_TICKERS, PRICE_LANE_HEALTH_KEY,
     PRICE_LANE_HEALTH_SECS, PRICE_LANE_MAX_AUTH_CYCLES,
     PRICE_LANE_MAX_BACKOFF_SECS, PRICE_LANE_MIN_BACKOFF_SECS,
-    PRICE_LANE_RETRY_WINDOW_SECS, R2_BUCKET,
+    PRICE_LANE_CONTRACT_REFRESH_SECS, PRICE_LANE_RETRY_WINDOW_SECS, R2_BUCKET,
     log,
 )
 from .feed import DXLinkFeed
@@ -37,6 +37,7 @@ from .price_sessions import (
     ExchangeCalendarUnavailable, build_equity_calendar, lane_summary,
     lane_summary_payload, session_for,
 )
+from .overview_sources import futures_snapshot
 
 CRYPTO_LABELS = tuple(row["label"] for row in INSTRUMENTS if row["asset_class"] == "crypto")
 INSTRUMENTS_BY_LABEL = {row["label"]: row for row in INSTRUMENTS}
@@ -103,6 +104,12 @@ class PriceLane:
         self._max_auth_cycles = max_auth_cycles
         self._retry_window = timedelta(seconds=retry_window_secs)
         self._cadence = cadence_secs
+        self._contract_refresh_secs = PRICE_LANE_CONTRACT_REFRESH_SECS
+        self._auth_payload: Optional[dict] = None
+        self._contracts: dict[str, Optional[str]] = {}
+        self._contracts_checked_at: Optional[datetime] = None
+        self._contracts_et_date = None
+        self._contract_reconciliations = 0
 
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -159,22 +166,24 @@ class PriceLane:
     # -- one cycle -----------------------------------------------------------
     def cycle(self) -> float:
         """Authenticate/connect if needed, publish once, and return idle delay."""
-        now = self._clock()
+        now = self._clock()  # production clock is UTC; keep it for history/publication
+        now_et = now.astimezone(ET)
         self._last_cycle_at = now
         try:
-            calendar = self._calendar_for(now)
+            calendar = self._calendar_for(now_et)
         except ExchangeCalendarUnavailable as exc:
             # Prices cannot be labelled confidently without trading days. Keep
             # the lane alive (crypto is still continuous) but withhold the
             # equity session labels rather than guessing.
             calendar = None
             self._last_error = f"exchange_calendar_unavailable:{exc}"
-        summary = lane_summary(now, calendar)
-        self._summary_payload = lane_summary_payload(now, calendar)
+        summary = lane_summary(now_et, calendar)
+        self._summary_payload = lane_summary_payload(now_et, calendar)
         try:
             self._ensure_feed()
+            self._reconcile_contracts(now, now_et)
             self._keep_feed_alive()
-            published = self._publish_once(now, calendar, summary)
+            published = self._publish_once(now, now_et, calendar, summary)
             self._published_rows = published
             if self._rolling is not None:
                 # Throttled inside the store; this is the restart-persistence
@@ -187,14 +196,14 @@ class PriceLane:
         except Exception as exc:
             return self._fail(f"{type(exc).__name__}", now)
 
-    def _publish_once(self, now: datetime, calendar, summary) -> int:
+    def _publish_once(self, now: datetime, now_et: datetime, calendar, summary) -> int:
         if self._feed is None:
             raise RuntimeError("price_lane_feed_unavailable")
         sessions = {}
         for label in list(PRICE_TICKERS) + ["SPY"]:
             instrument = INSTRUMENTS_BY_LABEL.get(label)
             if instrument is not None:
-                sessions[label] = session_for(instrument, now, calendar).status
+                sessions[label] = session_for(instrument, now_et, calendar).status
         context = {
             "writer_id": self._writer_id,
             "summary": self._summary_payload,
@@ -210,12 +219,12 @@ class PriceLane:
         return len(PRICE_TICKERS)
 
     # -- connection ----------------------------------------------------------
-    def _calendar_for(self, now: datetime):
-        if self._calendar is not None and self._calendar_day == now.date():
+    def _calendar_for(self, now_et: datetime):
+        if self._calendar is not None and self._calendar_day == now_et.date():
             return self._calendar
-        calendar = self._calendar_builder(now)
+        calendar = self._calendar_builder(now_et)
         self._calendar = calendar
-        self._calendar_day = now.date()
+        self._calendar_day = now_et.date()
         return calendar
 
     def _price_symbols(self) -> list[str]:
@@ -242,6 +251,7 @@ class PriceLane:
         self._state = "authenticating"
         self._auth_cycles += 1
         auth = self._auth(self._token_manager)
+        self._auth_payload = dict(auth)
         try:
             self._resolve(auth["access_token"])
         except Exception as exc:
@@ -254,8 +264,59 @@ class PriceLane:
         feed.start()
         feed.wait_ready(timeout=30)
         self._feed = feed
+        self._contracts = futures_snapshot()
+        self._contracts_checked_at = now
+        self._contracts_et_date = now.astimezone(ET).date()
         self._state = "streaming"
         log.info(f"price lane feed ready  symbols={len(symbols)}  options=0")
+
+    def _reconcile_contracts(self, now: datetime, now_et: datetime) -> None:
+        """Keep the lane's subscriptions on the same contracts the rows name.
+
+        A healthy feed is not evidence that the active month still matches the
+        shared mapping: the chain session can resolve a new month, and a daily
+        roll changes it without any disconnect. Re-resolve on a bounded cadence
+        and rebuild this lane's own feed when the mapping changes.
+        """
+        if self._feed is None:
+            return
+        due = (
+            self._contracts_checked_at is None
+            or self._contracts_et_date != now_et.date()
+            or (now - self._contracts_checked_at).total_seconds() >= self._contract_refresh_secs
+        )
+        if due and self._auth_payload is not None:
+            try:
+                self._resolve(self._auth_payload["access_token"], force=True)
+            except Exception as exc:
+                log.warning(f"price lane contract refresh failed: {type(exc).__name__}")
+            self._contracts_checked_at = now
+            self._contracts_et_date = now_et.date()
+        snapshot = futures_snapshot()
+        if snapshot != self._contracts:
+            self._rebuild_feed(snapshot)
+
+    def _rebuild_feed(self, snapshot: dict) -> None:
+        """Replace only this lane's connection; chain subscriptions are elsewhere."""
+        if self._auth_payload is None:
+            return
+        old = self._feed
+        self._feed = None
+        if old is not None:
+            try:
+                old.stop()
+            except Exception:
+                pass
+        symbols = self._price_symbols()
+        feed = self._feed_factory(self._auth_payload["streamer_url"],
+                                  self._auth_payload["streamer_token"])
+        feed.set_subscriptions([], symbols)
+        feed.start()
+        feed.wait_ready(timeout=30)
+        self._feed = feed
+        self._contracts = dict(snapshot)
+        self._contract_reconciliations += 1
+        log.info(f"price lane subscriptions reconciled  symbols={len(symbols)}  options=0")
 
     def _keep_feed_alive(self):
         feed = self._feed
@@ -307,6 +368,9 @@ class PriceLane:
             "cadence_seconds": self._cadence,
             "auth_cycles_this_window": self._auth_cycles,
             "auth_cycle_budget": self._max_auth_cycles,
+            "contracts_checked_at": _iso(self._contracts_checked_at),
+            "contract_reconciliations": self._contract_reconciliations,
+            "contracts": dict(self._contracts),
             "feed": feed_health,
             "lane": self._summary_payload,
             "rolling_references": (self._rolling.status() if self._rolling is not None else None),

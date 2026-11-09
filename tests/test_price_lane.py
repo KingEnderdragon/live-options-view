@@ -329,11 +329,21 @@ class LanePayload(unittest.TestCase):
 
 
 class LaneRuntime(unittest.TestCase):
-    def make_lane(self, auth=None, feed=None, publish=None, clock=None, **kwargs):
+    def setUp(self):
+        self._futures = {row["label"]: entry.PRICE_TICKERS.get(row["label"])
+                         for row in INSTRUMENTS if row["profile"] == "FU"}
+
+    def tearDown(self):
+        for label, symbol in self._futures.items():
+            entry.PRICE_TICKERS[label] = symbol
+
+    def make_lane(self, auth=None, feed=None, publish=None, clock=None,
+                  feed_factory=None, resolve=None, **kwargs):
         self.feed = feed or FakeFeed()
         self.sink = FakeS3()
         self.published = []
         self.auth_calls = []
+        self.feeds = []
 
         def fake_auth(_manager):
             self.auth_calls.append(1)
@@ -345,12 +355,22 @@ class LaneRuntime(unittest.TestCase):
             self.published.append(kw)
             s3.put_object(Bucket="b", Key="intraday/prices.json", Body=b"{}")
 
+        def make_feed(url, token):
+            built = feed_factory(url, token) if feed_factory else self.feed
+            self.feeds.append(built)
+            return built
+
+        def fake_resolve(token, force=False):
+            if resolve is not None:
+                return resolve(token, force=force)
+            return {}
+
         lane = price_lane.PriceLane(
             object(), None, self.sink, writer_id="test-writer",
             clock=clock or (lambda: datetime(2026, 11, 9, 15, 0, tzinfo=UTC)),
             sleep=lambda secs: None, auth=fake_auth,
-            feed_factory=lambda url, token: self.feed,
-            resolve=lambda token: {},
+            feed_factory=make_feed,
+            resolve=fake_resolve,
             publish=publish or fake_publish,
             calendar_builder=lambda now: calendar(now.date()),
             rolling_store=kwargs.pop("rolling_store", None), **kwargs)
@@ -417,6 +437,72 @@ class LaneRuntime(unittest.TestCase):
         self.assertEqual(payload["schema_version"], 1)
         self.assertIn("BTC/USD", payload["instruments"])
         self.assertEqual(payload["instruments"]["BTC/USD"]["samples"][0][1], 85000.0)
+
+    def test_cycle_uses_eastern_clock_for_session_labels(self):
+        # 21:00Z is 16:00 ET in winter (EST) and would look closed if read as UTC.
+        lane = self.make_lane(clock=lambda: datetime(2026, 11, 9, 21, 0, tzinfo=UTC))
+        lane.cycle()
+        context = self.published[0]["lane_context"]
+        self.assertEqual(context["summary"]["mode"], "equities")
+        self.assertEqual(context["sessions"]["QQQ"], "afterhours")
+
+        # Same wall-clock instant in summer (EDT) must also be after-hours.
+        summer = self.make_lane(clock=lambda: datetime(2027, 7, 15, 20, 0, tzinfo=UTC))
+        summer.cycle()
+        summer_context = self.published[0]["lane_context"]
+        self.assertEqual(summer_context["summary"]["mode"], "equities")
+        self.assertEqual(summer_context["sessions"]["QQQ"], "afterhours")
+
+    def test_daily_roll_reconciles_the_lane_subscription(self):
+        now = [datetime(2026, 11, 9, 15, 0, tzinfo=UTC)]
+        contract = {"symbol": "/GCZ26:XCEC"}
+        force_calls = []
+
+        def resolve(_token, force=False):
+            force_calls.append(force)
+            entry.PRICE_TICKERS["/GC"] = contract["symbol"]
+            return {}
+
+        def feed_factory(_url, _token):
+            return FakeFeed()
+
+        lane = self.make_lane(clock=lambda: now[0], resolve=resolve, feed_factory=feed_factory)
+        lane.cycle()
+        self.assertIn("/GCZ26:XCEC", self.feeds[0].price_symbols)
+        self.assertEqual(len(self.feeds), 1)
+
+        # A new active month must replace the subscription even though the feed
+        # stayed healthy and no authentication happened again.
+        contract["symbol"] = "/GCG27:XCEC"
+        now[0] += timedelta(seconds=price_lane.PRICE_LANE_CONTRACT_REFRESH_SECS + 1)
+        lane.cycle()
+        self.assertTrue(force_calls[-1], "the periodic reconciliation forces a resolution")
+        self.assertTrue(self.feeds[0].stopped)
+        self.assertEqual(len(self.feeds), 2)
+        self.assertIn("/GCG27:XCEC", self.feeds[1].price_symbols)
+        self.assertNotIn("/GCZ26:XCEC", self.feeds[1].price_symbols)
+        self.assertEqual(lane.health()["contract_reconciliations"], 1)
+
+    def test_concurrent_chain_resolution_reconciles_without_a_new_auth(self):
+        now = [datetime(2026, 11, 9, 15, 0, tzinfo=UTC)]
+        force_calls = []
+
+        def resolve(_token, force=False):
+            force_calls.append(force)
+            entry.PRICE_TICKERS["/GC"] = "/GCZ26:XCEC"
+            return {}
+
+        lane = self.make_lane(clock=lambda: now[0], resolve=resolve,
+                              feed_factory=lambda _url, _token: FakeFeed())
+        lane.cycle()
+        # Simulate another owner (the chain session) publishing the new month.
+        entry.PRICE_TICKERS["/GC"] = "/GCG27:XCEC"
+        now[0] += timedelta(seconds=1)
+        lane.cycle()
+        self.assertEqual(len(self.feeds), 2)
+        self.assertTrue(self.feeds[0].stopped)
+        self.assertIn("/GCG27:XCEC", self.feeds[1].price_symbols)
+        self.assertNotIn(True, force_calls, "the drift check does not need another auth or provider call")
 
     def test_writer_plan_is_single_valued(self):
         from market_data.live_market import runner
