@@ -99,6 +99,33 @@ const labels = list => Array.from(list, item => item.label);
   const produced = model.quoteSessionMode({ ...snapshot, meta: { ...snapshot.meta, lane: { mode: 'futures' } } });
   assert.equal(produced.mode, 'futures', 'the producer lane mode wins');
   assert.equal(produced.source, 'producer');
+  const premarketLane = model.quoteSessionMode({
+    ...snapshot,
+    meta: { ...snapshot.meta, lane: { mode: 'equities', sessions: { equities: { status: 'premarket' } } } },
+  });
+  assert.equal(premarketLane.label, 'Premarket · US equities', 'the banner names the active session');
+}
+
+{
+  // A streaming row can carry a fresh collector receipt without a provider
+  // event time. It must stay unknown and never enter movers; receipt time is
+  // not observation time.
+  const store = new model.QuoteStore({ nowFn: () => NOW });
+  store.mergePayload(payload({
+    SPY: row('SPY', {
+      observed_at: null,
+      quote_ts: new Date(NOW).toISOString(),
+      collector_received_at: new Date(NOW).toISOString(),
+      market_session: 'premarket', session: 'regular',
+      price: 739.37, prev_close: 735.29, chg_pct: 0.55,
+    }),
+  }));
+  const snapshot = store.snapshot();
+  const spy = snapshot.byLabel.get('SPY');
+  assert.equal(spy.state, 'unknown');
+  assert.equal(spy.ageMs, null);
+  assert.equal(model.computeMovers(snapshot, { mode: 'equities' }).eligible, 0,
+    'a receipt-only row cannot be a mover');
 }
 
 {

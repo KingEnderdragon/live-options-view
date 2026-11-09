@@ -69,12 +69,19 @@ and title.
 
 ## Session source
 
-The producer's `price_lane.mode` is authoritative when present. Otherwise only
-rows whose state is `live` may name the active group; a row's `session` is the
-last trade/observation session, not proof that the market is open now. If no
-fresh row supports the ET clock fallback group, the panel reports
-`Session unknown` rather than claiming extended-hours coverage from a stale
-Friday print on a Sunday night.
+The producer's `price_lane.mode` is authoritative when present, and its
+`sessions` status supplies the specific banner (`Premarket · US equities`,
+`Regular · US equities`, or `After hours · US equities`). Otherwise only rows
+whose state is `live` may name the active group; a row's `session` is the last
+trade/observation session, not proof that the market is open now. If no fresh
+row supports the ET clock fallback group, the panel reports `Session unknown`
+rather than claiming extended-hours coverage from a stale Friday print on a
+Sunday night.
+
+A streaming row without a provider event timestamp is `unknown`, even when its
+collector receipt is current; receipt time is never used as observation age or
+mover eligibility. `observation_time_reason` on the producer row states why the
+timestamp is absent.
 
 ## Release and rollback
 

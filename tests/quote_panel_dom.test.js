@@ -126,7 +126,7 @@ function row(label, overrides = {}) {
   };
 }
 
-function payload(rows, { lane = { mode: 'equities', eligible: true } } = {}) {
+function payload(rows, { lane = { mode: 'equities', eligible: true, sessions: { equities: { status: 'premarket' } } } } = {}) {
   return { schema_version: 2, timestamp: new Date(NOW).toISOString(), feed_stale: false, prices: rows, price_lane: lane };
 }
 
@@ -185,7 +185,7 @@ function makeStorage(initial = null) {
   panel.render();
   await Promise.resolve();
 
-  assert.equal(panel.els.session.textContent, 'US equities · extended hours');
+  assert.equal(panel.els.session.textContent, 'Premarket · US equities');
   assert.equal(panel.els.core.children.length, 8, 'core always shows its eight anchors');
   assert.equal(findCard(panel.els.core, 'QQQ').priceEl.textContent, '656.20');
   assert.equal(findCard(panel.els.core, 'QQQ').stateEl.textContent, 'Regular');
@@ -236,6 +236,27 @@ function makeStorage(initial = null) {
     'stale extended-session rows cannot claim the market is open');
   assert.match(stalePanel.els.moversScope.textContent, /No active group/);
   assert.equal(stalePanel.els.moversUp.children.length, 0);
+
+  const receiptDoc = new Doc(IDS);
+  const receiptStore = new model.QuoteStore({ nowFn: () => NOW });
+  const receiptPanel = dom.initQuotePanel({
+    documentRef: receiptDoc, store: receiptStore,
+    pins: new model.QuotePins({ storage: makeStorage('[]') }),
+  });
+  receiptStore.mergePayload(payload({
+    SPY: row('SPY', {
+      observed_at: null,
+      quote_ts: new Date(NOW).toISOString(),
+      collector_received_at: new Date(NOW).toISOString(),
+      market_session: 'premarket', session: 'regular',
+      price: 739.37, prev_close: 735.29, chg_pct: 0.55,
+    }),
+  }));
+  receiptPanel.render();
+  assert.equal(findCard(receiptPanel.els.core, 'SPY').stateEl.textContent, 'unknown',
+    'a receipt-only current price is not a live observation');
+  assert.equal(receiptPanel.els.moversUp.children.length, 0);
+  assert.match(receiptPanel.els.moversScope.textContent, /0 eligible/);
 
   // Picker filters and adds; core and already-pinned instruments never appear.
   panel.openPicker();
