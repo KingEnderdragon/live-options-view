@@ -310,6 +310,59 @@ const INFO = { sym: SYM, strike: 600, type: 'call', exp: '2026-09-18' };
   assert.equal(JSON.parse(fetchCalls.at(-1).options.body).qty, 2);
   assert.equal(get('session').trades.length, 3, 'the close fills and lands in the book');
 
+  // --- closePosition: closes a SPY position by its own OCC symbol, not QQQ's. ---
+  const SPY_SYM = 'SPY261106C00700000';
+  set('session', { username: 'owen', balance_cash: 10000, trades: [trade({ sym: SPY_SYM, strike: 700, type: 'call', exp: '2026-11-06', qty: 2, price: 5 })] });
+  fetchCalls = [];
+  nextResponse = response({ ...trade({ sym: SPY_SYM, strike: 700, type: 'call', exp: '2026-11-06', side: 'sell', qty: 2, price: 5.4 }), order_id: 'ord-9', order_type: 'market', balance_cash: 10507 });
+  get('closePosition')(SPY_SYM);
+  await new Promise(r => setTimeout(r, 0));
+  await new Promise(r => setTimeout(r, 0));
+  assert.equal(JSON.parse(fetchCalls.at(-1).options.body).sym, SPY_SYM, 'the close targets the SPY contract');
+  assert.equal(JSON.parse(fetchCalls.at(-1).options.body).side, 'sell');
+  assert.equal(JSON.parse(fetchCalls.at(-1).options.body).qty, 2);
+  assert.equal(get('session').trades.length, 2, 'the SPY close fills and lands in the book');
+
+  // --- executeTrade: a fill after the user switched tickets leaves the new ticket alone. ---
+  set('session', { username: 'owen', balance_cash: 10000, trades: [] });
+  vm.runInContext("ticketEl = document.createElement('div')", context);
+  const firstTicket = get('ticketEl');
+  let releaseFill;
+  fetchImpl = () => new Promise(resolve => { releaseFill = () => resolve(response({ ...trade({ qty: 1, price: 5.2 }), order_id: 'ord-7', order_type: 'market', balance_cash: 9480 })); });
+  const pendingFill = get('executeTrade')(INFO, 'buy', 1);
+  await new Promise(r => setTimeout(r, 0)); await new Promise(r => setTimeout(r, 0));
+  // The user switches chains and opens a new ticket while the order is in flight.
+  vm.runInContext("ticketEl = document.createElement('div')", context);
+  const newTicket = get('ticketEl');
+  assert.notEqual(newTicket, firstTicket);
+  const closeBefore = calls.closeTicket;
+  releaseFill();
+  await pendingFill;
+  assert.equal(get('session').trades.length, 1, 'the fill still lands after a switch');
+  assert.equal(calls.closeTicket, closeBefore, 'the new ticket is not closed by the old order filling');
+  assert.equal(get('ticketEl'), newTicket, 'the new ticket stays open');
+  vm.runInContext('ticketEl = null', context);
+  fetchImpl = null;
+
+  // --- executeTrade: a rejection after the user switched tickets does not write into the new ticket. ---
+  set('session', { username: 'owen', balance_cash: 10000, trades: [] });
+  els['paper-hint'].textContent = '';
+  vm.runInContext("ticketEl = document.createElement('div')", context);
+  let releaseReject;
+  fetchImpl = () => new Promise(resolve => { releaseReject = () => resolve(response({ error: 'Insufficient funds', order_id: 'ord-8', status: 'rejected' }, 400)); });
+  const pendingReject = get('executeTrade')(INFO, 'buy', 1);
+  await new Promise(r => setTimeout(r, 0)); await new Promise(r => setTimeout(r, 0));
+  vm.runInContext("ticketEl = document.createElement('div')", context);
+  const switchedTicket = get('ticketEl');
+  releaseReject();
+  await pendingReject;
+  assert.equal(get('session').trades.length, 0, 'a rejected order adds no trade');
+  assert.equal(switchedTicket.children.length, 0, 'the new ticket gets no status written into it');
+  assert.ok(els['paper-hint'].textContent.includes('Execution rejected'), 'the rejection surfaces in the hint, not the wrong ticket');
+  assert.ok(els['paper-order-status'].textContent.includes('rejected order ord-8'), 'the global status names the rejected order');
+  vm.runInContext('ticketEl = null', context);
+  fetchImpl = null;
+
   // --- hasExpiredPositions / settleExpired: nothing expired, no network call. ---
   fetchCalls = [];
   set('session', { username: 'owen', balance_cash: 10507, trades: [trade({ exp: '2026-09-23' })] });
@@ -350,9 +403,14 @@ const INFO = { sym: SYM, strike: 600, type: 'call', exp: '2026-09-18' };
     rows: [{ OptionSymbol: SYM, Bid: 1.1, Ask: 1.2, Mid: 1.15, Strike: 600, Type: 'call', Expiration: '2026-09-18' }],
   });
   assert.equal(get('lastDataDate'), '2026-09-23');
-  assert.equal(get('spotMarks')['2026-09-23'], 600.1, 'the snapshot spot is kept for settlement pricing');
+  assert.equal(get('spotMarks')['QQQ:2026-09-23'], 600.1, 'the snapshot spot is kept per underlying for settlement pricing');
   assert.equal(get('positionMarks')[SYM], 1.15, 'the held symbol keeps its last mark once the quote feed moves on');
   assert.ok(calls.renderSelectedChain > chainBefore2, 'the subscribe callback re-renders the chain on a new quote');
+  get('ingestSnapshotQuotes')({
+    symbol: 'SPY', date: '2026-09-23', underlying_price: 670.2, timestamp: '2026-09-23T13:04:00Z', rows: [],
+  });
+  assert.equal(get('spotMarks')['SPY:2026-09-23'], 670.2, 'a SPY snapshot marks its own underlying, never QQQ');
+  assert.equal(get('spotMarks')['QQQ:2026-09-23'], 600.1, 'the QQQ mark is untouched by a SPY snapshot');
 
   // --- updateQuoteInterests: the open position + visible contracts are wanted. ---
   vm.runInContext(`lastData = ${JSON.stringify({ underlying_price: 600.1, rows: [{ Strike: 600, Type: 'call', OptionSymbol: SYM }] })}`, context);
@@ -370,6 +428,15 @@ const INFO = { sym: SYM, strike: 600, type: 'call', exp: '2026-09-18' };
   nextResponse = new Error('network down');
   await get('fetchSpyHealth')();
   assert.equal(els['spy-health'].textContent, 'SPY: unavailable');
+
+  // --- renderPaper: mixed QQQ + SPY positions render distinctly, regardless of the selected chain. ---
+  set('session', { username: 'owen', balance_cash: 10000, trades: [
+    trade({ qty: 2, price: 5 }),
+    trade({ sym: 'SPY261106C00700000', strike: 700, type: 'call', exp: '2026-11-06', qty: 1, price: 3 }),
+  ] });
+  get('renderPaper')();
+  assert.ok(els['paper-positions'].innerHTML.includes('QQQ 600 C'), 'the QQQ position renders');
+  assert.ok(els['paper-positions'].innerHTML.includes('SPY 700 C'), 'the SPY position renders beside it, not merged into QQQ');
 
   // --- renderPaper: no trades renders the empty state. ---
   set('session', { username: 'owen', balance_cash: 10000, trades: [] });

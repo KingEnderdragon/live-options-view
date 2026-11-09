@@ -271,8 +271,15 @@ async function executeTrade(info, side, qty, orderType = 'market', limitPrice = 
   try {
     trade = await requestExecution(info, normalized.value, executionRequestId);
   } catch (error) {
-    setTradePending(false, error.message);
-    showExecutionError(error.message);
+    // Only the ticket that submitted this order gets its status touched. If
+    // the user switched to a different ticket while the order was in flight,
+    // or closed the ticket, leave other tickets alone and surface the
+    // rejection in the hint instead.
+    if (ticketEl && ticketEl === submittedTicket) {
+      setTradePending(false, error.message);
+    } else {
+      showExecutionError(error.message, submittedTicket);
+    }
     announceOrderStatus(`${error.orderStatus || 'rejected'} order ${error.orderId || executionRequestId}: ${error.message}`, 'error');
     return;
   } finally {
@@ -295,8 +302,12 @@ function announceOrderStatus(message, state = '') {
   status.textContent = message;
 }
 
-function showExecutionError(message) {
-  if (ticketEl) return;
+// The hint is the rejection's home only when the ticket that submitted the
+// order is no longer open: while it is still open the error already shows
+// in that ticket's status line, and writing it into a *different* ticket
+// (opened after a switch) would blame the wrong order.
+function showExecutionError(message, submittedTicket = ticketEl) {
+  if (ticketEl && ticketEl === submittedTicket) return;
   const hint = document.getElementById('paper-hint');
   hint.textContent = `Execution rejected: ${message}`;
   hint.style.display = '';
