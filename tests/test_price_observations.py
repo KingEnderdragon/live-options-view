@@ -134,6 +134,17 @@ class ProducerObservations(unittest.TestCase):
         self.assertIsNone(row["chg_pct"])
         self.assertIsNone(row["prev_close"])
 
+    def test_daily_fallback_keeps_strip_display_parity(self):
+        # The compact strip showed no change for daily tiles before this work;
+        # the dated pair is carried in reference for the overview consumer.
+        row = self.publish({}, {"AAPL": observation(price=101)})["AAPL"]
+        self.assertEqual(row["reference"]["value"], 100)
+        self.assertEqual(row["reference"]["price_basis"], "daily_bar_close")
+        self.assertIsNone(row["prev_close"])
+        self.assertIsNone(row["chg_pct"])
+        dx = self.publish({"AAPL": {"last": 102, "last_ts": NEW, "prev_close": 100}})["AAPL"]
+        self.assertEqual((dx["prev_close"], dx["chg_pct"]), (100, 2.0))
+
     def test_zero_reference_retained_without_fabricating_percentage(self):
         row = self.publish({"AAPL": {"last": 101, "last_ts": NEW, "prev_close": 0}})["AAPL"]
         self.assertEqual(row["reference"]["value"], 0)

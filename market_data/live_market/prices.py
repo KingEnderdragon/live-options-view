@@ -253,6 +253,13 @@ def _change(row):
         prev = _finite(reference.get("value"))
     else:
         prev = None
+    # The compact strip has never shown a change for the daily-fallback tiles.
+    # Keep that display contract unchanged: the dated pair travels in
+    # `reference`, where the overview consumer reports it with its real basis.
+    if row.get("origin_source", row.get("source")) != "dxlink":
+        row["prev_close"] = None
+        row["chg_pct"] = None
+        return
     row["prev_close"] = prev
     row["chg_pct"] = round((row["price"] - prev) / prev * 100, 2) if row.get("price") is not None and prev is not None and prev > 0 else None
 
