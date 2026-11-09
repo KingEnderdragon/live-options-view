@@ -62,6 +62,8 @@ class Account:
     password: str = field(repr=False)
     strategy_id: str
     params: dict[str, Any] = field(default_factory=dict)
+    paper_margin_limit: float = 1.0
+    paper_financing_rate: float = 0.0
 
     def __repr__(self) -> str:  # keep passwords out of tracebacks and logs
         return f"Account(alias={self.alias!r}, username={self.username!r}, strategy_id={self.strategy_id!r})"
@@ -214,6 +216,12 @@ def load_accounts(
             if not entry.get("password_env"):
                 missing.append(f"{entry['alias']}→no password or password_env")
             continue
+        margin_limit = float(entry.get("paper_margin_limit", 1.0))
+        financing_rate = float(entry.get("paper_financing_rate", 0.0))
+        if not 1.0 <= margin_limit <= 4.0:
+            raise ValueError(f"Account {entry['alias']}: paper_margin_limit must be 1..4")
+        if not 0.0 <= financing_rate <= 1.0:
+            raise ValueError(f"Account {entry['alias']}: paper_financing_rate must be 0..1")
         accounts.append(
             Account(
                 alias=entry["alias"],
@@ -221,6 +229,8 @@ def load_accounts(
                 password=password,
                 strategy_id=entry["strategy_id"],
                 params=entry.get("params", {}),
+                paper_margin_limit=margin_limit,
+                paper_financing_rate=financing_rate,
             )
         )
 

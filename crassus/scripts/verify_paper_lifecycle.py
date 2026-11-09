@@ -39,9 +39,11 @@ import crassus.durability as durability  # noqa: E402
 import crassus.audit as audit_module  # noqa: E402
 import crassus.client as client_module  # noqa: E402
 
-durability.sync_directory = lambda _path: None
-audit_module.sync_directory = lambda _path: None
-client_module.sync_directory = lambda _path: None
+if sys.platform == "win32":
+    # Windows cannot fsync a directory; POSIX must exercise the real helper.
+    durability.sync_directory = lambda _path: None
+    audit_module.sync_directory = lambda _path: None
+    client_module.sync_directory = lambda _path: None
 
 from crassus import clock  # noqa: E402
 from crassus.audit import Outcome  # noqa: E402
