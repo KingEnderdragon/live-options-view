@@ -31,6 +31,9 @@ jobs:
       - name: Run OI-skew per-account tracker suite (#107)
         working-directory: crassus
         run: python scripts/verify_oi_skew_accounts.py
+      - name: Run immutable market-readings join suite (#107)
+        working-directory: crassus
+        run: python scripts/verify_market_readings_join.py
       - name: Run reddit_sentiment_qqq strategy suite
         working-directory: crassus
         run: python scripts/verify_reddit_sentiment.py

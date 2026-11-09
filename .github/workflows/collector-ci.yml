@@ -14,6 +14,12 @@ on:
       - "tests/test_price_observations.py"
       - "tests/test_price_lane.py"
       - "tests/test_snapshot_provenance.py"
+      - "tests/test_market_readings.py"
+      - "tests/test_market_readings_series.py"
+      - "research/market_readings_series.py"
+      - "research/historical_archive_parity.py"
+      - "research/archive_qualification.py"
+      - "research/archive_sample_fetch.py"
       - "tests/test_probe_cross_market_symbols.py"
       - "market_data/live_market/probe_oauth.py"
       - "market_data/tradier/probe.py"
@@ -50,6 +56,13 @@ on:
       - "tests/test_market_overview.py"
       - "tests/test_price_observations.py"
       - "tests/test_price_lane.py"
+      - "tests/test_snapshot_provenance.py"
+      - "tests/test_market_readings.py"
+      - "tests/test_market_readings_series.py"
+      - "research/market_readings_series.py"
+      - "research/historical_archive_parity.py"
+      - "research/archive_qualification.py"
+      - "research/archive_sample_fetch.py"
       - "tests/test_probe_cross_market_symbols.py"
       - "market_data/live_market/probe_oauth.py"
       - "market_data/tradier/probe.py"
@@ -109,6 +122,10 @@ jobs:
         run: python -m unittest discover -s tests -p test_price_lane.py -v
       - name: Run snapshot price provenance suite (#146)
         run: python -m unittest discover -s tests -p test_snapshot_provenance.py -v
+      - name: Run reference market-readings suite (#107)
+        run: python -m unittest discover -s tests -p test_market_readings.py -v
+      - name: Run market-readings replay series suite (#107)
+        run: python -m unittest discover -s tests -p test_market_readings_series.py -v
       - name: Run full overview activation suite (#132)
         run: python -m unittest discover -s tests -p test_overview_activation.py -v
       - name: Run cross-market symbol probe safety suite (#132)

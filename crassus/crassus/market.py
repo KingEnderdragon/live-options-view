@@ -192,6 +192,18 @@ def _snapshot_key(payload: dict[str, Any]) -> tuple[str | None, str]:
     return key, "valid" if len(time_part) == 12 else "legacy_key"
 
 
+def _readings_digest(readings: list[dict[str, Any]]) -> str:
+    """Canonical digest over the collector's reference readings.
+
+    Must match `market_data.overview.readings.readings_digest` exactly: sorted
+    keys, compact separators, ASCII. The two live on opposite sides of the
+    collector/Crassus deployment boundary, so the cross-boundary equality is
+    asserted in `tests/test_market_readings.py`.
+    """
+    canonical = json.dumps(readings, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
 @dataclass(frozen=True)
 class MarketSnapshot:
     """One immutable read of the durable option board."""
@@ -207,6 +219,13 @@ class MarketSnapshot:
     underlying_market: UnderlyingMarket | None = None
     snapshot_key: str | None = None
     snapshot_key_status: str = "absent"
+    # The collector's reference readings travel with the board they describe.
+    # They are carried verbatim (not interpreted here) so a decision can join
+    # the exact observation by key + digest instead of copying values into
+    # unrelated strategies' records.
+    readings: tuple[dict[str, Any], ...] = ()
+    readings_digest: str | None = None
+    readings_status: str = "absent"
 
     def __post_init__(self) -> None:
         # Direct construction must not publish a key with the default
@@ -221,6 +240,16 @@ class MarketSnapshot:
     @classmethod
     def from_payload(cls, url: str, payload: dict[str, Any], raw: bytes) -> "MarketSnapshot":
         snapshot_key, key_status = _snapshot_key(payload)
+        payload_readings = payload.get("market_readings")
+        if isinstance(payload_readings, list):
+            readings = tuple(payload_readings)
+            digest = _readings_digest(list(readings))
+            published = payload.get("market_readings_digest")
+            readings_status = ("digest_mismatch" if published and published != digest else "valid")
+        else:
+            readings = ()
+            digest = None
+            readings_status = "absent" if payload_readings is None else "invalid"
         return cls(
             url=url,
             fetched_at=clock.iso_utc(),
@@ -233,7 +262,29 @@ class MarketSnapshot:
             snapshot_key=snapshot_key,
             snapshot_key_status=key_status,
             underlying_market=UnderlyingMarket.from_payload(payload.get("underlying_market")),
+            readings=readings,
+            readings_digest=digest,
+            readings_status=readings_status,
         )
+
+    @property
+    def readings_join(self) -> dict[str, Any]:
+        """Audit-only join from this decision's snapshot to its readings.
+
+        The digest identifies the exact reference-reading list and the snapshot
+        key identifies the archived input; a replay re-hashes the fetched
+        `market_readings` to verify the link. No values are copied into a
+        strategy record that did not use them.
+        """
+        return {
+            "schema_version": "market_readings_join.v1",
+            "snapshot_key": self.snapshot_key,
+            "snapshot_key_status": self.snapshot_key_status,
+            "snapshot_timestamp": self.timestamp,
+            "readings_digest": self.readings_digest,
+            "reading_ids": [r.get("reading_id") for r in self.readings],
+            "status": self.readings_status,
+        }
 
     @property
     def provenance(self) -> str:

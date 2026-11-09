@@ -49,6 +49,19 @@ Crassus is a separate deployable with its own dependencies and strategy state.
   receipt and only when both sides carry one, so a fresh ask cannot rejuvenate
   an older bid or an old last trade. Historical CSVs written before the
   sidecar have no recoverable per-price provenance and are not backfilled.
+- `intraday/latest.json` and each provenance sidecar carry `market_readings`:
+  six `market_reading.v1` **reference** readings (VWAP, RVOL, reference
+  momentum, put/call open-interest ratio, max pain, and the fixed 2%
+  near-money OI skew) computed from the same board and underlying-market
+  values the strategies see. They carry units, effective calculation
+  parameters, the exact snapshot identity, freshness and explicit
+  missing/zero semantics, and exist without any bot. A
+  `market_readings_digest` (canonical SHA-256) lets a Crassus decision record
+  join the exact observation by key and digest instead of a mutable
+  `latest.json`; replay is `research/market_readings_series.py` over the
+  sidecars. Reference readings never feed a strategy decision; account
+  thresholds, baselines, bands, trading momentum and the buy-only
+  Black-Scholes annotation stay bot-local.
 - Live bid/ask requests use the in-memory quote server through the Worker's
   `/api/live-quotes` route. That transport does not write an R2 object. Stored
   snapshots support other readings and recovery; they are not the live quote feed.

@@ -17,6 +17,7 @@ from typing import Any, Optional
 
 import pandas as pd
 
+from ..overview.readings import build_snapshot_readings, finish_publication, readings_digest
 from . import market_signals as ms
 from .config import (
     ET,
@@ -493,6 +494,32 @@ def take_snapshot(s3, feed: DXLinkFeed, strikes: list[dict],
         column_count=len(df.columns), publication_status="pending",
         publication_reason=None,
     )
+    readings = build_snapshot_readings(
+        rows=rows, symbol=us.symbol, underlying=underlying, snapshot_key=csv_key,
+        snapshot_timestamp=ts_utc.isoformat(), calculated_at=ts_utc,
+        freshness=underlying_market["freshness"],
+        observed_at=selection.provider_observed_at,
+        market=underlying_market,
+        parameters={
+            "vwap": {"method": "snapshot_weighted_volume_delta",
+                     "price_basis": selection.basis},
+            "rvol": {"bucket_minutes": RVOL_BUCKET_MINUTES,
+                     "lookback_days": RVOL_LOOKBACK_DAYS,
+                     "min_days_required": RVOL_MIN_DAYS_REQUIRED},
+            "momentum": {"lookback_minutes": MOMENTUM_LOOKBACK_MINUTES,
+                         "max_anchor_overshoot_minutes": MOMENTUM_MAX_ANCHOR_OVERSHOOT_MIN,
+                         "neutral_band_pct": MOMENTUM_NEUTRAL_BAND_PCT,
+                         "neutral_band_use": "display_only"},
+        },
+        partial_session=bool(underlying_market.get("vwap_partial_session")),
+    )
+    # Durable per-snapshot VWAP/RVOL/momentum plus the reference readings; the
+    # same readings travel in latest.json so a researcher needs no bot, and the
+    # digest is what a Crassus decision joins to. The digest is computed after
+    # publication status is stamped (see below), so it matches the published
+    # envelopes exactly.
+    provenance["market"] = underlying_market
+    provenance["market_readings"] = readings
 
     if not us.first_snapshot_written:
         first_key = f"{us.day_prefix(date_str)}first.csv"
@@ -510,8 +537,19 @@ def take_snapshot(s3, feed: DXLinkFeed, strikes: list[dict],
     if bid_count == 0:
         log.warning(f"{us.latest_key} NOT updated -- no option data (DXLink feed down)")
         provenance["publication"] = {"status": "archived_unpublished", "reason": "no_option_quotes"}
+        finish_publication(readings, published_at=None, status="archived_unpublished",
+                           reason="no_option_quotes")
+        provenance["market_readings_digest"] = readings_digest(readings)
         _put_snapshot_provenance(s3, provenance)
         return
+
+    # The payload is only observable if the write succeeds, so its readings
+    # carry the publication attempt time as `published_at`; a failed write
+    # leaves no payload and the sidecar records `archived_unpublished`.
+    publication_time = datetime.now(timezone.utc)
+    finish_publication(readings, published_at=publication_time, status="published")
+    readings_sha = readings_digest(readings)
+    provenance["market_readings_digest"] = readings_sha
 
     payload = {
         "symbol":           us.symbol,
@@ -524,6 +562,8 @@ def take_snapshot(s3, feed: DXLinkFeed, strikes: list[dict],
         "snapshot_key":     csv_key,
         "rows":             rows,
         "underlying_market": underlying_market,
+        "market_readings":  readings,
+        "market_readings_digest": readings_sha,
     }
     if us.symbol == "SPY":
         payload["subscription_coverage"] = _spy_subscription_coverage(
@@ -538,11 +578,14 @@ def take_snapshot(s3, feed: DXLinkFeed, strikes: list[dict],
         )
         counters.inc_snapshot(ts_utc.isoformat())
         tracker.record()
-        provenance["latest_published_at"] = datetime.now(timezone.utc).isoformat()
+        provenance["latest_published_at"] = publication_time.isoformat()
         provenance["publication"] = {"status": "published", "reason": None}
         log.info(f"-> {us.latest_key} updated")
     except Exception as e:
         provenance["publication"] = {"status": "archived_unpublished", "reason": "latest_write_failed"}
+        finish_publication(readings, published_at=None, status="archived_unpublished",
+                           reason="latest_write_failed")
+        provenance["market_readings_digest"] = readings_digest(readings)
         _put_snapshot_provenance(s3, provenance)
         log.error(f"latest.json upload failed: {e}")
         counters.inc_failure()
