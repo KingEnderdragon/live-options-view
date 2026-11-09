@@ -263,6 +263,53 @@ def _observed_spy_price_with_basis(quote: dict) -> tuple[float | None, str | Non
     return None, None, None
 
 
+def _older_observed(*pairs: tuple[str | None, str | None]) -> str | None:
+    """Provider event time for a two-sided midpoint: only when both sides
+    carry one, and then the older side -- a fresh half-quote must not make
+    an old half look observed. Unknown stays None; nothing here is inferred
+    from the collector receipt clock. Mirrors Brian #184's _older_observed
+    (UnderlyingSelection.provider_observed_at)."""
+    if not all(ts for _, ts in pairs):
+        return None
+    parsed = []
+    for _, ts in pairs:
+        try:
+            parsed.append((datetime.fromisoformat(ts), ts))
+        except (TypeError, ValueError):
+            return None
+    return min(parsed, key=lambda item: item[0])[1]
+
+
+def _provider_observed_spy_price(quote: dict) -> tuple[float | None, str | None, str | None]:
+    """Return the selected SPY input and its PROVIDER-observed time.
+
+    The price and basis are selected exactly as _observed_spy_price_with_basis
+    (same input, same order), so the provider time always describes the same
+    price the receipt-time helper returns. The provider time is the
+    provider's own event time for that input -- never the collector receipt
+    time: a two-sided midpoint needs both sides' provider times (older
+    wins); a last trade needs its own last_observed_at; anything else has
+    no provider time (None). A remembered/carried-forward spot is never
+    stamped with a feed time. Use this for settlement marks, which must be
+    irreversible provider observations, not fresh receipts of unknown-age
+    prices. Returns (price, provider_observed_at, basis)."""
+    price, _receipt, basis = _observed_spy_price_with_basis(quote)
+    if price is None:
+        return None, None, None
+    if basis == "bid_ask_midpoint":
+        provider = _older_observed(
+            ("bid", quote.get("bid_observed_at")), ("ask", quote.get("ask_observed_at")))
+    elif basis == "last_trade":
+        provider = quote.get("last_observed_at")
+        try:
+            datetime.fromisoformat(provider)
+        except (TypeError, ValueError):
+            provider = None
+    else:
+        provider = None
+    return price, provider, basis
+
+
 def _fresh_spy_spot(quote: dict, now: datetime) -> tuple[float | None, str | None]:
     """Accept a finite, positive SPY feed price observed within the stale threshold."""
     price, observed_at = _observed_spy_price(quote)
@@ -302,6 +349,8 @@ __all__ = [
     "start_live_quote_server",
     "_observed_spy_price",
     "_observed_spy_price_with_basis",
+    "_older_observed",
+    "_provider_observed_spy_price",
     "_fresh_spy_spot",
     "_select_spy_strikes",
     "_spy_subscription_coverage",

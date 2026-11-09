@@ -3,6 +3,17 @@
 Only a timed post-close observation on the expiry date qualifies. Early-close
 sessions without such an observation remain pending, requiring a separately
 verified mark rather than borrowing an intraday or different underlying price.
+
+`observed_at` must be the PROVIDER's own event time for the price being
+marked -- never the collector receipt time. A fresh receipt of a price
+whose provider observation time is unknown, pre-close, stale, future, or
+mixed across the two midpoint sides must stay pending; the publisher
+rejects all of those (unknown/stale/future fail the window/freshness
+checks, and a mixed midpoint is stamped with its older side, which is
+pre-close). Callers pair the price with its provider time via
+quotes._provider_observed_spy_price (Brian #184's
+UnderlyingSelection.provider_observed_at model); a remembered/carried-
+forward spot has no provider time and can never publish.
 """
 import json
 import math

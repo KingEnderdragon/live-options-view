@@ -35,7 +35,7 @@ from .config import (
     log,
 )
 from .feed import DXLinkFeed
-from .quotes import _fresh_spy_spot, _observed_spy_price_with_basis, _spy_subscription_coverage
+from .quotes import _fresh_spy_spot, _observed_spy_price_with_basis, _provider_observed_spy_price, _spy_subscription_coverage
 from .state import (
     Counters,
     QQQ_SESSION,
@@ -385,13 +385,16 @@ def take_snapshot(s3, feed: DXLinkFeed, strikes: list[dict],
     if us.symbol == "SPY":
         spy_price, spy_ts, spy_basis = _observed_spy_price_with_basis(quote)
         if spy_price is not None:
+            # Provider time pairs with the same input that produced the
+            # price: a midpoint needs both sides (older wins); a last trade
+            # needs its own event time. This is the time the settlement
+            # mark is stamped with -- never the collector receipt time.
+            _, spy_provider, _ = _provider_observed_spy_price(quote)
             selection = UnderlyingSelection(
                 price=spy_price,
                 receipt_ts=spy_ts,
                 basis=spy_basis,
-                provider_observed_at=_older_observed(
-                    ("bid", quote.get("bid_observed_at")), ("ask", quote.get("ask_observed_at")))
-                if spy_basis == "bid_ask_midpoint" else None,
+                provider_observed_at=spy_provider,
                 selection_rule="spy_quote_required_older_receipt",
                 contributing=_quote_contributing(quote),
             )
@@ -405,13 +408,20 @@ def take_snapshot(s3, feed: DXLinkFeed, strikes: list[dict],
             selection = UnderlyingSelection(
                 unavailable_reason="no_usable_spy_spot",
                 contributing=_quote_contributing(quote),
-            )    else:
+            )
+    else:
         selection = _select_underlying_quote(quote, us.last_spot[0], us.last_spot[1])
 
     underlying, spot_ts_str = selection.price, selection.receipt_ts
     atm = round(underlying) if underlying else None
     from .settlement_marks import publish_settlement_mark
-    publish_settlement_mark(s3, us.symbol, exp_date, underlying, spot_ts_str, ts_utc)
+    # Settlement marks need the PROVIDER's event time
+    # (selection.provider_observed_at), not the collector receipt time
+    # (spot_ts_str): a fresh receipt of an unknown-age price must stay
+    # pending, never become an irreversible mark. Unknown/preclose/stale/
+    # future/mixed-side provider evidence stays pending; a remembered spot
+    # has no provider time and can never publish. QQQ never publishes.
+    publish_settlement_mark(s3, us.symbol, exp_date, underlying, selection.provider_observed_at, ts_utc)
 
     underlying_market = _compute_underlying_market(
         s3, quote, underlying, spot_ts_str, ts_et, ts_utc, today, us, selection)
