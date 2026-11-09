@@ -28,6 +28,9 @@ jobs:
       - name: Run strategy-state lifecycle and per-account tracker suite
         working-directory: crassus
         run: python scripts/verify_strategy_state.py
+      - name: Run OI-skew per-account tracker suite (#107)
+        working-directory: crassus
+        run: python scripts/verify_oi_skew_accounts.py
       - name: Run reddit_sentiment_qqq strategy suite
         working-directory: crassus
         run: python scripts/verify_reddit_sentiment.py

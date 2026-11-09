@@ -57,16 +57,18 @@ re-derived ATM matching -- mirrors `reddit_sentiment_qqq` /
 fuller case for that shape. `_decide_core` takes an already-computed
 `SessionImbalanceTracker` and has no network dependency; it is what
 `scripts/verify_oi_skew.py` exercises directly. `_decide` is the thin
-per-account wrapper the registry calls, holding one tracker per process.
+per-account wrapper the registry calls, selecting that account's own tracker.
 """
 
 from __future__ import annotations
 
 import re
+import threading
 from typing import Any
 
 from ..client import Position
 from ..market import EXECUTION_QUOTE_MAX_AGE_S
+from ..replay import register_state_resetter
 from ..strategy import Decision, StrategyContext, register
 
 STRATEGY_ID = "oi_skew_qqq"
@@ -441,11 +443,58 @@ def _close(
     )
 
 
-_session_tracker = SessionImbalanceTracker()
+_trackers: dict[tuple[str, float], SessionImbalanceTracker] = {}
+_trackers_lock = threading.Lock()
+
+
+def _account_key(ctx: StrategyContext) -> str:
+    """Stable per-account identity for tracker ownership.
+
+    The runner passes `account_alias`; older callers and hand-built contexts
+    fall back to the account state's own username, and a context with neither
+    (a single-account backtest) uses one shared "unknown" key -- which is the
+    same single-tracker behavior this strategy had before multi-account
+    isolation.
+    """
+    alias = getattr(ctx, "account_alias", None)
+    if alias:
+        return str(alias)
+    username = (ctx.account_state or {}).get("username")
+    return str(username) if username else "unknown"
+
+
+def _tracker_for(ctx: StrategyContext, near_money_pct: float) -> SessionImbalanceTracker:
+    """One session tracker per (account, near-money band).
+
+    The imbalance is computed with that account's own `near_money_pct`, so
+    two accounts cannot share an anchor: a 4% band's reading is not
+    comparable to a 2% band's, and a later account consuming the snapshot the
+    earlier account already recorded is a new observation *for that account*,
+    not a duplicate of the first account's. The runner evaluates every
+    account once per snapshot; a shared tracker made every account after the
+    first look stale (#107 comment, F3).
+    """
+    key = (_account_key(ctx), float(near_money_pct))
+    with _trackers_lock:
+        tracker = _trackers.get(key)
+        if tracker is None:
+            tracker = _trackers[key] = SessionImbalanceTracker()
+        return tracker
+
+
+def _reset_state() -> None:
+    """Forget every account's session history (independent replay boundary)."""
+    with _trackers_lock:
+        _trackers.clear()
+
+
+register_state_resetter(STRATEGY_ID, _reset_state)
 
 
 def _decide(ctx: StrategyContext) -> Decision:
-    return _decide_core(ctx, _session_tracker)
+    params = ctx.params or {}
+    near_money_pct = params.get("near_money_pct", DEFAULT_NEAR_MONEY_PCT)
+    return _decide_core(ctx, _tracker_for(ctx, near_money_pct))
 
 
 _decide.strategy_id = STRATEGY_ID

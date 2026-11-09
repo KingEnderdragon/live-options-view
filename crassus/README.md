@@ -157,6 +157,15 @@ its timestamps are indistinguishable from a stalled feed.
 `scripts/verify_strategy_state.py` proves the boundary, the guard and that a
 stateless strategy is unaffected.
 
+`oi_skew_qqq` additionally keys its session tracker by (account alias,
+near-money band). The runner evaluates every account against the same snapshot,
+so a single shared tracker made every account after the first look like a
+stale/duplicate read and gave a different-band account another band's session
+anchor. `StrategyContext.account_alias` carries the runner's account identity;
+`scripts/verify_oi_skew_accounts.py` proves the per-account and per-band
+behavior, including two same-band accounts and one different-band account in
+one process.
+
 ## Account ↔ strategy mapping (target, once P3 lands)
 
 | Account | Strategy | |
