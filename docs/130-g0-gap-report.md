@@ -62,23 +62,34 @@ day (Oct 5: 5,580 rows/50 chains; Oct 6: 16,682/150; Oct 7: 1,856/50).
 
 ## Remaining acceptance checkboxes (from #130)
 
-- [ ] Weekly and overnight fixtures reproduce the approved D1/D2/D3/D5
+All seven offline boxes are now covered. Each maps to exact existing/passing
+tests in `docs/130-acceptance-matrix.md`. The matrix is the authoritative
+mapping; this section is the summary.
+
+- [x] Weekly and overnight fixtures reproduce the approved D1/D2/D3/D5
   policy, separate opening comparison, last-trading-day holiday rule,
-  weekend gaps, exact contract paths and endpoint arithmetic.
-- [ ] Calendar tests cover Friday/Monday holidays, weekend overnight gaps,
-  early close, DST and unavailable calendar coverage.
-- [ ] Expiring-before-exit, differing roots/deliverables, universe changes,
+  weekend gaps, exact contract paths and endpoint arithmetic. (Matrix Box 1:
+  8 tests.)
+- [x] Calendar tests cover Friday/Monday holidays, weekend overnight gaps,
+  early close, DST and unavailable calendar coverage. (Matrix Box 2: 6 tests;
+  unavailable coverage fails closed via
+  `test_calendar_rejects_missing_session_and_wrong_bounds`.)
+- [x] Expiring-before-exit, differing roots/deliverables, universe changes,
   missing session/endpoint and delayed first quote cases cannot fabricate
-  a continuous hold.
-- [ ] No-look-ahead tests prove adding later observations cannot alter
+  a continuous hold. (Matrix Box 3: 8 tests, including the new
+  `test_adjusted_deliverable_fails_closed`.)
+- [x] No-look-ahead tests prove adding later observations cannot alter
   entry-time qualification; fixed endpoint and hindsight best-flip results
-  remain distinctly labeled.
-- [ ] Quality/unknown/negative-return cases preserve the existing qualified
-  policy; full-universe ranking and legacy-output regressions pass.
-- [ ] A documented replay produces inspectable rankings with exact evidence,
-  coverage and calculation versions.
-- [ ] Monthly evidence requirements and current historical limitations are
-  documented.
+  remain distinctly labeled. (Matrix Box 4: 5 tests.)
+- [x] Quality/unknown/negative-return cases preserve the existing qualified
+  policy; full-universe ranking and legacy-output regressions pass. (Matrix
+  Box 5: 6 tests.)
+- [x] A documented replay produces inspectable rankings with exact evidence,
+  coverage and calculation versions. (Matrix Box 6: top-50 replay Oct 5–7
+  in `/tmp/replay-130-c`; prior 3-underlying sample in `/tmp/replay-130-b`.)
+- [x] Monthly evidence requirements and current historical limitations are
+  documented. (Matrix Box 7: monthly requirements + precise limitations;
+  no complete calendar week exists in the archive; Oct 8 week not invented.)
 - [x] D8 fixtures verify SPY/QQQ same-contract continuity across
   Friday-to-Monday expiry-selection changes, including Oct 16–19, 2026,
   within the approved two-chain limit. (Added
@@ -90,9 +101,12 @@ day (Oct 5: 5,580 rows/50 chains; Oct 6: 16,682/150; Oct 7: 1,856/50).
 
 ## Engineering-review gates (D6/D9/opening tolerance/continuity)
 
-These are implemented in `windows.py` with the design doc's recommended
-defaults, marked provisional (`decisions_status`). They are NOT owner-approved
-defaults. Concrete versioned definitions proposed for Chej's review:
+**Chej engineering review (2026-11-09) CONFIRMS these as v1 definitions for
+inert/offline use only.** They are recorded in `WindowPolicy.decisions_status`
+as `chej_engineering_reviewed_offline_only`. They are NOT Owen release
+approval. D1-D5, D7 and bounded D8 remain owner-approved. Cheapest entry
+stays separately labeled as retrospective hindsight. The 30-minute
+quote-side freshness limit is unchanged.
 
 - **D6 — rolling two/three-session windows (v1).** One window ending on every
   session; consecutive windows overlap and are labeled by their session span,
