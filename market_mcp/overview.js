@@ -224,9 +224,18 @@ function enrich(out, r, p, now) {
     carried || (now-Date.parse(observed))/1000 > STALE_SECONDS ? 'stale' : market === 'closed' ? 'closed' : market === 'unknown' ? 'unknown_market_state' : 'fresh';
   const observationAgeDays = r.observation_date ? (Date.parse(dateInZone(now,r.observation_timezone ?? 'UTC'))-Date.parse(r.observation_date))/86400000 : null;
   if (status === 'dated_close' && (carried || observationAgeDays > 1)) status = 'stale'; // Conservative; no unverified exchange calendar is inferred.
+  // "Live" means a recent provider event inside a verified market window for
+  // this instrument. A quote midpoint has no session discriminator, so a row
+  // without a reported session cannot claim it; neither can an event whose own
+  // timestamp falls outside any session window.
+  const observedWindow = observed ? (inst.profile === 'C' ? 'continuous_market'
+    : ['E','V','Y'].includes(inst.profile) ? equitySession(Date.parse(observed)) : 'unknown') : 'unknown';
+  const liveWindow = inst.profile === 'C' ? observedWindow === 'continuous_market'
+    : ['regular','premarket','postmarket'].includes(observedWindow);
   out.freshness = {...out.freshness, status, age_seconds:observed && !invalidTimes ? (now-Date.parse(observed))/1000 : null,
     basis:observed ? 'provider observed_at' : r.observation_granularity === 'day' ? 'provider observation_date; no synthetic intraday timestamp' : 'provider observation time unavailable',
-    observation_date:r.observation_date ?? null, observation_age_days:observationAgeDays, live:status === 'fresh' && r.source === 'dxlink' && !carried && !p.feed_stale && !r.refresh_error && r.observation_granularity === 'event' && ['last_trade','bid_ask_midpoint'].includes(r.price_basis)};
+    observation_date:r.observation_date ?? null, observation_age_days:observationAgeDays,
+    observation_window:observedWindow, live:status === 'fresh' && r.source === 'dxlink' && !carried && !p.feed_stale && !r.refresh_error && r.observation_granularity === 'event' && ['last_trade','bid_ask_midpoint'].includes(r.price_basis) && Boolean(r.session) && liveWindow};
   const reasons = [];
   if (out.price == null) reasons.push(r.price == null ? 'missing_current' : 'invalid_current');
   if (out.previous_close == null) reasons.push(ref.value == null ? 'missing_reference' : 'invalid_reference');
@@ -249,6 +258,9 @@ function enrich(out, r, p, now) {
   if (!['previous_close','prev_day_close','daily_bar_close','daily_close','official_close','settlement'].includes(ref.price_basis)) partial.push('reference_basis_unverified');
   if (!r.session || !ref.session) partial.push('observation_and_reference_session_unverified');
   if (market === 'unknown') partial.push('market_calendar_unverified');
+  // A daily bar may be the still-forming current session; its difference is a
+  // valid same-source daily comparison but is not a finalized close.
+  if (r.observation_granularity === 'day') partial.push('daily_bar_observation_not_final');
   if (out.previous_close === 0) partial.push('zero_reference');
   const absolute = unavailable ? null : out.price - out.previous_close;
   out.change = {status:unavailable ? 'unavailable' : partial.length ? 'partial' : 'ok', reasons:unavailable ? reasons : partial,

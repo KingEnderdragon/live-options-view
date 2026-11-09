@@ -13,6 +13,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import boto3
 import yfinance as yf
@@ -112,7 +113,14 @@ def fetch_yf_prices() -> dict:
                 continue
             stamp, price = valid[-1]
             zone = str(stamp.tzinfo) if stamp.tzinfo is not None else None
+            # The consumer refuses an artifact whose zone it cannot interpret, so a
+            # non-IANA zone string must not enter the public payload.
             if not zone:
+                result[label] = _failure("daily_observation_timezone_unknown")
+                continue
+            try:
+                ZoneInfo(zone)
+            except Exception:
                 result[label] = _failure("daily_observation_timezone_unknown")
                 continue
             now = datetime.now(timezone.utc).isoformat()

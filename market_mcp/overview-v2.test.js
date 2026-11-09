@@ -86,12 +86,23 @@ test('dated Yahoo daily bars retain date/timezone without manufacturing intraday
   const daily=event('AAPL',{source:'yfinance',source_symbol:'AAPL',price_basis:'daily_bar_close',observed_at:null,observation_date:'2026-10-01',observation_timezone:'America/New_York',observation_granularity:'day',session:'daily',collector_received_at:null,quote_ts:null});
   daily.reference={...daily.reference,source:'yfinance',observed_at:null,observation_date:'2026-09-30',observation_granularity:'day',session:'daily'};
   let r=await one(setup({AAPL:daily}));assert.equal(r.observed_at,null);assert.equal(r.observation_date,'2026-10-01');assert.equal(r.freshness.status,'dated_close');assert.equal(r.freshness.age_seconds,null);assert.equal(r.freshness.live,false);assert.equal(r.change.percent,1);
+  assert.equal(r.change.status,'partial');assert.ok(r.change.reasons.includes('daily_bar_observation_not_final'));
   r=await one(setup({AAPL:{...daily,observation_date:'2026-09-25'}}));assert.equal(r.freshness.status,'stale');
   for(const override of [{observation_date:'2026-02-30'},{observation_timezone:'Mars/Olympus'},{observed_at:'2026-10-01T20:00:00Z'},{observation_date:'tomorrow'}])assert.equal((await setup({AAPL:{...daily,...override}}).consumer.call('market_overview')).status,'failed');
 });
 
-test('unverified calendars stay unknown; crypto can be continuous and equity holiday is closed',async()=>{
-  let r=await one(setup({KOSPI:event('KOSPI')}),'KOSPI');assert.equal(r.freshness.market_state,'unknown');assert.equal(r.freshness.live,false);
+test('a quote midpoint without a reported session, or an event outside any session, is never live',async()=>{
+  const mid=event('SPY',{price_basis:'bid_ask_midpoint',session:null});
+  let r=await one(setup({SPY:mid}),'SPY');
+  assert.equal(r.freshness.status,'fresh');assert.equal(r.freshness.observation_window,'regular');assert.equal(r.freshness.live,false);
+  assert.ok(r.change.reasons.includes('observation_and_reference_session_unverified'));
+  r=await one(setup({SPY:{...mid,session:'regular'}}),'SPY');assert.equal(r.freshness.live,true);
+  const now=Date.parse('2026-10-02T02:00:10Z');
+  r=await one(setup({AAPL:event('AAPL',{observed_at:'2026-10-02T02:00:00Z'})},{now}),'AAPL');
+  assert.equal(r.freshness.observation_window,'closed');assert.equal(r.freshness.live,false);
+});
+
+test('unverified calendars stay unknown; crypto can be continuous and equity holiday is closed',async()=>{  let r=await one(setup({KOSPI:event('KOSPI')}),'KOSPI');assert.equal(r.freshness.market_state,'unknown');assert.equal(r.freshness.live,false);
   r=await one(setup({'BTC/USD':event('BTC/USD')}),'BTC/USD');assert.equal(r.freshness.market_state,'continuous_market');assert.equal(r.freshness.live,true);
   const now=Date.parse('2026-11-26T16:10:00Z');r=await one(setup({AAPL:event('AAPL',{observed_at:'2026-11-26T16:09:50Z'})},{now}));assert.equal(r.freshness.market_state,'closed');assert.equal(r.freshness.live,false);
 });
