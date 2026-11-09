@@ -73,7 +73,10 @@ const sandbox = {
   document: documentStub,
   window: { scrollX: 0, scrollY: 0 },
   ticketEl: null,
-  liveQuotes: new Map([['QQQ260918C600000', { bid: 1.1, ask: 1.2, mid: 1.15 }]]),
+  // The fixture quote carries fresh bid/ask timestamps: the ticket enables
+  // buy/sell only for a quote observed within the last 15s (#182), so a
+  // timestamp-less quote is a stale quote and both sides stay disabled.
+  liveQuotes: new Map([['QQQ260918C600000', { bid: 1.1, ask: 1.2, mid: 1.15, bid_ts: new Date().toISOString(), ask_ts: new Date().toISOString() }]]),
   tickerState: new Map([['QQQ', { bid: 600.0, ask: 600.2 }]]),
   instrumentLabel: info => `${info.sym} ${info.strike} ${info.type}`,
   fmtQ: x => '$' + Number(x).toFixed(2),

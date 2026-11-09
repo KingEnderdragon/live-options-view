@@ -104,16 +104,19 @@ assert.deepEqual(calls.setStatus, [['stale', '2026-11-07T21:00:00Z']], 'a missin
 assert.deepEqual(calls.clearChain, ['SPY spot price unavailable in the latest snapshot.'], 'a non-QQQ chain without a spot is cleared');
 assert.equal(calls.buildRows.length, 0, 'no rows built without a spot');
 
-// Non-QQQ with a spot: view-only — snapshot-relative colors, no positions,
-// no ticket clicks.
+// Non-QQQ with a spot: snapshot-relative colors, real positions from the
+// book, and ticket clicks — execution itself is gated by the ticket's fresh
+// quote check, not by hiding the ticket.
 reset();
 vm.runInContext('renderHeatmap(' + JSON.stringify(qqqData) + ", 'SPY')", context);
 assert.equal(calls.buildRows.length, 1, 'SPY render builds the heatmap once');
 assert.equal(calls.buildRows[0].ranges, 'RELATIVE-RANGES', 'non-QQQ render uses snapshot-relative ranges');
 assert.equal(JSON.stringify(calls.relative), JSON.stringify([qqqData.rows]), 'relativeOiRanges gets the snapshot rows');
-assert.equal(calls.buildRows[0].opts.getPosition('SPY260918C00600000'), 0, 'non-QQQ positions are always 0');
-assert.equal(calls.buildRows[0].opts.onCellClick, null, 'non-QQQ cells do not open tickets');
-assert.equal(els['chain-note'].textContent, 'view-only · OI colors relative to this snapshot', 'view-only note shown');
+assert.equal(calls.buildRows[0].opts.getPosition('SPY260918C00600000'), 0, 'non-QQQ positions come from the book (0 when none held)');
+assert.equal(typeof calls.buildRows[0].opts.onCellClick, 'function', 'non-QQQ cells open tickets');
+calls.buildRows[0].opts.onCellClick({ type: 'click' }, { Strike: 600 });
+assert.equal(calls.openTicket.length, 1, 'a SPY cell click opens a ticket');
+assert.equal(els['chain-note'].textContent, 'OI colors relative to this snapshot · execution requires a fresh contract quote', 'non-QQQ note names the fresh-quote gate');
 assert.equal(els['price'].textContent, '$600.10', 'header still shows the spot');
 
 console.log('render heatmap: hash pinned, extraction verified, QQQ + SPY + no-spot paths passed');
