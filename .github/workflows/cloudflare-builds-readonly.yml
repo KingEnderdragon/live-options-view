@@ -1,0 +1,141 @@
+name: Cloudflare Builds read-only diagnostic
+
+# Manual, read-only inspection only. Every request is a GET; this workflow
+# never creates, updates, cancels or deploys a Worker or build.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Inspect Worker tag, build settings, builds and deployments
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: 413bc8abe4485cf2a2e0d9f534436ade
+          WORKER_NAME: live-options-view
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          api="https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}"
+          status=0
+
+          # Print only HTTP status and sanitized API error fields. Never print
+          # headers, the token, environment variables or a raw response body.
+          get() {
+            local path="$1" out="$2" code
+            code="$(curl -sS --max-time 30 --retry 2 --retry-delay 1 \
+              -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+              -o "$out" -w '%{http_code}' "${api}${path}")" || code="000"
+            printf '%s' "$code"
+          }
+
+          report_error() {
+            local label="$1" code="$2" file="$3"
+            printf '%s_http=%s\n' "$label" "$code"
+            if [ -s "$file" ]; then
+              jq -c '{success, errors: [.errors[]? | {code, message}]}' "$file" 2>/dev/null || true
+            fi
+          }
+
+          code="$(get '/workers/scripts?per_page=100' "$tmp/scripts.json")"
+          if [ "$code" != "200" ]; then
+            report_error worker_scripts "$code" "$tmp/scripts.json"
+            exit 1
+          fi
+
+          tag="$(jq -er --arg name "$WORKER_NAME" \
+            '.result[] | select(.id == $name) | .tag' "$tmp/scripts.json")"
+          printf 'worker_name=%s\nworker_tag=%s\n' "$WORKER_NAME" "$tag"
+
+          code="$(get "/builds/workers/${tag}" "$tmp/settings.json")"
+          if [ "$code" = "200" ]; then
+            jq -c '{
+              repository: {
+                provider_type: .result.git_repository.provider_type,
+                repo_name: .result.git_repository.repo_name,
+                repo_id: .result.git_repository.repo_id,
+                branch: .result.git_repository.branch
+              },
+              production_settings: {
+                build_command: .result.production_settings.build_command,
+                deploy_command: .result.production_settings.deploy_command,
+                root_directory: .result.production_settings.root_directory,
+                build_token_uuid: .result.production_settings.build_token_uuid
+              },
+              previews_enabled: .result.previews_enabled,
+              previews_base_config: {
+                build_command: .result.previews_base_config.build_command,
+                deploy_command: .result.previews_base_config.deploy_command,
+                root_directory: .result.previews_base_config.root_directory
+              }
+            }' "$tmp/settings.json"
+          else
+            report_error build_settings "$code" "$tmp/settings.json"
+            status=1
+          fi
+
+          code="$(get "/builds/workers/${tag}/builds?per_page=100" "$tmp/builds.json")"
+          if [ "$code" = "200" ]; then
+            jq -c '[(.result // [])[] | {
+              build_uuid,
+              status,
+              build_outcome,
+              created_on,
+              branch: (.build_trigger_metadata.branch // null),
+              commit_hash: (.build_trigger_metadata.commit_hash // null),
+              trigger_type: (.build_trigger_metadata.build_trigger_source // .build_trigger_metadata.trigger_type // null)
+            }]' "$tmp/builds.json"
+          else
+            report_error builds "$code" "$tmp/builds.json"
+            status=1
+          fi
+
+          # The official TriggerResponse schema exposes lifecycle as deleted_on
+          # (null means active); it has no disabled or status property. active
+          # is derived, not sent back to Cloudflare.
+          code="$(get "/builds/workers/${tag}/triggers" "$tmp/triggers.json")"
+          if [ "$code" = "200" ]; then
+            jq -c '[(.result // [])[] | {
+              trigger_uuid,
+              trigger_name,
+              external_script_id,
+              branch_includes,
+              branch_excludes,
+              build_command,
+              deploy_command,
+              deleted_on,
+              active: (.deleted_on == null)
+            }]' "$tmp/triggers.json"
+          else
+            report_error triggers "$code" "$tmp/triggers.json"
+            status=1
+          fi
+
+          code="$(get "/workers/scripts/${WORKER_NAME}/deployments?per_page=20" "$tmp/deployments.json")"
+          if [ "$code" = "200" ]; then
+            jq -c '{
+              deployments: [
+                .result.deployments[] | {
+                  id,
+                  created_on,
+                  source,
+                  strategy,
+                  triggered_by: (.annotations["workers/triggered_by"] // null),
+                  versions: [.versions[] | {version_id, percentage}]
+                }
+              ]
+            }' "$tmp/deployments.json"
+          else
+            report_error deployments "$code" "$tmp/deployments.json"
+            status=1
+          fi
+
+          printf 'diagnostic_status=%s\n' "$status"
+          exit "$status"
