@@ -54,6 +54,20 @@ MAX_LIVE_QUOTE_SYMBOLS = 100
 R2_BUCKET       = os.environ.get("R2_BUCKET_NAME", "pub-4d5c916b8cb74ffb8c0abd7dfadb02cf")
 WEEKLY_R2_PREFIX = "raw/weekly"
 
+# -- continuous price lane (#178) ---------------------------------------------
+# The lane publishes prices outside the QQQ/SPY chain session. Setting
+# PRICE_LANE_ENABLED=0 restores the legacy in-session publisher; both paths are
+# mutually exclusive, so prices.json always has exactly one writer.
+PRICE_LANE_ENABLED = os.environ.get("PRICE_LANE_ENABLED", "1") != "0"
+PRICE_LANE_HEALTH_KEY = "intraday/price_lane_health.json"
+PRICE_LANE_HEALTH_SECS = 30
+PRICE_LANE_MIN_BACKOFF_SECS = 60
+PRICE_LANE_MAX_BACKOFF_SECS = 1800
+PRICE_LANE_MAX_AUTH_CYCLES = 4          # per retry window, then a long sleep
+PRICE_LANE_RETRY_WINDOW_SECS = 3600
+PRICE_LANE_CONTRACT_REFRESH_SECS = 6 * 3600  # daily/roll reconciliation while healthy
+ROLLING_REFERENCE_KEY = "intraday/price_references.json"
+
 # Keep the weekly archive byte-for-byte compatible with qqq-data-pipeline's
 # chain CSV field set and order.  The live 0DTE CSV intentionally retains its
 # additional VolDelta and macro columns.
@@ -169,6 +183,15 @@ __all__ = [
     "MAX_LIVE_QUOTE_SYMBOLS",
     "R2_BUCKET",
     "WEEKLY_R2_PREFIX",
+    "PRICE_LANE_ENABLED",
+    "PRICE_LANE_HEALTH_KEY",
+    "PRICE_LANE_HEALTH_SECS",
+    "PRICE_LANE_MIN_BACKOFF_SECS",
+    "PRICE_LANE_MAX_BACKOFF_SECS",
+    "PRICE_LANE_MAX_AUTH_CYCLES",
+    "PRICE_LANE_RETRY_WINDOW_SECS",
+    "PRICE_LANE_CONTRACT_REFRESH_SECS",
+    "ROLLING_REFERENCE_KEY",
     "PIPELINE_CHAIN_COLUMNS",
     "EIA_API_KEY",
     "EIA_STEO_URL",

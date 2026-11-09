@@ -1,4 +1,5 @@
 """Bounded source discovery and official daily Treasury observations."""
+import threading
 from datetime import datetime, timezone
 from xml.etree import ElementTree
 
@@ -9,40 +10,65 @@ from .config import PRICE_TICKERS, TASTY_BASE, log
 from .oauth import _bearer_headers
 
 RESOLVED_CONTRACTS = {}
+_RESOLVE_LOCK = threading.Lock()
+_RESOLVED_FOR_DATE = None
 TREASURY_URL = 'https://home.treasury.gov/resource-center/data-chart-center/interest-rates/pages/xml'
 
 
-def resolve_futures(access_token):
-    """Resolve provider-designated active months once per session; never guess a roll."""
+def resolve_futures(access_token, *, force=False):
+    """Resolve provider-designated active months once per UTC day; never guess a roll.
+
+    The continuous price lane and the option-chain session both need this, so a
+    repeated call on the same day is a cache read rather than a second network
+    resolution that could briefly clear the lane's symbols mid-publish.
+    """
+    global _RESOLVED_FOR_DATE
     futures = [r for r in INSTRUMENTS if r['profile'] == 'FU' and r['enabled']]
-    for r in futures:
-        PRICE_TICKERS[r['label']] = None
-    RESOLVED_CONTRACTS.clear()
-    try:
-        response = requests.get(TASTY_BASE + '/instruments/futures',
-            params={'product-code[]': [r['id'][4:].upper() for r in futures]},
-            headers=_bearer_headers(access_token), timeout=15)
-        response.raise_for_status()
-        items = response.json()['data']['items']
-        today = datetime.now(timezone.utc).date().isoformat()
+    today = datetime.now(timezone.utc).date().isoformat()
+    with _RESOLVE_LOCK:
+        if not force and _RESOLVED_FOR_DATE == today and RESOLVED_CONTRACTS:
+            return dict(RESOLVED_CONTRACTS)
         for r in futures:
-            root = r['id'][4:].upper()
-            candidates = [i for i in items if i.get('active-month') and i.get('active')
-                and not i.get('is-closing-only') and i.get('expiration-date', '') >= today
-                and i.get('future-product', {}).get('code') == root]
-            if len(candidates) != 1:
-                log.warning('overview future %s unresolved: %s active candidates', root, len(candidates))
-                continue
-            i = candidates[0]
-            symbol = i.get('streamer-symbol')
-            if not symbol or ':' not in symbol:
-                continue
-            RESOLVED_CONTRACTS[r['label']] = {'symbol': symbol, 'root': root,
-                'expiry': i['expiration-date'], 'exchange': symbol.split(':', 1)[1],
-                'selection': 'provider_active_month'}
-            PRICE_TICKERS[r['label']] = symbol
-    except Exception:
-        log.warning('overview futures discovery unavailable; no guessed contracts subscribed')
+            PRICE_TICKERS[r['label']] = None
+        RESOLVED_CONTRACTS.clear()
+        _RESOLVED_FOR_DATE = today
+        try:
+            response = requests.get(TASTY_BASE + '/instruments/futures',
+                params={'product-code[]': [r['id'][4:].upper() for r in futures]},
+                headers=_bearer_headers(access_token), timeout=15)
+            response.raise_for_status()
+            items = response.json()['data']['items']
+            for r in futures:
+                root = r['id'][4:].upper()
+                candidates = [i for i in items if i.get('active-month') and i.get('active')
+                    and not i.get('is-closing-only') and i.get('expiration-date', '') >= today
+                    and i.get('future-product', {}).get('code') == root]
+                if len(candidates) != 1:
+                    log.warning('overview future %s unresolved: %s active candidates', root, len(candidates))
+                    continue
+                i = candidates[0]
+                symbol = i.get('streamer-symbol')
+                if not symbol or ':' not in symbol:
+                    continue
+                RESOLVED_CONTRACTS[r['label']] = {'symbol': symbol, 'root': root,
+                    'expiry': i['expiration-date'], 'exchange': symbol.split(':', 1)[1],
+                    'selection': 'provider_active_month'}
+                PRICE_TICKERS[r['label']] = symbol
+        except Exception:
+            log.warning('overview futures discovery unavailable; no guessed contracts subscribed')
+        return dict(RESOLVED_CONTRACTS)
+
+
+def futures_snapshot():
+    """Atomic label->streamer-symbol view of the shared futures mapping.
+
+    The price lane compares this each cycle so a chain-session resolution (or a
+    daily roll) is reconciled into its own subscription instead of being read
+    only at authentication.
+    """
+    with _RESOLVE_LOCK:
+        return {r['label']: PRICE_TICKERS.get(r['label'])
+                for r in INSTRUMENTS if r['profile'] == 'FU' and r['enabled']}
 
 
 def treasury_observation(xml, now=None):
