@@ -2,7 +2,6 @@
 import pathlib
 import runpy
 import sys
-import tomllib
 import unittest
 from unittest.mock import patch, MagicMock
 
@@ -26,13 +25,6 @@ class Packaging(unittest.TestCase):
         self.assertEqual(command[:2], [sys.executable, '-u'])
         self.assertEqual(pathlib.Path(command[2]), ROOT / 'scripts/moo144_tradier_collector.py')
         self.assertTrue(pathlib.Path(command[2]).is_file())
-
-    def test_service_manifests_share_existing_image(self):
-        for component in ['collector', 'collectors/tradier', 'scanners/oa203']:
-            config = tomllib.loads((ROOT / component / 'railway.toml').read_text())
-            self.assertTrue((ROOT / config['build']['dockerfilePath']).is_file())
-            self.assertEqual(config['deploy']['restartPolicyType'].lower(), 'never')
-            self.assertNotIn('cronSchedule', config['deploy'])
 
 if __name__ == '__main__':
     unittest.main()

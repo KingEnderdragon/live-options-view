@@ -1,8 +1,0 @@
-[build]
-builder = "DOCKERFILE"
-dockerfilePath = "runtime/python/Dockerfile"
-
-[deploy]
-startCommand = "python -u -m collectors.tradier.launcher"
-restartPolicyType = "NEVER"
-# Schedule remains managed on the service.

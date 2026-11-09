@@ -1,8 +1,0 @@
-# OA-203 scanner. Schedule and activation stay provider-managed.
-[build]
-builder = "DOCKERFILE"
-dockerfilePath = "runtime/python/Dockerfile"
-
-[deploy]
-startCommand = "python -u scripts/oa203_return_scanner.py run"
-restartPolicyType = "NEVER"

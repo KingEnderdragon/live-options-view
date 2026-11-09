@@ -9,7 +9,7 @@ artifact layout is the contract they depend on.
 ## What runs
 
 The `moo169-tradier-collector` Railway service starts
-`python -u tradier_cron_launcher.py`. The 2026-09-18 deployment receipt records
+`python -u -m collectors.tradier.launcher`. The 2026-09-18 deployment receipt records
 its schedule as `15 12 * * 1-5` UTC and notes that acceptance was still open
 then; the schedule lives on the service, not in this repository
 ([operations guide](OPERATIONS.md)). The service's watch list covers `collectors/**` as of
@@ -55,7 +55,7 @@ at `af1758f`:
   archive filename families (`isPublicArchiveKey` in the same module). Nothing
   under `moo144/` is reachable through it.
 - The collector package (`collector/`) contains no Tradier reference, and
-  `collector.py` is a 14-line shim over it. The published site (`site/`) is
+  `python -m collector` dispatches through its module entry point. The published site (`site/`) is
   static HTML, JavaScript and Markdown with no code path that fetches these
   keys; four historical plan and receipt documents in `site/` mention the lane
   by name without reading from it.
@@ -76,4 +76,4 @@ test suite therefore checks coverage and evidence semantics
 
 If the lane is ever given a consumer, the artifacts above are what it would
 read. If it is retired, the things that go are the service, its schedule and
-`tradier_cron_launcher.py`; that decision belongs to Owen.
+`collectors/tradier/launcher.py`; that decision belongs to Owen.

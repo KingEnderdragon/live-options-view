@@ -2,7 +2,7 @@
 
 This service archives time-and-sales; it does not supply the displayed Live chain.
 See [archive consumers and compatibility](ARCHIVE_ONLY.md). The stable entry is
-[tradier_cron_launcher.py](../../tradier_cron_launcher.py), which launches the
+[launcher.py](launcher.py), which launches the
 [compatibility script](../../scripts/moo144_tradier_collector.py) over this package.
 
 ## Accepted service configuration
@@ -14,11 +14,12 @@ accepted configuration, not a continuously refreshed health report.
 |---|---|
 | Railway project / environment | `live-market-monitor` / `production` |
 | Service | `moo169-tradier-collector` |
-| Start | `python -u tradier_cron_launcher.py` |
+| Start | `python -u -m collectors.tradier.launcher` |
 | Cron | `15 12 * * 1-5` UTC; 04:15 Pacific standard time / 05:15 daylight time |
+| Build | Repository-root context; `runtime/python/Dockerfile`; service-managed build/start settings |
 | Runtime | One replica, persistent spool mounted at `/data` |
 | Restart | Railway cron policy `NEVER`; launcher supplies bounded child-process recovery |
-| Source watches | Existing launcher, collector/probe scripts, requirements and Dockerfile patterns plus `collectors/**` |
+| Source watches | `collectors/**`, `scripts/moo144_tradier_collector.py`, `scripts/moo144_tradier_probe.py`, `runtime/python/**` |
 
 The November 8 release readback recorded deployment
 `3a4875c9-b677-4c51-a86b-b547c71d18c5`, SUCCESS, `buildOnly=true`, source

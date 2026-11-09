@@ -66,7 +66,7 @@ Where the run happens, in the order ``run.main`` reads:
     run.py       main(): settings -> lease -> capture -> finalize -> exit code
 
 The entry point stays ``scripts/moo144_tradier_collector.py`` (the deployed
-start command and ``tradier_cron_launcher.py`` name that path); it re-exports
+start command and ``collectors/tradier/launcher.py`` name that path); it re-exports
 this package. ``STOP`` is deliberately *not* re-exported: the signal flag has
 one owner, ``config.STOP``, so setting a copy elsewhere cannot silently fail to
 stop capture.
