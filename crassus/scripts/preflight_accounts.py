@@ -37,8 +37,27 @@ from crassus.config import (  # noqa: E402
 from crassus.strategy import REGISTRY  # noqa: E402
 
 
+ACCEPTED_ERROR = "Username must be 3-40 characters: letters, numbers, underscore"
+REJECTED_ERROR = "Invalid bot registration key"
+
+
+def _worker_error(response) -> str | None:
+    try:
+        payload = json.loads(response.text or "")
+    except (TypeError, ValueError):
+        return None
+    return payload.get("error") if isinstance(payload, dict) else None
+
+
 def probe_registration_key(base_url: str, key: str, request=requests.post) -> dict:
-    """Classify the Worker's answer without mutating an account."""
+    """Classify the Worker's answer without mutating an account.
+
+    The only accepted proof is the real handleRegister contract: the supplied
+    header passed the key guard, and the intentionally empty body then failed
+    username validation with this exact 400 error. Any other 4xx (401, a
+    different 403, 404, 429, an unrelated 400) fails closed rather than
+    reporting readiness.
+    """
     try:
         response = request(
             base_url.rstrip("/") + "/api/register",
@@ -48,12 +67,21 @@ def probe_registration_key(base_url: str, key: str, request=requests.post) -> di
         )
     except requests.RequestException as exc:
         return {"status": "unreachable", "detail": type(exc).__name__}
-    body = (response.text or "").lower()
-    if response.status_code == 403 and "invalid bot registration key" in body:
-        return {"status": "rejected", "http_status": response.status_code}
-    if 400 <= response.status_code < 500:
-        return {"status": "accepted", "http_status": response.status_code}
-    return {"status": "unexpected", "http_status": response.status_code}
+    error = _worker_error(response)
+    status = response.status_code
+    if status == 400 and error == ACCEPTED_ERROR:
+        return {"status": "accepted", "http_status": status}
+    if status == 403 and error == REJECTED_ERROR:
+        return {"status": "rejected", "http_status": status}
+    if status == 401:
+        return {"status": "unauthorized", "http_status": status}
+    if status == 403:
+        return {"status": "forbidden", "http_status": status, "error": (error or "")[:160]}
+    if status == 404:
+        return {"status": "not_found", "http_status": status}
+    if status == 429:
+        return {"status": "rate_limited", "http_status": status}
+    return {"status": "unexpected", "http_status": status, "error": (error or "")[:160]}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -82,12 +110,11 @@ def main(argv: list[str] | None = None) -> int:
         "registration_key": "present" if BOT_REGISTRATION_KEY else "missing",
         "worker_probe": None,
     }
-    if args.probe:
-        if not BOT_REGISTRATION_KEY:
-            report["worker_probe"] = {"status": "not_attempted", "detail": "registration key missing"}
-        else:
-            base = args.base_url or "https://options.moopertonic.net"
-            report["worker_probe"] = probe_registration_key(base, BOT_REGISTRATION_KEY)
+    if not BOT_REGISTRATION_KEY:
+        report["worker_probe"] = {"status": "not_attempted", "detail": "registration key missing"}
+    elif args.probe:
+        base = args.base_url or "https://options.moopertonic.net"
+        report["worker_probe"] = probe_registration_key(base, BOT_REGISTRATION_KEY)
 
     if args.json:
         print(json.dumps(report, indent=2))
@@ -100,15 +127,15 @@ def main(argv: list[str] | None = None) -> int:
             print(f"UNKNOWN STRATEGY  {item['alias']}: {item['strategy_id']}")
         if report["worker_probe"]:
             print(f"worker probe: {report['worker_probe']['status']}")
-        if not gaps and not unregistered:
+        if not gaps and not unregistered and BOT_REGISTRATION_KEY:
             print("account provisioning: ready")
 
-    if gaps or unregistered:
+    if gaps or unregistered or not BOT_REGISTRATION_KEY:
         return 2
     probe = report["worker_probe"]
     if probe and probe["status"] == "rejected":
         return 3
-    if probe and probe["status"] in ("unreachable", "unexpected"):
+    if probe and probe["status"] != "accepted":
         return 4
     return 0
 

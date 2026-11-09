@@ -15,10 +15,20 @@ python scripts/preflight_accounts.py --probe
 
 It lists every active account whose `password_env` is absent, every
 `strategy_id` the runner does not register, whether the key is present, and
-what the Worker says about it. Exit codes: `0` ready, `2` account configuration
-missing, `3` Worker rejected the key, `4` Worker unreachable. The empty-body
-probe cannot create an account; a `400` means the key was accepted and body
-validation rejected the request.
+what the Worker says about it. Exit codes: `0` ready, `2` account or key
+configuration missing, `3` Worker rejected the key, `4` the Worker was
+unreachable or returned an auth, rate-limit, routing or otherwise unknown
+response. The empty-body probe cannot create an account.
+
+The only accepted proof is the current Worker's exact non-mutating validation
+response: HTTP `400` with `{"error":"Username must be 3-40 characters:
+letters, numbers, underscore"}`. That proves the supplied header passed the key
+guard, because the Worker checks the key before username validation; the empty
+body then fails validation. A different `400`, any `401`, a `403` with another
+body, `404`, `429`, a `5xx`, an HTML/proxy response or an unparsable body all
+fail closed and exit nonzero. A missing `BOT_REGISTRATION_KEY` is itself a
+configuration failure (`2`) and no HTTP request is sent, with or without
+`--probe`.
 
 ## Rotating the shared key
 
