@@ -1,0 +1,8 @@
+# Downloaded archive objects are evidence, not source.
+# The scripts and the two summary JSONs are tracked; everything else here is a
+# local cache that can be re-fetched by research/archive_sample_fetch.py and
+# research/historical_archive_parity.py.
+*
+!README.md
+!three_date_parity.json
+!intraday_sample_qualification.json
