@@ -11,6 +11,7 @@ contacts a provider, the Worker or an account. Replay metrics are checked by
 
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 from dataclasses import replace
@@ -50,7 +51,7 @@ def bars_from(closes: list[float], start: date = date(2025, 1, 2)) -> list[Daily
     for value in closes:
         while not is_trading_day(day):
             day += timedelta(days=1)
-        out.append(DailyBar(day, float(value), float(value), "fixture", float(value), float(value)))
+        out.append(DailyBar(day, float(value), float(value), "yahoo_chart_adjclose", float(value), float(value)))
         day += timedelta(days=1)
     return out
 
@@ -89,11 +90,11 @@ class Ctx:
                  params: dict | None = None):
         self.now_et = now or datetime(2025, 10, 13, 10, 0, tzinfo=ET)
         self.session_phase = session
-        self.account_state = {"username": "fixture", "balance_cash": cash}
+        self.account_state = {"username": "yahoo_chart_adjclose", "balance_cash": cash}
         self.book = Book([{
             "sym": "SPY", "side": "buy", "qty": position, "price": 500.0,
             "instrument_type": "share", "multiplier": 1,
-            "execution_request_id": "fixture",
+            "execution_request_id": "yahoo_chart_adjclose",
         }] if position else [])
         self.params = params or {"symbol": "SPY", "leverage": 2.0, "bar_cache_hours": 0}
         self.snapshot = None
@@ -125,7 +126,7 @@ def main() -> int:
     print("\n2. Completed-bar boundary")
     today = date(2026, 1, 5)
     sample = bars_from([100.0] * 200 + [101.0], start=date(2025, 1, 2))
-    sample_today = DailyBar(today, 101.0, 101.0, "fixture", 101.0, 101.0)
+    sample_today = DailyBar(today, 101.0, 101.0, "yahoo_chart_adjclose", 101.0, 101.0)
     complete = completed_bars(sample + [sample_today], datetime(2026, 1, 5, 16, 30, tzinfo=ET))
     check("today's bar is excluded even after the close", complete[-1].date == sample[-1].date,
           str(complete[-1].date))
@@ -192,7 +193,7 @@ def main() -> int:
         first = with_bars(ctx, baseline_bars(), root)
         check("fresh account is a no_trade", not first.is_trade, first.action)
         check("fresh account records baseline", "Fresh account" in first.reason, first.reason)
-        state = sma200.SmaState.load(sma200.state_path("fixture", root))
+        state = sma200.SmaState.load(sma200.state_path("yahoo_chart_adjclose", root))
         check("baseline persisted", state is not None and state.last_processed_bar_date is not None,
               str(state))
         # Add a new completed bull bar and evaluate the next open.
@@ -218,7 +219,7 @@ def main() -> int:
         with_bars(ctx_signal, bull_after_baseline(), root)
         again = with_bars(ctx_pos, bull_after_baseline(), root)
         check("same signal after fill does not place another order", not again.is_trade, again.action)
-        state = sma200.SmaState.load(sma200.state_path("fixture", root))
+        state = sma200.SmaState.load(sma200.state_path("yahoo_chart_adjclose", root))
         check("processed bar persisted after fill", state is not None and
               state.last_processed_bar_date == bull_after_baseline()[-1].date.isoformat(),
               str(state.last_processed_bar_date if state else None))
@@ -243,7 +244,7 @@ def main() -> int:
         waiting = with_bars(no_quote, bull_after_baseline(), root)
         check("missing quote is a no_trade", not waiting.is_trade, waiting.action)
         check("waiting reason names the quote", "No live quote" in waiting.reason, waiting.reason)
-        state = sma200.SmaState.load(sma200.state_path("fixture", root))
+        state = sma200.SmaState.load(sma200.state_path("yahoo_chart_adjclose", root))
         check("pending signal survives a quote miss", state is not None and state.pending is not None,
               str(state.pending if state else None))
 
@@ -276,24 +277,52 @@ def main() -> int:
             pending={"bar_date": baseline[-1].date.isoformat(), "target": "2x_long"},
             regime="cash",
         )
-        state.save(sma200.state_path("fixture", root))
+        state.save(sma200.state_path("yahoo_chart_adjclose", root))
         bull = bull_after_baseline()
         expected = expected_completed_session(now_after(bull[-1].date))
         call = with_bars(Ctx(position=0, now=now_after(bull[-1].date)), bull, root)
-        updated = sma200.SmaState.load(sma200.state_path("fixture", root))
+        updated = sma200.SmaState.load(sma200.state_path("yahoo_chart_adjclose", root))
         check("outdated pending signal is replaced by the latest session",
               call.is_trade and updated is not None and updated.pending is not None and
               updated.pending.get("bar_date") == expected.isoformat(),
               f"{call.action} {updated.pending if updated else None}")
 
-    print("\n8. Overnight-hold opt-in and flatten isolation")
+    print("\n8. Raw feed cannot masquerade as adjusted")
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        raw_bars = [replace(bar, source="yahoo_chart_raw_close") for bar in baseline_bars()]
+        raw = with_bars(Ctx(position=0, now=now_after(raw_bars[-1].date)), raw_bars, root)
+        check("all-raw feed is a no_trade", not raw.is_trade, raw.action)
+        check("all-raw metadata names raw basis",
+              raw.metadata["strategy_state"]["adjustment_basis"] == "raw_close",
+              str(raw.metadata["strategy_state"]["adjustment_basis"]))
+        cache_file = root / "sma200" / "SPY_daily.json"
+        check("cache stores the actual basis", json.loads(cache_file.read_text())["adjustment_basis"] == "raw_close")
+        cached_raw = with_bars(Ctx(position=0, now=now_after(raw_bars[-1].date)), raw_bars, root)
+        check("cached raw series stays no_trade", not cached_raw.is_trade, cached_raw.action)
+
+        unknown_file = root / "sma200" / "SPY_daily.json"
+        payload = json.loads(unknown_file.read_text())
+        payload["adjustment_basis"] = "unknown"
+        unknown_file.write_text(json.dumps(payload))
+        unknown = with_bars(Ctx(position=0, now=now_after(raw_bars[-1].date)), raw_bars, root)
+        check("unknown cached basis fails closed", not unknown.is_trade and
+              "adjustment basis" in unknown.reason.lower(), unknown.reason)
+
+        payload["adjustment_basis"] = "adjusted_close"  # metadata lies about raw bars
+        unknown_file.write_text(json.dumps(payload))
+        mixed_cache = with_bars(Ctx(position=0, now=now_after(raw_bars[-1].date)), raw_bars, root)
+        check("cached basis mismatch fails closed", not mixed_cache.is_trade and
+              "consistent" in mixed_cache.reason.lower(), mixed_cache.reason)
+
+    print("\n9. Overnight-hold opt-in and flatten isolation")
     from crassus.flatten import maybe_flatten
     ctx = Ctx(position=40, now=datetime(2026, 1, 5, 15, 50, tzinfo=ET))
     check("default flatten window still closes", maybe_flatten(ctx, {}) is not None)
     opted = maybe_flatten(ctx, {"overnight_hold": True})
     check("overnight_hold suppresses flatten", opted is None, str(opted))
 
-    print("\n9. Registry")
+    print("\n10. Registry")
     check("strategy is registered", get(sma200.STRATEGY_ID) is sma200.spy_sma200_double_or_out)
 
     print(f"\n{PASS} passed, {FAIL} failed")

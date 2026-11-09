@@ -45,3 +45,11 @@ liquidity, market-impact or margin-call model is included. The paper backend
 charges financing only at close of a leveraged round trip and does not model
 daily variation margin. No deployed account or live-session acceptance is
 claimed.
+
+The 5 bp slippage and 1 bp commission in this replay are **not** the paper
+fill convention. The live paper path fills at the next executable live
+quote's bid/ask (the spread is the cost and no separate 5/1 bp fee is
+deducted), and its financing is charged only when the leveraged position is
+closed. The replay executes at the next session's adjusted open as a daily
+proxy and accrues financing daily. These results are therefore a research
+comparison, not a fill-level equivalence claim.

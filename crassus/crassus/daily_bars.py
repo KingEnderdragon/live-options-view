@@ -152,6 +152,23 @@ def cache_path(root: Path, symbol: str) -> Path:
     return Path(root) / "sma200" / f"{symbol.upper()}_daily.json"
 
 
+def series_basis(bars: list[DailyBar]) -> str:
+    """Return the one consistent price basis, or fail closed.
+
+    The strategy accepts only the adjusted series. Raw and adjusted rows must
+    never be mixed in one signal window, and an unknown source is not silently
+    relabelled as adjusted.
+    """
+    if not bars:
+        raise DailyBarError("empty daily series has no adjustment basis")
+    sources = {bar.source for bar in bars}
+    if sources == {"yahoo_chart_adjclose"}:
+        return "adjusted_close"
+    if sources == {"yahoo_chart_raw_close"}:
+        return "raw_close"
+    raise DailyBarError(f"mixed or unknown adjustment basis: {sorted(sources)}")
+
+
 def load_cached_bars(root: Path, symbol: str, *, max_age_hours: float = DEFAULT_CACHE_HOURS,
                      now: datetime | None = None) -> list[DailyBar]:
     path = cache_path(root, symbol)
@@ -164,7 +181,7 @@ def load_cached_bars(root: Path, symbol: str, *, max_age_hours: float = DEFAULT_
             return []
         return [DailyBar(date.fromisoformat(item["date"]), float(item["close"]),
                          None if item.get("raw_close") is None else float(item["raw_close"]),
-                         item.get("source", "yahoo_chart_adjclose"),
+                         item.get("source", "unknown"),
                          None if item.get("open") is None else float(item["open"]),
                          None if item.get("adjusted_open") is None else float(item["adjusted_open"]))
                 for item in payload["bars"]]
@@ -172,15 +189,27 @@ def load_cached_bars(root: Path, symbol: str, *, max_age_hours: float = DEFAULT_
         return []
 
 
+def cached_adjustment_basis(root: Path, symbol: str) -> str:
+    """Read the stored basis without trusting or inventing one."""
+    path = cache_path(root, symbol)
+    try:
+        payload = json.loads(path.read_text())
+        basis = payload.get("adjustment_basis")
+        return basis if basis in ("adjusted_close", "raw_close") else "unknown"
+    except (OSError, ValueError, TypeError):
+        return "unknown"
+
+
 def save_cached_bars(root: Path, symbol: str, bars: list[DailyBar], now: datetime) -> None:
     path = cache_path(root, symbol)
     path.parent.mkdir(parents=True, exist_ok=True)
+    basis = series_basis(bars)
     payload = {
         "schema_version": 1,
         "symbol": symbol.upper(),
         "fetched_at": now.isoformat(),
         "bar_source": "yahoo_chart",
-        "adjustment_basis": "adjusted_close",
+        "adjustment_basis": basis,
         "bars": [bar.as_dict() for bar in bars],
     }
     tmp = path.with_suffix(".tmp")
@@ -196,21 +225,31 @@ def get_daily_bars(
     fetcher=fetch_yahoo_daily_bars,
     range_: str = DEFAULT_RANGE,
     cache_hours: float = DEFAULT_CACHE_HOURS,
-) -> tuple[list[DailyBar], str]:
-    """Return bars plus a cache status (``fresh``/``cached``/``fetched``).
+) -> tuple[list[DailyBar], str, str]:
+    """Return bars, cache status and the actual adjustment basis.
 
-    A failed refresh falls back to a cached series only while that series is
-    still within its freshness window; otherwise the strategy sees an explicit
-    error and waits rather than trading on an old or invented bar.
+    A cached series without a known basis is rejected rather than silently
+    treated as adjusted. A fetched raw series is returned with ``raw_close`` so
+    the strategy can reject it explicitly.
     """
     root = Path(state_root or os.environ.get("CRASSUS_DATA_ROOT", "."))
     cached = load_cached_bars(root, symbol, max_age_hours=cache_hours, now=now)
     if cached:
-        return cached, "cached"
+        basis = cached_adjustment_basis(root, symbol)
+        try:
+            source_basis = series_basis(cached)
+        except DailyBarError as exc:
+            raise DailyBarError(f"cached daily series is invalid: {exc}") from exc
+        if basis == "unknown" or basis != source_basis:
+            raise DailyBarError("cached daily series has no consistent adjustment basis")
+        return cached, "cached", basis
     try:
         bars = fetcher(symbol, range_=range_)
+        basis = series_basis(bars)
         save_cached_bars(root, symbol, bars, now)
-        return bars, "fetched"
+        return bars, "fetched", basis
+    except DailyBarError:
+        raise
     except Exception as exc:
         raise DailyBarError(f"daily bars unavailable for {symbol}: {exc}") from exc
 

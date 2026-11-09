@@ -119,6 +119,7 @@ class SmaState:
     last_signal: dict[str, Any] = field(default_factory=dict)
     last_reason: str = ""
     updated_at: str | None = None
+    adjustment_basis: str = "unknown"
 
     @classmethod
     def load(cls, path: Path) -> "SmaState | None":
@@ -132,6 +133,7 @@ class SmaState:
                 last_signal=raw.get("last_signal") or {},
                 last_reason=raw.get("last_reason", ""),
                 updated_at=raw.get("updated_at"),
+                adjustment_basis=raw.get("adjustment_basis", "unknown"),
             )
         except (OSError, ValueError, KeyError, TypeError):
             return None
@@ -195,7 +197,7 @@ def _public_state(state: SmaState, signal: SmaSignal | None, reason: str,
         "ask": ask,
         "pending": bool(state.pending),
         "reason": reason,
-        "adjustment_basis": "adjusted_close",
+        "adjustment_basis": state.adjustment_basis,
         "execution_convention": "next_regular_session_executable_quote",
     }
     return payload
@@ -232,7 +234,7 @@ def decide(ctx: StrategyContext, *, fetcher=None, state_dir: Path | None = None)
                       None, "unrelated_position", symbol=symbol, position=position)})
 
     try:
-        bars, cache_status = get_daily_bars(
+        bars, cache_status, basis = get_daily_bars(
             symbol,
             state_root=state_dir or DEFAULT_STATE_DIR,
             now=ctx.now_et,
@@ -242,8 +244,19 @@ def decide(ctx: StrategyContext, *, fetcher=None, state_dir: Path | None = None)
     except DailyBarError as exc:
         return no(f"Daily bars unavailable: {exc}",
                   meta={"strategy_state": _public_state(
-                      state or SmaState(activated_on=ctx.now_et.date().isoformat()),
+                      state or SmaState(activated_on=ctx.now_et.date().isoformat(),
+                                        adjustment_basis="unknown"),
                       None, "daily_bars_unavailable", symbol=symbol, position=position)})
+
+    if state is not None:
+        state.adjustment_basis = basis
+    if basis != "adjusted_close":
+        reason = (f"Daily series is {basis}; this strategy requires one complete "
+                  f"adjusted-close series. No trade.")
+        return no(reason, meta={"strategy_state": _public_state(
+            state or SmaState(activated_on=ctx.now_et.date().isoformat(),
+                              adjustment_basis=basis),
+            None, "adjustment_basis_unavailable", symbol=symbol, position=position)})
 
     from ..daily_bars import completed_bars
     completed = completed_bars(bars, ctx.now_et)
@@ -258,13 +271,15 @@ def decide(ctx: StrategyContext, *, fetcher=None, state_dir: Path | None = None)
             state.last_reason = reason
             state.save(path)
         return no(reason, meta={"strategy_state": _public_state(
-            state or SmaState(activated_on=ctx.now_et.date().isoformat()),
+            state or SmaState(activated_on=ctx.now_et.date().isoformat(),
+                              adjustment_basis=basis),
             None, "stale_daily_history", symbol=symbol, position=position)})
     if len(eligible) < DEFAULT_WINDOW + 1:
         return no(
             f"Insufficient completed daily bars ({len(eligible)}); need {DEFAULT_WINDOW + 1}.",
             meta={"strategy_state": _public_state(
-                state or SmaState(activated_on=ctx.now_et.date().isoformat()),
+                state or SmaState(activated_on=ctx.now_et.date().isoformat(),
+                                  adjustment_basis=basis),
                 None, "insufficient_history", symbol=symbol, position=position)},
         )
     window = eligible[-DEFAULT_WINDOW - 1:]
@@ -276,7 +291,8 @@ def decide(ctx: StrategyContext, *, fetcher=None, state_dir: Path | None = None)
             state.last_reason = reason
             state.save(path)
         return no(reason, meta={"strategy_state": _public_state(
-            state or SmaState(activated_on=ctx.now_et.date().isoformat()),
+            state or SmaState(activated_on=ctx.now_et.date().isoformat(),
+                              adjustment_basis=basis),
             None, "gap_in_daily_history", symbol=symbol, position=position)})
     completed = eligible
     latest = completed[-1]
@@ -301,6 +317,7 @@ def decide(ctx: StrategyContext, *, fetcher=None, state_dir: Path | None = None)
                          "bar_date": latest.date.isoformat()},
             last_reason="Fresh account warmed up; waiting for a new crossover.",
             updated_at=ctx.now_et.isoformat(),
+            adjustment_basis=basis,
         )
         state.save(path)
         return no(state.last_reason, meta={"strategy_state": _public_state(

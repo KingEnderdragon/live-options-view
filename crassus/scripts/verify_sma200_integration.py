@@ -72,7 +72,7 @@ def trading_days(count: int, start: datetime) -> list[datetime]:
 
 def bars(closes: list[float], start: datetime) -> list[DailyBar]:
     days = trading_days(len(closes), start)
-    return [DailyBar(d.date(), float(c), float(c), "integration_fixture", float(c), float(c))
+    return [DailyBar(d.date(), float(c), float(c), "yahoo_chart_adjclose", float(c), float(c))
             for d, c in zip(days, closes)]
 
 
@@ -147,8 +147,6 @@ def main() -> int:
         write_cache(TMP, bull_bars, now)
         runner._run_account(account, None, "open")
         after_buy = runner.sessions[account.alias].me()
-        print("DEBUG ledger", json.dumps(records(ledger_dir)[-2:], default=str)[:2000])
-        print("DEBUG state", (state_dir / "sma200" / "sma_integration.json").read_text() if (state_dir / "sma200" / "sma_integration.json").exists() else "absent")
         check("real Worker filled one 2x share entry", len(after_buy.trades) == 1, str(len(after_buy.trades)))
         check("entry is SPY shares at 2x negative cash",
               after_buy.trades[0]["sym"] == "SPY" and after_buy.trades[0]["instrument_type"] == "share"
