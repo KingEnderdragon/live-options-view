@@ -289,10 +289,16 @@ function enrich(out, r, p, now) {
   if (r.observation_granularity === 'day') partial.push('daily_bar_observation_not_final');
   if (out.previous_close === 0) partial.push('zero_reference');
   const absolute = unavailable ? null : out.price - out.previous_close;
-  out.change = {status:unavailable ? 'unavailable' : partial.length ? 'partial' : 'ok', reasons:unavailable ? reasons : partial,
-    absolute:round(absolute,6), absolute_unit:absolute == null ? null : USD_UNITS.has(inst.unit) || inst.unit === 'USD/share' ? 'USD' : inst.unit,
-    percent:absolute == null || out.previous_close === 0 || inst.change_unit === 'bps' || inst.asset_class === 'rates' ? null : round(100*absolute/out.previous_close,6),
-    bps:absolute != null && (inst.change_unit === 'bps' || inst.asset_class === 'rates') ? round(absolute*100,4) : null,
+  const pct = absolute == null || out.previous_close === 0 || inst.change_unit === 'bps' || inst.asset_class === 'rates' ? null : 100*absolute/out.previous_close;
+  const bps = absolute != null && (inst.change_unit === 'bps' || inst.asset_class === 'rates') ? absolute*100 : null;
+  // Finite inputs can still overflow an intermediate (1e308 against 1e-9), and
+  // JSON would silently turn a non-finite result into null downstream.
+  const nonfinite = [absolute, pct, bps].some(v => v != null && !Number.isFinite(v));
+  out.change = {status:nonfinite || unavailable ? 'unavailable' : partial.length ? 'partial' : 'ok',
+    reasons:nonfinite ? [...reasons, 'nonfinite_arithmetic'] : unavailable ? reasons : partial,
+    absolute:nonfinite ? null : round(absolute,6), absolute_unit:absolute == null ? null : USD_UNITS.has(inst.unit) || inst.unit === 'USD/share' ? 'USD' : inst.unit,
+    percent:nonfinite ? null : round(pct,6),
+    bps:nonfinite ? null : round(bps,4),
     reference_basis:ref.price_basis ?? null, reference_at:ref.observed_at ?? null, reference_session:ref.session ?? null,
     current_session:r.session ?? null, adjustment_basis:ref.adjustment_basis ?? null, collector_receipt_window:out.change.collector_receipt_window,
     derivation:{absolute:'consumer: normalized price - normalized reference.value',percent:'consumer: 100 x absolute / reference',bps:'consumer: normalized yield difference x 100'}};

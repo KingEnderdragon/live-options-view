@@ -125,6 +125,14 @@ test('a reference more than one exchange session old cannot produce a previous-c
   c=await one(setup({'BTC/USD':btc}),'BTC/USD');assert.notEqual(c.change.status,'unavailable');
 });
 
+test('a mathematically finite input that overflows an intermediate yields no number',async()=>{
+  const extreme=event('AAPL',{price:1});extreme.reference={...extreme.reference,value:1e308};
+  const r=await one(setup({AAPL:extreme}),'AAPL');
+  assert.equal(r.change.status,'unavailable');assert.equal(r.change.percent,null);assert.equal(r.change.absolute,null);
+  assert.ok(r.change.reasons.includes('nonfinite_arithmetic'));
+  assert.doesNotThrow(()=>JSON.stringify(r));
+});
+
 test('unverified calendars stay unknown; crypto can be continuous and equity holiday is closed',async()=>{  let r=await one(setup({KOSPI:event('KOSPI')}),'KOSPI');assert.equal(r.freshness.market_state,'unknown');assert.equal(r.freshness.live,false);
   r=await one(setup({'BTC/USD':event('BTC/USD')}),'BTC/USD');assert.equal(r.freshness.market_state,'continuous_market');assert.equal(r.freshness.live,true);
   const now=Date.parse('2026-11-26T16:10:00Z');r=await one(setup({AAPL:event('AAPL',{observed_at:'2026-11-26T16:09:50Z'})},{now}));assert.equal(r.freshness.market_state,'closed');assert.equal(r.freshness.live,false);
