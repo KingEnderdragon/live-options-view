@@ -14,8 +14,9 @@ function openTicket(e, row) {
     sym, instrument_type: 'option',
     strike: +row.Strike, type: row.Type, exp: row.Expiration,
   };
-  const buyPx  = q.ask ?? q.mid ?? null;
-  const sellPx = q.bid ?? q.mid ?? null;
+  const fresh = stamp => Number.isFinite(Date.parse(stamp)) && Date.now() - Date.parse(stamp) <= 15000 && Date.now() - Date.parse(stamp) >= -30000;
+  const buyPx  = fresh(q.ask_ts) ? q.ask : null;
+  const sellPx = fresh(q.bid_ts) ? q.bid : null;
 
   const t = document.createElement('div');
   t.id = 'trade-ticket';

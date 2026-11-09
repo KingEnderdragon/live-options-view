@@ -52,7 +52,7 @@ async function fetchLatest() {
       chainState[token.symbol] = { data: other.data, error: null };
       // Interests first: the quote cache only keeps wanted (visible) symbols.
       updateQuoteInterests();
-      publishSnapshotQuotes(other.data);
+      ingestSnapshotQuotes(other.data);
     } else {
       chainState[token.symbol] = {
         data: other.transient ? chainState[token.symbol]?.data ?? null : null,
@@ -82,7 +82,9 @@ function clearChain(message) {
 }
 
 function renderChainTitle(symbol) {
-  document.getElementById('title').textContent = `${symbol} 0DTE Live OI`;
+  const data = chainState[symbol]?.data;
+  const expiry = data?.expiration;
+  document.getElementById('title').textContent = `${symbol} ${expiry ? (expiry === data.date ? '0DTE' : `exp ${expiry}`) : 'Options'} Live OI`;
   document.title = `${symbol} Live OI — moopertonic`;
   const select = document.getElementById('underlying-select');
   if (select.value !== symbol) select.value = symbol;
@@ -111,11 +113,12 @@ function renderSelectedChain() {
   const hasBids = data.rows.some(r => r.Bid != null);
   // Dot color carries live/stale; text is just a small timestamp note —
   // deeper diagnosis lives in diag.html, not the main view.
-  setStatus(snapAge > 2 || !hasBids || state.error ? 'stale' : 'live', data.snapshot_time);
+  setStatus(!Number.isFinite(snapAge) || snapAge < -1 || snapAge > 2 || !hasBids || state.error ? 'stale' : 'live', data.snapshot_time);
 }
 
 function selectUnderlying(symbol) {
   if (!chainSelection.select(symbol)) return;
+  if (typeof closeTicket === 'function') closeTicket();
   try { localStorage.setItem(UNDERLYING_KEY, chainSelection.symbol); } catch (e) {}
   // Clear immediately so nothing from the previous underlying stays on screen
   // under the new heading, then fetch the new one right away.

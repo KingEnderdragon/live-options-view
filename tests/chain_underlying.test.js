@@ -19,7 +19,7 @@ function snapshot(symbol, { declare = true, price = symbol === 'SPY' ? 670.2 : 6
   const strike = Math.round(price);
   return {
     ...(declare ? { symbol } : {}),
-    timestamp: ts, snapshot_time: '10:30 ET', date: '2026-10-06', tier: '0DTE_Regular',
+    timestamp: ts, snapshot_time: '10:30 ET', date: '2026-10-06', expiration: '2026-10-06', tier: '0DTE_Regular',
     underlying_price: price,
     underlying_market: { symbol, spot: price },
     rows: rows || [
@@ -354,17 +354,15 @@ const settle = () => new Promise(r => setImmediate(r));
     assert.deepEqual(h.calls.heatmap.at(-1), { symbol: 'QQQ', dataSymbol: 'QQQ', price: 600.1 });
 
     h.api.selectUnderlying('SPY');
-    assert.equal(h.el('title').textContent, 'SPY 0DTE Live OI', 'heading switches immediately');
+    assert.equal(h.el('title').textContent, 'SPY Options Live OI', 'heading switches immediately without inventing expiry');
     assert.equal(h.el('heatmap-body').innerHTML, '', 'QQQ rows cleared on switch');
     assert.equal(h.el('no-data').textContent, 'Loading SPY…');
     await settle(); await settle();
     assert.deepEqual(h.calls.heatmap.at(-1), { symbol: 'SPY', dataSymbol: 'SPY', price: 670.2 });
     assert.equal(h.doc.title, 'SPY Live OI — moopertonic');
-    assert.ok(h.calls.ingested.every(s => s === 'QQQ'), 'only QQQ snapshots reach paper-trading settlement');
+    assert.ok(h.calls.ingested.includes('SPY'), 'SPY reaches underlying-specific paper state');
     assert.ok(h.calls.qqqLine.every(s => s === 'QQQ'), 'QQQ tile lines only ever get QQQ readings');
-    const spyAt = h.calls.published.indexOf('SPY');
-    assert.ok(spyAt > 0 && h.calls.published[spyAt - 1] === 'interests', 'SPY contracts registered as visible before their quotes are published');
-    assert.deepEqual(h.calls.published.filter(x => x !== 'interests'), ['SPY'], 'SPY rows seed display quotes only');
+
 
     h.api.selectUnderlying('QQQ');
     await settle(); await settle();

@@ -16,11 +16,11 @@ function renderHeatmap(data, symbol = 'QQQ') {
   // other underlyings render view-only, colored relative to their own
   // snapshot (see relativeOiRanges in docs/shared/chain.js).
   buildHeatmapRows(document.getElementById('heatmap-body'), data, isQqq ? ranges : relativeOiRanges(data.rows), {
-    getPosition: (sym) => isQqq ? (book[sym]?.pos || 0) : 0,
+    getPosition: (sym) => book[sym]?.pos || 0,
     getQuote: (sym) => liveQuotes.get(sym),
-    onCellClick: isQqq ? (e, row) => openTicket(e, row) : null,
+    onCellClick: (e, row) => openTicket(e, row),
   });
-  document.getElementById('chain-note').textContent = isQqq ? '' : 'view-only · OI colors relative to this snapshot';
+  document.getElementById('chain-note').textContent = isQqq ? '' : 'OI colors relative to this snapshot · execution requires a fresh contract quote';
 
   // Header
   document.getElementById('price').textContent = `$${spot?.toFixed(2) ?? '—'}`;

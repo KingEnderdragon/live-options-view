@@ -405,12 +405,13 @@ def take_snapshot(s3, feed: DXLinkFeed, strikes: list[dict],
             selection = UnderlyingSelection(
                 unavailable_reason="no_usable_spy_spot",
                 contributing=_quote_contributing(quote),
-            )
-    else:
+            )    else:
         selection = _select_underlying_quote(quote, us.last_spot[0], us.last_spot[1])
 
     underlying, spot_ts_str = selection.price, selection.receipt_ts
     atm = round(underlying) if underlying else None
+    from .settlement_marks import publish_settlement_mark
+    publish_settlement_mark(s3, us.symbol, exp_date, underlying, spot_ts_str, ts_utc)
 
     underlying_market = _compute_underlying_market(
         s3, quote, underlying, spot_ts_str, ts_et, ts_utc, today, us, selection)
@@ -442,7 +443,7 @@ def take_snapshot(s3, feed: DXLinkFeed, strikes: list[dict],
                 "Strike":          strike,
                 "Type":            option_type,
                 "OptionSymbol":    s[occ_key],
-                "DTE":             0,
+                "DTE":             (date.fromisoformat(exp_date) - today).days,
                 "OpenInterest":    data.get("oi", 0) or 0,
                 "Volume":          vol,
                 "VolDelta":        vol_delta,
@@ -565,7 +566,7 @@ def take_snapshot(s3, feed: DXLinkFeed, strikes: list[dict],
         "market_readings":  readings,
         "market_readings_digest": readings_sha,
     }
-    if us.symbol == "SPY":
+    if us.symbol != "QQQ":
         payload["subscription_coverage"] = _spy_subscription_coverage(
             us.subscription_coverage, _fresh_spy_spot(quote, ts_utc)[0])
 

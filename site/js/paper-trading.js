@@ -166,7 +166,7 @@ liveQuotes.subscribe(() => {
   // readable while logged out, so this re-render must come before the guard
   // below rather than after it.
   if (botsTimer) renderBots();
-  if (!lastData || !session) return;
+  if (!session) return;
   const book = computeBook(session.trades);
   for (const [symbol, position] of Object.entries(book)) {
     if (!position.pos) continue;
@@ -178,12 +178,15 @@ liveQuotes.subscribe(() => {
 });
 
 function ingestSnapshotQuotes(data) {
-  lastDataDate = data.date || lastDataDate;
+  if (data.date && (!lastDataDate || data.date > lastDataDate)) lastDataDate = data.date;
   // Last known underlying price for this date, kept so settleExpired() can
   // determine ITM/OTM for short positions once the option itself is no longer
   // in the live quote feed (see settlementPrice()).
-  if (lastDataDate && data.underlying_price != null) {
-    spotMarks[lastDataDate] = data.underlying_price;
+  const underlying = data.symbol ?? 'QQQ';
+  // A nearest-expiry snapshot's spot belongs to its observation date, not
+  // its future expiration. Never carry today's spot forward as an expiry mark.
+  if (data.date && data.underlying_price != null && (data.expiration ?? data.date) === data.date) {
+    spotMarks[`${underlying}:${data.date}`] = data.underlying_price;
   }
   // Settle before computing open positions for interest-tracking, so a
   // position that expired as of this snapshot's date doesn't count as "open"
@@ -226,6 +229,7 @@ function computeBook(trades = session?.trades || []) {
     const multiplier = t.multiplier ?? (instrumentType === 'share' ? 1 : 100);
     const b = book[t.sym] ?? (book[t.sym] = {
       pos: 0, avg: 0, realized: 0,
+      underlying: occRoot(t.sym) || t.underlying || 'QQQ',
       instrument_type: instrumentType, multiplier,
       strike: t.strike, type: t.type, exp: t.exp,
     });
@@ -245,6 +249,8 @@ function computeBook(trades = session?.trades || []) {
 }
 
 async function executeTrade(info, side, qty, orderType = 'market', limitPrice = null) {
+  info = Object.freeze({ ...info });
+  const submittedTicket = ticketEl;
   const normalized = normalizePaperOrder({ side, quantity: qty, orderType, limitPrice });
   if (normalized.error) {
     setTradePending(false, normalized.error);
@@ -277,7 +283,7 @@ async function executeTrade(info, side, qty, orderType = 'market', limitPrice = 
   announceOrderStatus(`Filled ${trade.order_type || 'market'} order ${trade.order_id || executionRequestId}.`, 'success');
   cacheSessionDisplay();
   updateQuoteInterests();
-  closeTicket();
+  if (ticketEl === submittedTicket) closeTicket();
   renderPaper();
   renderSelectedChain();  // refresh position badges
 }
@@ -366,7 +372,7 @@ function closePosition(sym) {
 
 function instrumentLabel(value, symbol = value.sym) {
   if ((value.instrument_type ?? 'option') === 'share') return symbol;
-  return `QQQ ${value.strike} ${value.type === 'call' ? 'C' : 'P'}`;
+  return `${occRoot(symbol) || value.underlying || 'QQQ'} ${value.strike} ${value.type === 'call' ? 'C' : 'P'}${value.exp ? ` · ${value.exp}` : ''}`;
 }
 
 function fmtMoney(v) {

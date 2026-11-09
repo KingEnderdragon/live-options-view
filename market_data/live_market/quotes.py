@@ -13,6 +13,7 @@ through the same helpers. Moving them here breaks that backward edge
 import json
 import math
 import os
+import re
 import threading
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -27,7 +28,9 @@ from .config import (
     STALE_FEED_SECS,
     TICKER_CLASSES,
     log,
+    COLLECT_IBIT,
 )
+from .chain import _dxlink_symbol
 from .feed import DXLinkFeed
 
 # -- ephemeral live quote HTTP service ----------------------------------------
@@ -39,12 +42,14 @@ class LiveQuoteRegistry:
         self._lock = threading.Lock()
         self._feed: Optional[DXLinkFeed] = None
         self._contracts: dict[str, dict] = {}
+        self._requested_contracts = set()
         self._ticker_fallbacks: dict[str, dict] = {}
 
     def set_session(self, feed: DXLinkFeed, contracts: dict[str, dict]):
         with self._lock:
             self._feed = feed
             self._contracts = dict(contracts)
+            self._requested_contracts = set()
 
     def clear_session(self):
         with self._lock:
@@ -81,6 +86,27 @@ class LiveQuoteRegistry:
         }
 
     def quote_payload(self, symbols: list[str]) -> dict:
+        # Held contracts outside today's fixed window remain quoteable. The
+        # authenticated service adds at most 100 exact contracts per session,
+        # on the existing connection, without expanding the collected chain.
+        with self._lock:
+            for symbol in symbols:
+                if symbol in self._contracts or not self._feed or len(self._requested_contracts) >= 100:
+                    continue
+                match = re.fullmatch(r"(QQQ|SPY|IBIT)(\d{6})([CP])(\d{8})", symbol)
+                if not match or (match[1] == "IBIT" and not COLLECT_IBIT):
+                    continue
+                try:
+                    expiry = datetime.strptime(match[2], "%y%m%d").date()
+                except ValueError:
+                    continue
+                if expiry < datetime.now().date():
+                    continue
+                streamer = _dxlink_symbol(symbol)
+                self._feed.add_option_subscriptions([streamer])
+                self._contracts[symbol] = {"streamer_symbol": streamer, "strike": int(match[4]) / 1000,
+                                           "type": "call" if match[3] == "C" else "put", "exp": expiry.isoformat()}
+                self._requested_contracts.add(symbol)
         with self._lock:
             feed = self._feed
             contracts = dict(self._contracts)

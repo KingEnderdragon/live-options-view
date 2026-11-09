@@ -37,7 +37,9 @@ TICKER          = "QQQ"
 # Underlyings with their own 0DTE chain, snapshot, indicators and archive
 # (#121). Only TICKER (QQQ) gets the nearest-weekly archive; SPY is 0DTE only,
 # to bound subscriptions and writes.
-CHAIN_UNDERLYINGS = ("QQQ", "SPY")
+CHAIN_UNDERLYINGS = ("QQQ", "SPY", "IBIT")
+# Opt-in only after provider and release acceptance; no new connection.
+COLLECT_IBIT = os.environ.get("COLLECT_IBIT", "0") == "1"
 COLLECT_SPY     = os.environ.get("COLLECT_SPY", "1") != "0"
 STRIKE_WINDOW   = 33
 SPY_MAX_STRIKES = 67
