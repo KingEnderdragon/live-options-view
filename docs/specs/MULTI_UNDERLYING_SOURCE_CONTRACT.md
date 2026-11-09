@@ -34,7 +34,14 @@ held-contract subscriptions are bounded at 100 per session on the existing
 connection. Settlement marks are immutable per-underlying files
 `settlement/<underlying>/<expiration>.json` (conditional create, only for
 timed post-close observations 16:00–16:15 ET, SPY/IBIT only; QQQ keeps legacy
-date-only marks).
+date-only marks). The 16:00–16:15 ET window is enforced on both sides: the
+publisher only writes a mark from a timed post-close observation in that
+window, and the consumer (`fetchSpotMarkForDate`) re-checks the window in New
+York time before accepting a mark, so a manually written R2 object with a
+midday observation cannot become an expiration's mark. Early-close sessions
+(e.g. a 13:00 ET close) produce no 16:00–16:15 observation, so their
+expirations stay pending by design rather than borrowing an intraday price;
+they need a separately verified mark.
 
 Justification: no new connection, no new provider subscription, bounded load,
 IBIT disabled until reviewed release. The choice is provisional pending (a)

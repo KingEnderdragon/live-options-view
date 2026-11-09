@@ -170,6 +170,25 @@ function settlementAsOfNY(now = new Date()) {
 // worker's own routes since this runs server-side, not from a browser.
 // Only the UnderlyingPrice of the expiration's own 0DTE chain is needed, so
 // this stops at the first matching row instead of parsing the whole CSV.
+// The publisher only writes a mark from a timed 16:00-16:15 ET post-close
+// observation (see market_data/live_market/settlement_marks.py). The
+// consumer re-checks that window in New York time, so a manually written R2
+// object -- or a publisher bug -- with a midday observation and an
+// otherwise-correct schema cannot become an expiration's mark. The ET date
+// (not the UTC date prefix) is what must match the expiration.
+function observedAtInPostCloseWindow(observedAt, dateStr) {
+  const ms = Date.parse(observedAt);
+  if (!Number.isFinite(ms)) return false;
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/New_York',
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+    }).formatToParts(new Date(ms)).filter(part => part.type !== 'literal').map(part => [part.type, part.value]),
+  );
+  return `${parts.year}-${parts.month}-${parts.day}` === dateStr &&
+    Number(parts.hour) === 16 && Number(parts.minute) <= 15;
+}
 export async function fetchSpotMarkForDate(dateStr, underlying = 'QQQ') {
   if (!UNDERLYINGS.has(underlying)) return null;
   if (underlying !== 'QQQ') {
@@ -178,7 +197,7 @@ export async function fetchSpotMarkForDate(dateStr, underlying = 'QQQ') {
     const mark = await response.json();
     if (mark.symbol !== underlying || mark.expiration !== dateStr || mark.date !== dateStr ||
         mark.price_basis !== 'first_observed_post_close' || mark.source !== 'dxlink' ||
-        !Number.isFinite(Date.parse(mark.observed_at)) || mark.observed_at.slice(0, 10) !== dateStr) return null;
+        !observedAtInPostCloseWindow(mark.observed_at, dateStr)) return null;
     return typeof mark.spot === 'number' && Number.isFinite(mark.spot) && mark.spot > 0 ? mark.spot : null;
   }
   const key = dateStr.replace(/-/g, '');

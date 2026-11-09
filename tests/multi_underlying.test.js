@@ -27,6 +27,10 @@ const assert = require('node:assert/strict');
   const res=await handleSettle(req,env); assert.equal(res.status,200);assert.equal(record.balance_cash,94500,'browser uses durable own-underlying marks, not supplied foreign values');
   global.fetch=async()=>Response.json({symbol:'QQQ',date:exp,expiration:exp,spot:500,observed_at:exp+'T21:00:01Z'});
   assert.equal(await fetchSpotMarkForDate(exp,'IBIT'),null);
+  global.fetch=async()=>Response.json({symbol:'IBIT',date:exp,expiration:exp,spot:50,source:'dxlink',price_basis:'first_observed_post_close',observed_at:exp+'T15:00:00Z'});
+  assert.equal(await fetchSpotMarkForDate(exp,'IBIT'),null,'a midday observation is not a post-close mark');
+  global.fetch=async()=>Response.json({symbol:'IBIT',date:exp,expiration:exp,spot:50,source:'dxlink',price_basis:'first_observed_post_close',observed_at:exp+'T21:30:00Z'});
+  assert.equal(await fetchSpotMarkForDate(exp,'IBIT'),null,'an observation after the 16:15 ET window is not a post-close mark');
  }finally{global.fetch=original}
  for(const root of ['QQQ','SPY','IBIT'])for(const type of ['call','put'])for(const side of ['buy','sell']){
   const t=trade(root,50,type),now=Date.now();const row={symbol:t.sym,bid:1,ask:1.2,strike:50,type,exp,bid_ts:new Date(now).toISOString(),ask_ts:new Date(now).toISOString()};
