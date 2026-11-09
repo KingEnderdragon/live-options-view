@@ -14,7 +14,7 @@ This is the companion to the [front door](README.md). It reuses the service/cont
 | Read-only Market MCP | [server.js](market_mcp/server.js), [production.js](market_mcp/production.js), [guide](market_mcp/README.md) | Client-driven discovery/query/detail; no trading, scanner invocation or producer credentials | Image tests establish packaging; dated [rollout](market_mcp/ROLLOUT.md) is historical, not a current service inventory. Live connector acceptance is recorded separately from source |
 | Other tools | [synthetic days](research/synthetic_days/README.md) | Simulation entry point | Their presence is not evidence of an unattended deployed service |
 
-The UTC Railway cron values do not shift with US daylight saving time; session-aware code waits for the exchange calendar. No schedule is changed by moving source or documentation. The three producer services live under [market_data/](market_data/README.md), with module entry points and service-specific operating guides. Research and unintegrated prototypes have separate [research/](research/README.md) and [experiments/](experiments/README.md) homes.
+The UTC Railway cron values do not shift with US daylight saving time; session-aware code waits for the exchange calendar. No schedule is changed by moving source or documentation. The three producer services live under [market_data/](market_data/README.md), with module entry points and service-specific operating guides. Active offline backtesting lives in [research/](research/README.md); retired studies and prototypes are indexed in [history](docs/HISTORY.md).
 
 ## Browser and data boundaries
 

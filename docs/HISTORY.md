@@ -22,3 +22,12 @@ branch-relative paths must use the maintained location or an immutable revision.
 The frozen MOO-171 research report and generator retain their original textual
 DESIGN.md citation to preserve the recorded source identity. That citation refers
 to the historical design record linked above, not a current root file.
+
+## Archived prototypes
+
+The obsolete `experiments/` directory has been removed. The accepted exact-100 overview now lives in `market_data/overview/` and `market_mcp/`; the reusable read-only symbol diagnostic is `python -m market_data.overview.probe_symbols`.
+
+- [Earlier 132-stock/watchlist proposal](https://github.com/OwenTanzer/live-options-view/tree/cd32c7b7c700436dbc35cc4e27dacec6d1783bc3/experiments/market_overview), retained at `archive/options-view-overview-prototype-2026-11-09`. Its membership and proposed watchlist feature are superseded, not active product settings.
+- [News/reaction prototype](https://github.com/OwenTanzer/live-options-view/tree/94cf8c8a955015c974058cf5d289f0eba4bdd8a3/experiments/news_pin_bot), retained at `archive/options-view-news-bot-2026-11-08`.
+
+Use a detached worktree at either archive tag to inspect or resume that work separately. Active synthetic-day replay remains under `research/synthetic_days/`.

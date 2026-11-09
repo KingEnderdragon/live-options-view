@@ -219,7 +219,7 @@ def test_last_known_price_preserves_observation_time():
     try:
         collector._last_prices.clear()
         collector._last_prices["QQQ"] = {"price": 499.5, "quote_ts": observed}
-        collector.fetch_yf_prices_bounded = lambda: {
+        collector.fetch_yf_prices_bounded = lambda labels=None: {
             label: None for label in collector.PRICE_TICKERS
         }
         state = {
@@ -252,7 +252,7 @@ def test_price_receipt_tracks_selected_input_and_carry_origin():
         state["AAPL"].update(last=101.0, last_ts=old)
         state["QQQ"].update(bid_ts=old)
         state[collector.PRICE_TICKERS["JPY/USD"]] = {"bid": 0.0065, "prev_close": 0.0066}
-        collector.fetch_yf_prices_bounded = lambda: {"JPY/USD": 0.0067}
+        collector.fetch_yf_prices_bounded = lambda labels=None: {"JPY/USD": 0.0067}
         s3 = FakeS3()
         collector.push_prices(s3, FakeFeed(state, last_event_time=datetime.now(timezone.utc)), collector.Counters())
         prices = s3.json_objects("intraday/prices.json")[-1]["prices"]
@@ -265,7 +265,7 @@ def test_price_receipt_tracks_selected_input_and_carry_origin():
         assert_equal(prices["JPY/USD"]["instrument_id"], "fut.6j",
                      "unresolved yen retains its futures identity")
         state.pop("AAPL")
-        collector.fetch_yf_prices_bounded = lambda: {}
+        collector.fetch_yf_prices_bounded = lambda labels=None: {}
         collector.push_prices(s3, FakeFeed(state, last_event_time=datetime.now(timezone.utc)), collector.Counters())
         carried = s3.json_objects("intraday/prices.json")[-1]["prices"]["AAPL"]
         assert_equal((carried["source"], carried["origin_source"], carried["source_symbol"], carried["quote_ts"]),

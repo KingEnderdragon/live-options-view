@@ -6,8 +6,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import experiments.market_overview as mo  # noqa: E402
-from experiments.market_overview import Observation as Obs  # noqa: E402
+import market_data.overview.calculations as mo  # noqa: E402
+from market_data.overview.calculations import Observation as Obs  # noqa: E402
 
 UTC = timezone.utc
 T = datetime(2026, 10, 9, 19, 0, tzinfo=UTC)          # Fri 15:00 ET
@@ -183,51 +183,12 @@ class Freshness(unittest.TestCase):
         self.assertEqual(older["warnings"], [])
 
 
-class Universe(unittest.TestCase):
-    def setUp(self):
-        self.cfg = mo.load_universe()
-
-    def test_candidate_universe_is_valid(self):
-        v = mo.validate_universe(self.cfg)
-        self.assertEqual(v["errors"], [])
-        self.assertEqual((v["symbols"], v["companies"], v["groups"]), (132, 132, 11))
-        self.assertTrue(all(len(g["symbols"]) == 12 for g in self.cfg["groups"]))
-
-    def test_duplicates_and_bounds_are_reported(self):
-        bad = {**self.cfg, "groups": [dict(g) for g in self.cfg["groups"]]}
-        bad["groups"][0] = {**bad["groups"][0], "symbols": bad["groups"][0]["symbols"] + ["MSFT"]}
-        self.assertIn("duplicate_symbol:MSFT", mo.validate_universe(bad)["errors"])
-        tiny = {**self.cfg, "groups": self.cfg["groups"][:2]}
-        self.assertTrue(any(e.startswith("company_count_out_of_bounds")
-                            for e in mo.validate_universe(tiny)["errors"]))
-
-    def test_share_classes_count_once(self):
-        cfg = {**self.cfg, "groups": [dict(g) for g in self.cfg["groups"]],
-               "share_classes": {"company_aliases": {"GOOG": "GOOGL"}}}
-        cfg["groups"][1] = {**cfg["groups"][1], "symbols": cfg["groups"][1]["symbols"] + ["GOOG"]}
-        v = mo.validate_universe(cfg)
-        self.assertEqual((v["symbols"], v["companies"]), (133, 132))
-
-    def test_watchlist_supplements_with_explicit_statuses(self):
-        cap = self.cfg["watchlist"]["additions_cap"]
-        extra = [f"ZZ{i:02d}" for i in range(cap + 1)]
-        w = mo.with_watchlist(self.cfg, ["pltr", "AAPL", "PLTR", "not a symbol!"] + extra)
-        status = {a["symbol"]: a["status"] for a in w["additions"]}
-        self.assertEqual(status["PLTR"], "duplicate_addition")   # second occurrence wins the dict
-        self.assertEqual(w["additions"][0], {"symbol": "PLTR", "status": "accepted"})
-        self.assertEqual(status["AAPL"], "already_in_baseline")
-        self.assertEqual(status["NOT A SYMBOL!"], "malformed")
-        self.assertEqual(sum(a["status"] == "over_cap" for a in w["additions"]), 2)
-        origins = [m["origin"] for m in w["members"]]
-        self.assertEqual(origins.count("baseline"), 132)
-        self.assertEqual(origins.count("watchlist"), cap)
-
-
 class BreadthAndMovers(unittest.TestCase):
     def setUp(self):
-        cfg = mo.load_universe()
-        self.members = mo.with_watchlist(cfg, ["PLTR"])["members"]
-        tech = cfg["groups"][0]["symbols"]
+        tech = ['AAPL', 'MSFT', 'NVDA'] + [f'TECH{i}' for i in range(9)]
+        self.members = [{'symbol': symbol, 'group': 'technology', 'origin': 'baseline'} for symbol in tech]
+        self.members += [{'symbol': 'JPM', 'group': 'financials', 'origin': 'baseline'},
+                         {'symbol': 'PLTR', 'group': 'technology', 'origin': 'watchlist'}]
         pcts = [3.0, 2.0, 1.0, 0.0, -1.0, -2.0, 0.5, 0.25, -0.5]  # 9 of 12 tech names
         self.changes = {s: {"percent": p, "basis": "previous_regular_close", "current_session": "regular"}
                         for s, p in zip(tech, pcts)}
@@ -246,9 +207,9 @@ class BreadthAndMovers(unittest.TestCase):
 
     def test_watchlist_does_not_change_baseline_summary(self):
         base = mo.breadth(self.members, self.changes)
-        self.assertEqual(base["denominator"], 132)
+        self.assertEqual(base["denominator"], 13)
         withw = mo.breadth(self.members, self.changes, include_watchlist=True)
-        self.assertEqual(withw["denominator"], 133)
+        self.assertEqual(withw["denominator"], 14)
         self.assertNotEqual(base["mean_percent"], withw["mean_percent"])
 
     def test_mixed_sessions_are_flagged(self):
@@ -259,7 +220,7 @@ class BreadthAndMovers(unittest.TestCase):
     def test_top_movers_rank_full_sample_before_paging(self):
         up = mo.top_movers(self.members, self.changes, "up", limit=2)
         self.assertEqual([r["symbol"] for r in up["rows"]], ["JPM", "AAPL"])  # PLTR is watchlist
-        self.assertEqual((up["eligible"], up["ranked"], up["missing"]), (132, 10, 122))
+        self.assertEqual((up["eligible"], up["ranked"], up["missing"]), (13, 10, 3))
         page2 = mo.top_movers(self.members, self.changes, "up", limit=2, offset=2)
         self.assertEqual(page2["rows"][0]["rank"], 3)
         down = mo.top_movers(self.members, self.changes, "down", limit=1)

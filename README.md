@@ -24,7 +24,6 @@ Each service owns its implementation and operating guide. The three market-data 
 - [market_data/](market_data/README.md): live acquisition, daily archives and option scans.
 - [site/](site), [backend/](backend/README.md), [crassus/](crassus/README.md) and [market_mcp/](market_mcp/README.md): distinct browser, account/API, strategy and assistant-reader components.
 - [research/](research/README.md): offline backtesting and links to completed studies.
-- [experiments/](experiments/README.md): prototypes not integrated into the operating system.
 - [docs/](docs/README.md), [deployment/](deployment/python/README.md), [scripts/](scripts), [tests/](tests) and [.github/](.github): documentation, shared packaging, repository-wide tools, cross-component tests and automation.
 
 A new feature belongs under its owning component. Create a top-level folder only

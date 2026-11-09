@@ -415,8 +415,8 @@ def test_spy_price_tile_and_health_use_only_observed_spy_quote():
         health = s3.json("intraday/health.json")
         assert_equal(health["spy"]["spot"]["status"], "live", "fresh SPY quote health")
         assert_equal(health["spy"]["spot"]["price"], 670.2, "SPY health price")
-        assert_equal(health["symbols"]["expected_price_symbols"], len(collector.PRICE_TICKERS),
-                     "QQQ legacy health counts unchanged")
+        assert_equal(health["symbols"]["expected_price_symbols"], sum(bool(s) for s in collector.PRICE_TICKERS.values()),
+                     "streaming health counts exclude daily-only sources")
         old = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
         state["SPY"]["bid_ts"] = old
         collector.push_prices(s3, FakeFeed(state), collector.Counters())
