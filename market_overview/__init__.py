@@ -52,7 +52,7 @@ from typing import Iterable, Mapping, Optional, Sequence
 from zoneinfo import ZoneInfo
 
 ET = ZoneInfo("America/New_York")
-UNIVERSE_PATH = Path(__file__).resolve().parent / "market_overview_universe.json"
+UNIVERSE_PATH = Path(__file__).resolve().parent / "universe.json"
 
 # Units whose absolute change is a dollar amount. Everything else (index
 # points, JPY per USD, percent yields...) keeps its own unit label.

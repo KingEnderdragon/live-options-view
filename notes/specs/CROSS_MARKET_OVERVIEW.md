@@ -16,7 +16,7 @@ grant may disrupt the collector. Do not run it or pause the collector without
 an operational decision; a route using data already received by the collector
 is being discussed.
 
-The universe file and `market_overview.py` rules below are groundwork for that
+The universe file and `market_overview/__init__.py` rules below are groundwork for that
 follow-on. The first-slice tool does not use them or offer a watchlist.
 
 The tool labels the **query-time market window** and the **collector receipt
@@ -32,11 +32,11 @@ a possible market window; provider observation freshness is unverified.
 | --- | --- |
 | [collector/prices.py](../../collector/prices.py) | Add source symbol, original source for carry-forwards, selected-price basis and a receipt time tied to the selected price in the existing `prices.json` payload. No new symbols or schedule. |
 | `market_mcp/overview.js`, `consumer.js`, `server.js` | Add the bounded, read-only `market_overview` tool over the existing strip, with source-dependent identities, units, per-row receipt age and named gaps. |
-| `market_overview_universe.json` | Versioned candidate universe: 132 stocks in 11 groups of 12 with a rationale for each group, a share-class alias table, a proposed watchlist cap, and a macro instrument registry with exact instrument types, units and candidate sources. |
-| `market_overview.py` | Pure functions for change arithmetic, scale normalization, FX inversion, identity/contract/adjustment checks, US equity session classification, freshness, universe validation, watchlist merging, sample breadth and top movers. |
+| `market_overview/universe.json` | Versioned candidate universe: 132 stocks in 11 groups of 12 with a rationale for each group, a share-class alias table, a proposed watchlist cap, and a macro instrument registry with exact instrument types, units and candidate sources. |
+| `market_overview/__init__.py` | Pure functions for change arithmetic, scale normalization, FX inversion, identity/contract/adjustment checks, US equity session classification, freshness, universe validation, watchlist merging, sample breadth and top movers. |
 | `tests/test_market_overview.py` | Fixture tests for the arithmetic, session, breadth and watchlist checklist items in #132. They are wired into the Collector suite. |
 
-Only tests import `market_overview.py` today; it is follow-on groundwork, not
+Only tests import `market_overview/__init__.py` today; it is follow-on groundwork, not
 the tool implementation.
 
 ## Verified coverage baseline
