@@ -39,8 +39,8 @@ def push_health(s3, feed: DXLinkFeed, counters: Counters, tracker: SnapshotTrack
 
     state     = feed.get_state()
     no_data   = [label for label, sym in PRICE_TICKERS.items()
-                 if state.get(sym, {}).get("last") is None and state.get(sym, {}).get("bid") is None]
-    with_data = len(PRICE_TICKERS) - len(no_data)
+                 if sym and state.get(sym, {}).get("last") is None and state.get(sym, {}).get("bid") is None]
+    with_data = sum(bool(s) for s in PRICE_TICKERS.values()) - len(no_data)
 
     spy_context = spy_context or {"status": "unavailable", "reason": "no_spy_session"}
     spy_state = state.get("SPY", {}) if COLLECT_SPY else {}
@@ -97,7 +97,7 @@ def push_health(s3, feed: DXLinkFeed, counters: Counters, tracker: SnapshotTrack
         },
         "cadence": trk,
         "symbols": {
-            "expected_price_symbols":  len(PRICE_TICKERS),
+            "expected_price_symbols":  sum(bool(s) for s in PRICE_TICKERS.values()),
             "price_symbols_with_data": with_data,
             "no_data_symbols":         no_data,
         },

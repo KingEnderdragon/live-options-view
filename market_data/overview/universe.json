@@ -2,7 +2,7 @@
   "schema_version": 1,
   "universe_version": "market-overview-100-v1",
   "selection_source": "https://github.com/OwenTanzer/live-options-view/issues/132",
-  "authorization": "Selection and artifact capacity accepted; new subscriptions disabled pending explicit production gate. Candidate mappings are not runtime verification.",
+  "authorization": "Owen authorized full activation on 2026-11-09. Daily sources retain their actual observation dates; futures resolve the active dated contract at session start.",
   "instruments": [
     {
       "label": "QQQ",
@@ -21,7 +21,7 @@
       "calendar": "XNYS",
       "rationale": "Nasdaq-100 equity proxy; primary growth anchor",
       "source_readiness": "DX QQQ; Yahoo QQQ; profile E; existing DXLink row",
-      "status": "existing_unrevalidated",
+      "status": "enabled",
       "sector": null
     },
     {
@@ -41,7 +41,7 @@
       "calendar": "XNYS",
       "rationale": "S&P 500 equity proxy; primary US anchor",
       "source_readiness": "DX SPY; Yahoo SPY; profile E; existing DXLink row",
-      "status": "existing_unrevalidated",
+      "status": "enabled",
       "sector": null
     },
     {
@@ -61,7 +61,7 @@
       "calendar": "XNYS",
       "rationale": "Semiconductor industry; existing focus",
       "source_readiness": "DX SMH; Yahoo SMH; profile E; existing DXLink row",
-      "status": "existing_unrevalidated",
+      "status": "enabled",
       "sector": null
     },
     {
@@ -81,7 +81,7 @@
       "calendar": "XNYS",
       "rationale": "Software industry; existing focus",
       "source_readiness": "DX IGV; Yahoo IGV; profile E; existing DXLink row",
-      "status": "existing_unrevalidated",
+      "status": "enabled",
       "sector": null
     },
     {
@@ -101,7 +101,7 @@
       "calendar": "XNYS",
       "rationale": "WTI-linked commodity-pool share price; existing focus",
       "source_readiness": "DX USO; Yahoo USO; profile E; existing DXLink row",
-      "status": "existing_unrevalidated",
+      "status": "enabled",
       "sector": null,
       "exposure_class": "commodity"
     },
@@ -122,7 +122,7 @@
       "calendar": "XNYS",
       "rationale": "S&P 500 expected volatility context",
       "source_readiness": "DX $VIX.X; Yahoo ^VIX; profile V; existing Yahoo undated fill",
-      "status": "existing_unrevalidated",
+      "status": "enabled",
       "sector": null
     },
     {
@@ -142,7 +142,7 @@
       "calendar": "XNYS",
       "rationale": "USO-option-implied volatility; not spot oil volatility",
       "source_readiness": "DX $OVX.X; Yahoo ^OVX; profile V; existing Yahoo undated fill",
-      "status": "existing_unrevalidated",
+      "status": "enabled",
       "sector": null
     },
     {
@@ -162,7 +162,7 @@
       "calendar": "XKRX",
       "rationale": "KRW basis; Korea and semiconductor-linked Asia session",
       "source_readiness": "DX $KOSPI.X (unproved); Yahoo ^KS11; profile I; existing Yahoo undated fill",
-      "status": "existing_unrevalidated",
+      "status": "enabled",
       "sector": null
     },
     {
@@ -182,7 +182,7 @@
       "calendar": "XNYS",
       "rationale": "change bps; Existing 10Y strip identity; long-rate anchor",
       "source_readiness": "DX $TNX.X /10; Yahoo ^TNX /1 (current code); profile Y; existing Yahoo undated fill",
-      "status": "existing_unrevalidated",
+      "status": "enabled",
       "sector": null,
       "change_unit": "bps",
       "scale": {
@@ -199,7 +199,7 @@
       "instrument_type": "futures_active_contract_series",
       "unit": "USD_per_JPY",
       "profile": "FU",
-      "dxlink_symbol": "/6J:XCME",
+      "dxlink_symbol": null,
       "yahoo_symbol": null,
       "compact": true,
       "enabled": true,
@@ -207,7 +207,7 @@
       "calendar": null,
       "rationale": "Preserve yen futures separately from inverse spot USD/JPY",
       "source_readiness": "Existing /6J:XCME unresolved; resolve dated streamer symbol. Yahoo JPYUSD=X is NOT fallback; profile FU; existing DXLink row; contract unresolved",
-      "status": "existing_unrevalidated",
+      "status": "enabled",
       "sector": null
     },
     {
@@ -219,7 +219,7 @@
       "instrument_type": "crypto_spot",
       "unit": "USD_per_BTC",
       "profile": "C",
-      "dxlink_symbol": "BTC/USD:CXERX",
+      "dxlink_symbol": "BTC/USD:CXTALP",
       "yahoo_symbol": "BTC-USD",
       "compact": true,
       "enabled": true,
@@ -227,7 +227,7 @@
       "calendar": "24/7",
       "rationale": "Existing digital-asset anchor",
       "source_readiness": "DX resolver BTC/USD (venue required); Yahoo BTC-USD; profile C; existing Yahoo undated fill",
-      "status": "existing_unrevalidated",
+      "status": "enabled",
       "sector": null
     },
     {
@@ -247,7 +247,7 @@
       "calendar": "XNYS",
       "rationale": "Digital advertising and AI spending",
       "source_readiness": "DX META; Yahoo META; profile E; existing DXLink row",
-      "status": "existing_unrevalidated",
+      "status": "enabled",
       "sector": "communication_services"
     },
     {
@@ -267,7 +267,7 @@
       "calendar": "XNYS",
       "rationale": "Search, advertising and cloud; Class A only",
       "source_readiness": "DX GOOGL; Yahoo GOOGL; profile E; existing DXLink row",
-      "status": "existing_unrevalidated",
+      "status": "enabled",
       "sector": "communication_services"
     },
     {
@@ -287,7 +287,7 @@
       "calendar": "XNYS",
       "rationale": "Commerce and cloud",
       "source_readiness": "DX AMZN; Yahoo AMZN; profile E; existing DXLink row",
-      "status": "existing_unrevalidated",
+      "status": "enabled",
       "sector": "consumer_discretionary"
     },
     {
@@ -307,7 +307,7 @@
       "calendar": "XNYS",
       "rationale": "EV/consumer growth and high-beta sentiment",
       "source_readiness": "DX TSLA; Yahoo TSLA; profile E; existing DXLink row",
-      "status": "existing_unrevalidated",
+      "status": "enabled",
       "sector": "consumer_discretionary"
     },
     {
@@ -327,7 +327,7 @@
       "calendar": "XNYS",
       "rationale": "Memory cycle; existing focus",
       "source_readiness": "DX MU; Yahoo MU; profile E; existing DXLink row",
-      "status": "existing_unrevalidated",
+      "status": "enabled",
       "sector": "technology"
     },
     {
@@ -347,7 +347,7 @@
       "calendar": "XNYS",
       "rationale": "Devices and consumer technology",
       "source_readiness": "DX AAPL; Yahoo AAPL; profile E; existing DXLink row",
-      "status": "existing_unrevalidated",
+      "status": "enabled",
       "sector": "technology"
     },
     {
@@ -367,7 +367,7 @@
       "calendar": "XNYS",
       "rationale": "SpaceX Class A; preserve owner strip focus",
       "source_readiness": "DX SPCX; Yahoo SPCX; profile E; existing DXLink row",
-      "status": "existing_unrevalidated",
+      "status": "enabled",
       "sector": "industrials",
       "history_not_before": "2026-06-12"
     },
@@ -383,12 +383,12 @@
       "dxlink_symbol": "DIA",
       "yahoo_symbol": "DIA",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "Dow large-cap proxy",
       "source_readiness": "DX DIA; Yahoo DIA; profile E; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": null
     },
     {
@@ -403,12 +403,12 @@
       "dxlink_symbol": "IWM",
       "yahoo_symbol": "IWM",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "Russell 2000 small-cap proxy",
       "source_readiness": "DX IWM; Yahoo IWM; profile E; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": null
     },
     {
@@ -423,12 +423,12 @@
       "dxlink_symbol": "RSP",
       "yahoo_symbol": "RSP",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "Equal-weight S&P 500; concentration contrast",
       "source_readiness": "DX RSP; Yahoo RSP; profile E; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": null
     },
     {
@@ -443,12 +443,12 @@
       "dxlink_symbol": "MDY",
       "yahoo_symbol": "MDY",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "S&P MidCap 400; size breadth",
       "source_readiness": "DX MDY; Yahoo MDY; profile E; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": null
     },
     {
@@ -463,12 +463,12 @@
       "dxlink_symbol": "XLK",
       "yahoo_symbol": "XLK",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "Technology",
       "source_readiness": "DX XLK; Yahoo XLK; profile E; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": null
     },
     {
@@ -483,12 +483,12 @@
       "dxlink_symbol": "XLC",
       "yahoo_symbol": "XLC",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "Communication services",
       "source_readiness": "DX XLC; Yahoo XLC; profile E; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": null
     },
     {
@@ -503,12 +503,12 @@
       "dxlink_symbol": "XLY",
       "yahoo_symbol": "XLY",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "Consumer discretionary",
       "source_readiness": "DX XLY; Yahoo XLY; profile E; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": null
     },
     {
@@ -523,12 +523,12 @@
       "dxlink_symbol": "XLP",
       "yahoo_symbol": "XLP",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "Consumer staples",
       "source_readiness": "DX XLP; Yahoo XLP; profile E; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": null
     },
     {
@@ -543,12 +543,12 @@
       "dxlink_symbol": "XLF",
       "yahoo_symbol": "XLF",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "Financials",
       "source_readiness": "DX XLF; Yahoo XLF; profile E; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": null
     },
     {
@@ -563,12 +563,12 @@
       "dxlink_symbol": "XLV",
       "yahoo_symbol": "XLV",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "Health care",
       "source_readiness": "DX XLV; Yahoo XLV; profile E; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": null
     },
     {
@@ -583,12 +583,12 @@
       "dxlink_symbol": "XLI",
       "yahoo_symbol": "XLI",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "Industrials",
       "source_readiness": "DX XLI; Yahoo XLI; profile E; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": null
     },
     {
@@ -603,12 +603,12 @@
       "dxlink_symbol": "XLE",
       "yahoo_symbol": "XLE",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "Energy",
       "source_readiness": "DX XLE; Yahoo XLE; profile E; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": null
     },
     {
@@ -623,12 +623,12 @@
       "dxlink_symbol": "XLB",
       "yahoo_symbol": "XLB",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "Materials",
       "source_readiness": "DX XLB; Yahoo XLB; profile E; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": null
     },
     {
@@ -643,12 +643,12 @@
       "dxlink_symbol": "XLU",
       "yahoo_symbol": "XLU",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "Utilities",
       "source_readiness": "DX XLU; Yahoo XLU; profile E; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": null
     },
     {
@@ -663,12 +663,12 @@
       "dxlink_symbol": "XLRE",
       "yahoo_symbol": "XLRE",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "Real estate",
       "source_readiness": "DX XLRE; Yahoo XLRE; profile E; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": null
     },
     {
@@ -683,12 +683,12 @@
       "dxlink_symbol": "KRE",
       "yahoo_symbol": "KRE",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "Regional banks; credit-sensitive contrast",
       "source_readiness": "DX KRE; Yahoo KRE; profile E; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": null
     },
     {
@@ -703,12 +703,12 @@
       "dxlink_symbol": "XBI",
       "yahoo_symbol": "XBI",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "Biotech; speculative/growth contrast",
       "source_readiness": "DX XBI; Yahoo XBI; profile E; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": null
     },
     {
@@ -723,12 +723,12 @@
       "dxlink_symbol": "MSFT",
       "yahoo_symbol": "MSFT",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "Enterprise software/cloud",
       "source_readiness": "DX MSFT; Yahoo MSFT; profile E; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": "technology"
     },
     {
@@ -743,12 +743,12 @@
       "dxlink_symbol": "NVDA",
       "yahoo_symbol": "NVDA",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "AI compute and accelerator demand",
       "source_readiness": "DX NVDA; Yahoo NVDA; profile E; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": "technology"
     },
     {
@@ -763,12 +763,12 @@
       "dxlink_symbol": "AVGO",
       "yahoo_symbol": "AVGO",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "Semiconductors and infrastructure software",
       "source_readiness": "DX AVGO; Yahoo AVGO; profile E; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": "technology"
     },
     {
@@ -783,12 +783,12 @@
       "dxlink_symbol": "AMD",
       "yahoo_symbol": "AMD",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "Compute competition",
       "source_readiness": "DX AMD; Yahoo AMD; profile E; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": "technology"
     },
     {
@@ -803,12 +803,12 @@
       "dxlink_symbol": "ORCL",
       "yahoo_symbol": "ORCL",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "Database and cloud infrastructure",
       "source_readiness": "DX ORCL; Yahoo ORCL; profile E; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": "technology"
     },
     {
@@ -823,12 +823,12 @@
       "dxlink_symbol": "CRM",
       "yahoo_symbol": "CRM",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "Enterprise application software",
       "source_readiness": "DX CRM; Yahoo CRM; profile E; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": "technology"
     },
     {
@@ -843,12 +843,12 @@
       "dxlink_symbol": "NFLX",
       "yahoo_symbol": "NFLX",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "Streaming and media",
       "source_readiness": "DX NFLX; Yahoo NFLX; profile E; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": "communication_services"
     },
     {
@@ -863,12 +863,12 @@
       "dxlink_symbol": "HD",
       "yahoo_symbol": "HD",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "Housing-related discretionary demand",
       "source_readiness": "DX HD; Yahoo HD; profile E; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": "consumer_discretionary"
     },
     {
@@ -883,12 +883,12 @@
       "dxlink_symbol": "WMT",
       "yahoo_symbol": "WMT",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "Mass-market consumer demand",
       "source_readiness": "DX WMT; Yahoo WMT; profile E; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": "consumer_staples"
     },
     {
@@ -903,12 +903,12 @@
       "dxlink_symbol": "COST",
       "yahoo_symbol": "COST",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "Membership retail demand",
       "source_readiness": "DX COST; Yahoo COST; profile E; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": "consumer_staples"
     },
     {
@@ -923,12 +923,12 @@
       "dxlink_symbol": "PG",
       "yahoo_symbol": "PG",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "Defensive household staples",
       "source_readiness": "DX PG; Yahoo PG; profile E; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": "consumer_staples"
     },
     {
@@ -943,12 +943,12 @@
       "dxlink_symbol": "JPM",
       "yahoo_symbol": "JPM",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "Diversified banking",
       "source_readiness": "DX JPM; Yahoo JPM; profile E; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": "financials"
     },
     {
@@ -963,12 +963,12 @@
       "dxlink_symbol": "BAC",
       "yahoo_symbol": "BAC",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "Large-bank credit/rate sensitivity",
       "source_readiness": "DX BAC; Yahoo BAC; profile E; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": "financials"
     },
     {
@@ -983,12 +983,12 @@
       "dxlink_symbol": "GS",
       "yahoo_symbol": "GS",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "Capital-market activity",
       "source_readiness": "DX GS; Yahoo GS; profile E; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": "financials"
     },
     {
@@ -1003,12 +1003,12 @@
       "dxlink_symbol": "BRK/B",
       "yahoo_symbol": "BRK-B",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "Insurance/conglomerate; Class B only",
       "source_readiness": "DX BRK/B; Yahoo BRK-B (both resolve); profile E; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": "financials"
     },
     {
@@ -1023,12 +1023,12 @@
       "dxlink_symbol": "V",
       "yahoo_symbol": "V",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "Consumer payment activity; Class A",
       "source_readiness": "DX V; Yahoo V; profile E; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": "financials"
     },
     {
@@ -1043,12 +1043,12 @@
       "dxlink_symbol": "LLY",
       "yahoo_symbol": "LLY",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "Pharmaceutical growth",
       "source_readiness": "DX LLY; Yahoo LLY; profile E; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": "health_care"
     },
     {
@@ -1063,12 +1063,12 @@
       "dxlink_symbol": "UNH",
       "yahoo_symbol": "UNH",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "Managed care",
       "source_readiness": "DX UNH; Yahoo UNH; profile E; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": "health_care"
     },
     {
@@ -1083,12 +1083,12 @@
       "dxlink_symbol": "JNJ",
       "yahoo_symbol": "JNJ",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "Diversified health care",
       "source_readiness": "DX JNJ; Yahoo JNJ; profile E; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": "health_care"
     },
     {
@@ -1103,12 +1103,12 @@
       "dxlink_symbol": "CAT",
       "yahoo_symbol": "CAT",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "Construction/mining capital spending",
       "source_readiness": "DX CAT; Yahoo CAT; profile E; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": "industrials"
     },
     {
@@ -1123,12 +1123,12 @@
       "dxlink_symbol": "GE",
       "yahoo_symbol": "GE",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "Aerospace cycle; not pre-breakup General Electric",
       "source_readiness": "DX GE; Yahoo GE; profile E; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": "industrials"
     },
     {
@@ -1143,12 +1143,12 @@
       "dxlink_symbol": "RTX",
       "yahoo_symbol": "RTX",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "Aerospace and defense",
       "source_readiness": "DX RTX; Yahoo RTX; profile E; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": "industrials"
     },
     {
@@ -1163,12 +1163,12 @@
       "dxlink_symbol": "XOM",
       "yahoo_symbol": "XOM",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "Integrated oil; current issuer ExxonMobil Holdings",
       "source_readiness": "DX XOM; Yahoo XOM; profile E; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": "energy"
     },
     {
@@ -1183,12 +1183,12 @@
       "dxlink_symbol": "CVX",
       "yahoo_symbol": "CVX",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "Integrated oil peer",
       "source_readiness": "DX CVX; Yahoo CVX; profile E; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": "energy"
     },
     {
@@ -1203,12 +1203,12 @@
       "dxlink_symbol": "COP",
       "yahoo_symbol": "COP",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "Upstream oil and gas",
       "source_readiness": "DX COP; Yahoo COP; profile E; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": "energy"
     },
     {
@@ -1223,12 +1223,12 @@
       "dxlink_symbol": "FCX",
       "yahoo_symbol": "FCX",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "Copper mining and demand",
       "source_readiness": "DX FCX; Yahoo FCX; profile E; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": "materials"
     },
     {
@@ -1243,12 +1243,12 @@
       "dxlink_symbol": "NEM",
       "yahoo_symbol": "NEM",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "Gold-mining equity",
       "source_readiness": "DX NEM; Yahoo NEM; profile E; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": "materials"
     },
     {
@@ -1263,12 +1263,12 @@
       "dxlink_symbol": "NEE",
       "yahoo_symbol": "NEE",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "Utility/power investment",
       "source_readiness": "DX NEE; Yahoo NEE; profile E; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": "utilities"
     },
     {
@@ -1283,12 +1283,12 @@
       "dxlink_symbol": "PLD",
       "yahoo_symbol": "PLD",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "Logistics real estate",
       "source_readiness": "DX PLD; Yahoo PLD; profile E; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": "real_estate"
     },
     {
@@ -1303,12 +1303,12 @@
       "dxlink_symbol": null,
       "yahoo_symbol": "^N225",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "Asia/Tokyo",
       "calendar": "XTKS",
       "rationale": "JPY basis; Japanese equity session",
       "source_readiness": "Yahoo ^N225; DX resolver required; profile I; new candidate; delayed/EOD possible",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": null
     },
     {
@@ -1323,12 +1323,12 @@
       "dxlink_symbol": null,
       "yahoo_symbol": "^GDAXI",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "Europe/Berlin",
       "calendar": "XETR",
       "rationale": "EUR basis; German industrial/export equity context; explicitly gross return",
       "source_readiness": "Yahoo ^GDAXI; DX resolver required; profile I; new candidate; version check required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": null
     },
     {
@@ -1343,12 +1343,12 @@
       "dxlink_symbol": null,
       "yahoo_symbol": "^FTSE",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "Europe/London",
       "calendar": "XLON",
       "rationale": "GBP basis; UK financial/resource-heavy benchmark",
       "source_readiness": "Yahoo ^FTSE; DX resolver required; profile I; new candidate; delayed/EOD possible",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": null
     },
     {
@@ -1363,12 +1363,12 @@
       "dxlink_symbol": null,
       "yahoo_symbol": "^HSI",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "Asia/Hong_Kong",
       "calendar": "XHKG",
       "rationale": "HKD basis; Hong Kong/China-exposed equity context; not mainland China index",
       "source_readiness": "Yahoo ^HSI; DX resolver required; profile I; new candidate; delayed/EOD possible",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": null
     },
     {
@@ -1383,12 +1383,12 @@
       "dxlink_symbol": "EEM",
       "yahoo_symbol": "EEM",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "Broad emerging-market US-traded proxy",
       "source_readiness": "DX EEM; Yahoo EEM; profile E; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": null
     },
     {
@@ -1403,12 +1403,12 @@
       "dxlink_symbol": "INDA",
       "yahoo_symbol": "INDA",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "India US-traded equity proxy",
       "source_readiness": "DX INDA; Yahoo INDA; profile E; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": null
     },
     {
@@ -1423,12 +1423,12 @@
       "dxlink_symbol": "EWZ",
       "yahoo_symbol": "EWZ",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "Brazil US-traded equity/resource proxy",
       "source_readiness": "DX EWZ; Yahoo EWZ; profile E; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": null
     },
     {
@@ -1443,18 +1443,20 @@
       "dxlink_symbol": null,
       "yahoo_symbol": null,
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": null,
       "calendar": null,
       "rationale": "change bps; Policy-sensitive short end; never replace with /ZT price",
       "source_readiness": "Treasury XML BC_2YEAR; FRED DGS2 reference only; profile Y2; no connected live source; daily adapter candidate",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": null,
       "change_unit": "bps",
       "scale": {
         "dxlink": null,
-        "yfinance": null
-      }
+        "yfinance": null,
+        "treasury": 1
+      },
+      "treasury_symbol": "BC_2YEAR"
     },
     {
       "label": "FVX5Y",
@@ -1468,17 +1470,17 @@
       "dxlink_symbol": "$FVX.X",
       "yahoo_symbol": "^FVX",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "change bps; Intermediate Treasury yield context",
       "source_readiness": "DX $FVX.X; Yahoo ^FVX (verify scales); profile Y; new candidate; probe and scale fixture required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": null,
       "change_unit": "bps",
       "scale": {
         "dxlink": null,
-        "yfinance": null
+        "yfinance": 1
       }
     },
     {
@@ -1493,17 +1495,17 @@
       "dxlink_symbol": "$TYX.X",
       "yahoo_symbol": "^TYX",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "change bps; Long-end rate context",
       "source_readiness": "DX $TYX.X; Yahoo ^TYX (verify scales); profile Y; new candidate; probe and scale fixture required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": null,
       "change_unit": "bps",
       "scale": {
         "dxlink": null,
-        "yfinance": null
+        "yfinance": 1
       }
     },
     {
@@ -1518,12 +1520,12 @@
       "dxlink_symbol": "SHY",
       "yahoo_symbol": "SHY",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "Short-duration Treasury share-price proxy",
       "source_readiness": "DX SHY; Yahoo SHY; profile E; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": null
     },
     {
@@ -1538,12 +1540,12 @@
       "dxlink_symbol": "IEF",
       "yahoo_symbol": "IEF",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "Intermediate-duration Treasury share-price proxy",
       "source_readiness": "DX IEF; Yahoo IEF; profile E; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": null
     },
     {
@@ -1558,12 +1560,12 @@
       "dxlink_symbol": "TLT",
       "yahoo_symbol": "TLT",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "Long-duration Treasury share-price proxy",
       "source_readiness": "DX TLT; Yahoo TLT; profile E; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": null
     },
     {
@@ -1578,12 +1580,12 @@
       "dxlink_symbol": "TIP",
       "yahoo_symbol": "TIP",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "Inflation-linked Treasury share-price proxy",
       "source_readiness": "DX TIP; Yahoo TIP; profile E; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": null
     },
     {
@@ -1598,12 +1600,12 @@
       "dxlink_symbol": "HYG",
       "yahoo_symbol": "HYG",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "High-yield corporate credit share-price proxy",
       "source_readiness": "DX HYG; Yahoo HYG; profile E; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": null
     },
     {
@@ -1618,12 +1620,12 @@
       "dxlink_symbol": "LQD",
       "yahoo_symbol": "LQD",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "Investment-grade corporate credit share-price proxy",
       "source_readiness": "DX LQD; Yahoo LQD; profile E; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": null
     },
     {
@@ -1635,15 +1637,15 @@
       "instrument_type": "spot_fx",
       "unit": "USD_per_EUR",
       "profile": "F",
-      "dxlink_symbol": "EUR/USD",
+      "dxlink_symbol": null,
       "yahoo_symbol": "EURUSD=X",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "FX_17NY",
       "rationale": "Major European currency",
       "source_readiness": "DX EUR/USD (unverified alias; provider spot route unresolved); Yahoo EURUSD=X; profile F; new candidate; source/composite unresolved",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": null
     },
     {
@@ -1655,15 +1657,15 @@
       "instrument_type": "spot_fx",
       "unit": "USD_per_GBP",
       "profile": "F",
-      "dxlink_symbol": "GBP/USD",
+      "dxlink_symbol": null,
       "yahoo_symbol": "GBPUSD=X",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "FX_17NY",
       "rationale": "UK currency",
       "source_readiness": "DX GBP/USD (unverified alias; provider spot route unresolved); Yahoo GBPUSD=X; profile F; new candidate; source/composite unresolved",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": null
     },
     {
@@ -1675,15 +1677,15 @@
       "instrument_type": "spot_fx",
       "unit": "JPY_per_USD",
       "profile": "F",
-      "dxlink_symbol": "USD/JPY",
+      "dxlink_symbol": null,
       "yahoo_symbol": "JPY=X",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "FX_17NY",
       "rationale": "Dollar/yen spot, distinct from /6J",
       "source_readiness": "DX USD/JPY (unverified alias; provider spot route unresolved); Yahoo JPY=X; profile F; new candidate; source/composite unresolved",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": null
     },
     {
@@ -1695,15 +1697,15 @@
       "instrument_type": "spot_fx",
       "unit": "CHF_per_USD",
       "profile": "F",
-      "dxlink_symbol": "USD/CHF",
+      "dxlink_symbol": null,
       "yahoo_symbol": "CHF=X",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "FX_17NY",
       "rationale": "Swiss franc",
       "source_readiness": "DX USD/CHF (unverified alias; provider spot route unresolved); Yahoo CHF=X; profile F; new candidate; source/composite unresolved",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": null
     },
     {
@@ -1715,15 +1717,15 @@
       "instrument_type": "spot_fx",
       "unit": "CAD_per_USD",
       "profile": "F",
-      "dxlink_symbol": "USD/CAD",
+      "dxlink_symbol": null,
       "yahoo_symbol": "CAD=X",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "FX_17NY",
       "rationale": "Canadian dollar and oil linkage",
       "source_readiness": "DX USD/CAD (unverified alias; provider spot route unresolved); Yahoo CAD=X; profile F; new candidate; source/composite unresolved",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": null
     },
     {
@@ -1735,15 +1737,15 @@
       "instrument_type": "spot_fx",
       "unit": "USD_per_AUD",
       "profile": "F",
-      "dxlink_symbol": "AUD/USD",
+      "dxlink_symbol": null,
       "yahoo_symbol": "AUDUSD=X",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "FX_17NY",
       "rationale": "Australian dollar and commodity linkage",
       "source_readiness": "DX AUD/USD (unverified alias; provider spot route unresolved); Yahoo AUDUSD=X; profile F; new candidate; source/composite unresolved",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": null
     },
     {
@@ -1758,12 +1760,12 @@
       "dxlink_symbol": "BNO",
       "yahoo_symbol": "BNO",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "Brent-linked commodity-pool share price",
       "source_readiness": "DX BNO; Yahoo BNO; profile E; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": null,
       "exposure_class": "commodity"
     },
@@ -1779,12 +1781,12 @@
       "dxlink_symbol": "GLD",
       "yahoo_symbol": "GLD",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "Gold bullion trust share price",
       "source_readiness": "DX GLD; Yahoo GLD; profile E; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": null,
       "exposure_class": "commodity"
     },
@@ -1800,12 +1802,12 @@
       "dxlink_symbol": "SLV",
       "yahoo_symbol": "SLV",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "Silver bullion trust share price",
       "source_readiness": "DX SLV; Yahoo SLV; profile E; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": null,
       "exposure_class": "commodity"
     },
@@ -1821,12 +1823,12 @@
       "dxlink_symbol": "GDX",
       "yahoo_symbol": "GDX",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "Gold-mining equity basket",
       "source_readiness": "DX GDX; Yahoo GDX; profile E; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": null
     },
     {
@@ -1841,12 +1843,12 @@
       "dxlink_symbol": "COPX",
       "yahoo_symbol": "COPX",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "Copper-mining equity basket",
       "source_readiness": "DX COPX; Yahoo COPX; profile E; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": null
     },
     {
@@ -1861,12 +1863,12 @@
       "dxlink_symbol": null,
       "yahoo_symbol": null,
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": null,
       "calendar": null,
       "rationale": "WTI futures price distinct from USO",
       "source_readiness": "DX resolve CL dated NYMEX contract; Yahoo CL=F continuous candidate only; profile FU; new candidate; contract and entitlement unresolved",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": null
     },
     {
@@ -1881,12 +1883,12 @@
       "dxlink_symbol": null,
       "yahoo_symbol": null,
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": null,
       "calendar": null,
       "rationale": "Brent futures; not ICE Brent contract or BNO",
       "source_readiness": "DX resolve BZ dated NYMEX contract; Yahoo BZ=F continuous candidate only; profile FU; new candidate; contract and entitlement unresolved",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": null
     },
     {
@@ -1901,12 +1903,12 @@
       "dxlink_symbol": null,
       "yahoo_symbol": null,
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": null,
       "calendar": null,
       "rationale": "Gas-energy context beyond oil",
       "source_readiness": "DX resolve NG dated NYMEX contract; Yahoo NG=F continuous candidate only; profile FU; new candidate; contract and entitlement unresolved",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": null
     },
     {
@@ -1921,12 +1923,12 @@
       "dxlink_symbol": null,
       "yahoo_symbol": null,
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": null,
       "calendar": null,
       "rationale": "Gold futures versus rates/risk",
       "source_readiness": "DX resolve GC dated COMEX contract; Yahoo GC=F continuous candidate only; profile FU; new candidate; contract and entitlement unresolved",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": null
     },
     {
@@ -1941,12 +1943,12 @@
       "dxlink_symbol": null,
       "yahoo_symbol": null,
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": null,
       "calendar": null,
       "rationale": "Silver focus; distinct from SLV share price",
       "source_readiness": "DX resolve SI dated COMEX contract; Yahoo SI=F continuous candidate only; profile FU; new candidate; contract and entitlement unresolved",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": null
     },
     {
@@ -1961,12 +1963,12 @@
       "dxlink_symbol": null,
       "yahoo_symbol": null,
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": null,
       "calendar": null,
       "rationale": "Industrial metal demand; distinct from miners",
       "source_readiness": "DX resolve HG dated COMEX contract; Yahoo HG=F continuous candidate only; profile FU; new candidate; contract and entitlement unresolved",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": null
     },
     {
@@ -1978,15 +1980,15 @@
       "instrument_type": "crypto_spot",
       "unit": "USD_per_ETH",
       "profile": "C",
-      "dxlink_symbol": null,
+      "dxlink_symbol": "ETH/USD:CXTALP",
       "yahoo_symbol": "ETH-USD",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "UTC",
       "calendar": "24/7",
       "rationale": "Second crypto ecosystem",
       "source_readiness": "DX resolver ETH/USD (venue required); Yahoo ETH-USD; profile C; new candidate; venue/composite unresolved",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": null
     },
     {
@@ -1998,15 +2000,15 @@
       "instrument_type": "crypto_spot",
       "unit": "USD_per_SOL",
       "profile": "C",
-      "dxlink_symbol": null,
+      "dxlink_symbol": "SOL/USD:CXTALP",
       "yahoo_symbol": "SOL-USD",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "UTC",
       "calendar": "24/7",
       "rationale": "Additional crypto-risk breadth",
       "source_readiness": "DX resolver SOL/USD (venue required); Yahoo SOL-USD; profile C; new candidate; venue/composite unresolved",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": null
     },
     {
@@ -2021,12 +2023,12 @@
       "dxlink_symbol": "$GVZ.X",
       "yahoo_symbol": "^GVZ",
       "compact": false,
-      "enabled": false,
+      "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "GLD-option-implied volatility; complements gold",
       "source_readiness": "DX $GVZ.X; Yahoo ^GVZ; profile V; new candidate; probe required",
-      "status": "candidate_disabled",
+      "status": "enabled",
       "sector": null
     }
   ]

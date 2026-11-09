@@ -29,7 +29,7 @@ const REFERENCE_BASES = Object.freeze({
   E: ['previous_close','prev_day_close','daily_bar_close','daily_close','official_close'],
   I: ['previous_close','prev_day_close','daily_bar_close','daily_close','official_close'],
   V: ['previous_close','daily_bar_close','daily_close','official_close'],
-  Y: ['previous_close','prev_day_close','daily_close','official_close'],
+  Y: ['previous_close','prev_day_close','daily_bar_close','daily_close','official_close'],
   Y2: ['previous_observation','official_close','daily_close'],
   F: ['previous_observation','daily_bar_close','daily_close','previous_close'],
   FU: ['settlement','previous_close'],
@@ -85,14 +85,14 @@ function validate(p) {
     const r = p.prices[label];
     check(LABEL.test(label) && !['__proto__', 'constructor', 'prototype'].includes(label), 'Invalid price label.');
     check(object(r) && ['price', 'bid', 'ask', 'prev_close', 'chg_pct', 'volume'].every(k => num(r[k])) && time(r.quote_ts) &&
-      [null, undefined, 'dxlink', 'yfinance', 'last-known'].includes(r.source) && [undefined, true, false].includes(r.stale) &&
-      [undefined, null, 'dxlink', 'yfinance'].includes(r.origin_source) &&
+      [null, undefined, 'dxlink', 'yfinance', 'treasury', 'last-known'].includes(r.source) && [undefined, true, false].includes(r.stale) &&
+      [undefined, null, 'dxlink', 'yfinance', 'treasury'].includes(r.origin_source) &&
       [undefined, null, 'last_trade', 'bid_ask_midpoint', 'undated_last_price', 'daily_bar_close', 'daily_close', 'official_close', 'settlement'].includes(r.price_basis) &&
       (r.source_symbol === undefined || r.source_symbol === null || typeof r.source_symbol === 'string'), `Invalid price row ${label}.`);
     const origin = r.source === 'last-known' ? r.origin_source : r.source;
-    const expected = origin === 'dxlink' ? DXLINK_SYMBOLS[label] : origin === 'yfinance' ? label === 'JPY/USD' ? 'JPYUSD=X' : YF_SYMBOLS[label] : null;
+    const expected = origin === 'dxlink' ? DXLINK_SYMBOLS[label] : origin === 'yfinance' ? label === 'JPY/USD' ? 'JPYUSD=X' : YF_SYMBOLS[label] : origin === 'treasury' ? INSTRUMENTS[label]?.treasury_symbol : null;
     const resolved = futureContract(r.resolved_contract) && r.source_symbol === r.resolved_contract.symbol && INSTRUMENTS[label]?.id.startsWith('fut.');
-    check(r.source_symbol == null || !Object.hasOwn(INSTRUMENTS,label) || r.source_symbol === expected || resolved, `Source symbol mismatch for ${label}.`);
+    check(r.source_symbol == null || !Object.hasOwn(INSTRUMENTS,label) || r.source_symbol === expected || (p.schema_version !== 2 && ((label === 'BTC/USD' && r.source_symbol === 'BTC/USD:CXERX') || (label === 'JPY/USD' && r.source_symbol === '/6J:XCME'))) || resolved, `Source symbol mismatch for ${label}.`);
     if (p.schema_version === 2) {
       const expectedId = label === 'JPY/USD' && origin === 'yfinance' ? JPY_SPOT.id : INSTRUMENTS[label]?.id;
       const bounded = (v, max = 200) => v == null || (typeof v === 'string' && v.length <= max);
@@ -111,10 +111,11 @@ function validate(p) {
         (r.refresh_error == null || typeof r.refresh_error === 'string' || object(r.refresh_error)), `Invalid observation provenance for ${label}.`);
       check(r.collector_received_at == null || r.quote_ts == null || r.collector_received_at === r.quote_ts, `Conflicting collector receipt for ${label}.`);
       if (r.reference != null) check(object(r.reference) && num(r.reference.value) && observationValid(r.reference) &&
-        [undefined,null,'dxlink','yfinance'].includes(r.reference.source) && (r.reference.resolved_contract == null || object(r.reference.resolved_contract)) &&
+        [undefined,null,'dxlink','yfinance','treasury'].includes(r.reference.source) && (r.reference.resolved_contract == null || object(r.reference.resolved_contract)) &&
         ['source','source_symbol','instrument_id','price_basis','session','adjustment_basis'].every(k => r.reference[k] == null || typeof r.reference[k] === 'string'), `Invalid reference provenance for ${label}.`);
     }
     check(r.price_basis == null || (origin === 'dxlink' && ['last_trade', 'bid_ask_midpoint'].includes(r.price_basis)) ||
+      (origin === 'treasury' && p.schema_version === 2 && r.price_basis === 'daily_close') ||
       (origin === 'yfinance' && ['undated_last_price', ...(p.schema_version === 2 ? ['daily_bar_close','daily_close','official_close'] : [])].includes(r.price_basis)), `Price basis conflicts with source for ${label}.`);
     check(r.source !== 'yfinance' || r.quote_ts == null, `Undated Yahoo fill has a receipt time for ${label}.`);
   }

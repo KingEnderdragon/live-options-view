@@ -152,22 +152,22 @@ class ProducerObservations(unittest.TestCase):
         self.assertEqual(row["prev_close"], 0)
         self.assertIsNone(row["chg_pct"])
 
-    def test_enabled_request_set_retains_original_budget(self):
+    def test_enabled_request_set_covers_authorized_universe(self):
         dx, yahoo = producer_maps()
-        self.assertEqual(len(dx), 17)  # SPY separate
-        self.assertEqual(len(yahoo), 16)  # no yen spot
+        self.assertEqual(len(dx), 99)  # SPY separate
+        self.assertEqual(len(yahoo), 91)  # no yen spot
         self.assertEqual(dx, p.PRICE_TICKERS)
         self.assertEqual(yahoo, p.YF_SYMBOL_MAP)
-        self.assertEqual(dx["JPY/USD"], "/6J:XCME")
+        self.assertEqual(dx["JPY/USD"], None)
 
 
 class RegistryGate(unittest.TestCase):
-    def test_activation_is_pinned_to_the_reviewed_strip(self):
+    def test_activation_preserves_exact_universe_and_compact_strip(self):
         cfg = overview.load_universe()
         self.assertEqual(overview.ACTIVATION_ALLOWLIST,
                          {r["label"] for r in cfg["instruments"] if r["enabled"]})
         widened = copy.deepcopy(cfg)
-        next(r for r in widened["instruments"] if r["label"] == "MSFT")["enabled"] = True
+        next(r for r in widened["instruments"] if r["label"] == "MSFT")["enabled"] = False
         with self.assertRaises(ValueError):
             overview._validate(widened)
         missing = copy.deepcopy(cfg)
@@ -229,11 +229,11 @@ class YahooObservations(unittest.TestCase):
             tickers[symbol] = SimpleNamespace(history=history)
         with patch.object(p.yf, "Tickers", return_value=SimpleNamespace(tickers=tickers)) as factory:
             result = p.fetch_yf_prices()
-        self.assertEqual(len(calls), 16)
-        self.assertEqual([sym for sym, _ in calls], list(p.YF_SYMBOL_MAP.values()))
+        self.assertEqual(len(calls), len(p.YF_SYMBOL_MAP))
+        self.assertEqual({sym for sym, _ in calls}, set(p.YF_SYMBOL_MAP.values()))
         self.assertEqual(set(result), set(p.YF_SYMBOL_MAP))
         self.assertEqual(factory.call_args.args, (" ".join(p.YF_SYMBOL_MAP.values()),))
-        self.assertTrue(all(kwargs == {"period": "5d", "interval": "1d", "auto_adjust": False} for _, kwargs in calls))
+        self.assertTrue(all(kwargs == {"period": "5d", "interval": "1d", "auto_adjust": False, "timeout": 10} for _, kwargs in calls))
 
     def test_daily_dates_timezone_holiday_reference_and_unadjusted_request(self):
         bars = pd.DataFrame({"Close": [100, 101]},
@@ -242,7 +242,7 @@ class YahooObservations(unittest.TestCase):
         ticker = SimpleNamespace(history=lambda **kw: calls.append(kw) or bars)
         with patch.object(p, "YF_SYMBOL_MAP", {"AAPL": "AAPL"}), patch.object(p.yf, "Tickers", return_value=SimpleNamespace(tickers={"AAPL": ticker})):
             row = p.fetch_yf_prices()["AAPL"]
-        self.assertEqual(calls, [{"period": "5d", "interval": "1d", "auto_adjust": False}])
+        self.assertEqual(calls, [{"period": "5d", "interval": "1d", "auto_adjust": False, "timeout": 10}])
         self.assertEqual(row["observation_date"], "2026-11-27")
         self.assertEqual(row["reference"]["observation_date"], "2026-11-25")
         self.assertEqual(row["observation_timezone"], "America/New_York")
@@ -267,7 +267,7 @@ class YahooObservations(unittest.TestCase):
             first["reference"]["value"] = 999
             self.assertEqual(p.fetch_yf_prices_bounded()["AAPL"]["reference"]["value"], 100)
             self.assertEqual(fetch.call_count, 1)
-            cache["ts"] = datetime.now(UTC) - timedelta(minutes=2)
+            cache["ts"] = datetime.now(UTC) - timedelta(minutes=6)
             fetch.return_value = {"AAPL": p._failure("timeout", NEW)}
             failed = p.fetch_yf_prices_bounded()["AAPL"]
             self.assertEqual((failed["observation_date"], failed["acquired_at"], failed["refresh_error"]), ("2026-10-09", OLD, "timeout"))

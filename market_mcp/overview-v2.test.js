@@ -22,7 +22,7 @@ function event(label='AAPL', extra={}) {
 }
 async function one(s,label='AAPL'){const out=await s.consumer.call('market_overview',{symbols:[label]});assert.notEqual(out.status,'failed',JSON.stringify(out.errors));return out.rows[0];}
 
-test('exact-100 registry, original aliases, disabled candidates and full denominator survive two 50-row pages',async()=>{
+test('exact-100 registry, original aliases, enabled additions and full denominator survive two 50-row pages',async()=>{
   const s=setup({AAPL:event()});
   const a=await s.consumer.call('market_overview',{limit:50});
   const b=await s.consumer.call('market_overview',{limit:50,offset:50});
@@ -32,7 +32,7 @@ test('exact-100 registry, original aliases, disabled candidates and full denomin
   assert.equal(a.coverage.full_universe.available_prices,1);assert.equal(a.coverage.full_universe.missing_prices,99);
   assert.equal(a.coverage.full_universe.ok_changes,1);assert.equal(a.coverage.full_universe.unavailable_changes,99);
   assert.equal(a.actual.universe_version,'market-overview-100-v1');
-  const missing=[...a.rows,...b.rows].find(r=>r.label==='MSFT');assert.equal(missing.enabled,false);assert.equal(missing.compact,false);assert.equal(missing.price,null);assert.equal(missing.coverage.reason,'candidate_disabled_pending_provider_review');
+  const missing=[...a.rows,...b.rows].find(r=>r.label==='MSFT');assert.equal(missing.enabled,true);assert.equal(missing.compact,false);assert.equal(missing.price,null);assert.equal(missing.coverage.reason,'not_published');
   assert.equal([...a.rows,...b.rows].filter(r=>r.compact).length,18);
   const original=['QQQ','SPY','SMH','IGV','USO','VIX','OVX','KOSPI','10Y','JPY/USD','BTC/USD','META','GOOGL','AMZN','TSLA','MU','AAPL','SPCX'];
   assert.deepEqual(overview.universe.instruments.slice(0,18).map(i=>i.label),original);
@@ -103,11 +103,11 @@ test('a quote midpoint without a reported session, or an event outside any sessi
   assert.equal(r.freshness.observation_window,'closed');assert.equal(r.freshness.live,false);
 });
 
-test('an unactivated candidate published by a producer is never used, and bad session labels fail closed',async()=>{
+test('an activated addition published by the producer is usable, and bad session labels fail closed',async()=>{
   const injected=await setup({MSFT:event('MSFT')}).consumer.call('market_overview',{symbols:['MSFT']});
   assert.notEqual(injected.status,'failed');const row=injected.rows[0];
-  assert.equal(row.enabled,false);assert.equal(row.price,null);assert.equal(row.coverage.reason,'published_without_activation');
-  assert.equal(row.change.status,'unavailable');assert.equal(row.freshness.live,false);assert.equal(row.raw_price,202);
+  assert.equal(row.enabled,true);assert.equal(row.price,202);
+  assert.equal(row.change.status,'ok');assert.equal(row.freshness.live,true);assert.equal(row.raw_price,202);
   for(const override of [{session:'banana'},{reference:{...event('AAPL').reference,session:'banana'}}]){
     const out=await setup({AAPL:event('AAPL',override)}).consumer.call('market_overview');assert.equal(out.status,'failed');assert.equal(out.errors[0].code,'incompatible_schema');
   }
@@ -161,8 +161,8 @@ test('negative commodity futures allowed only for a matched resolved contract; u
   const i=overview.universe.instruments.find(i=>i.id==='fut.cl');assert.ok(i);
   const c={symbol:'/CLZ26:XNYM',expiry:'2026-11-20',root:'CL',exchange:'XNYM',selection_at:'2026-10-02T15:00:00Z',roll_rule:'explicit dated contract'};
   const e=event(i.label,{price:-20,source_symbol:c.symbol,resolved_contract:c});e.reference={...e.reference,value:-10,source_symbol:c.symbol,resolved_contract:c};
-  // A disabled candidate published by a producer is never used.
-  let r=await one(setup({[i.label]:e}),i.label);assert.equal(r.price,null);assert.equal(r.change.status,'unavailable');
+  // Activated futures retain contract-aware arithmetic.
+  let r=await one(setup({[i.label]:e}),i.label);assert.equal(r.price,-20);assert.equal(r.change.absolute,-10);
   // Its contract arithmetic still holds once that slot is activated.
   const activated={...i,enabled:true};
   const payload={schema_version:2,timestamp:'2026-10-02T16:09:58Z',feed_stale:false,prices:{[i.label]:e}};
@@ -198,4 +198,10 @@ test('discovery advertises all100 even absent publication; query filters do not 
   const s=setup({AAPL:event()});delete s.files[KEY];let discovery=await s.consumer.call('discover_sources');const c=discovery.capabilities.find(c=>c.dataset==='cross_market_overview');assert.equal(c.instruments.length,100);assert.equal(c.universe_size,100);assert.equal(c.availability,'missing_publication');
   s.files[KEY]=JSON.stringify({schema_version:2,timestamp:'2026-10-02T16:09:58Z',feed_stale:false,prices:{AAPL:event()}});
   const out=await s.consumer.call('market_overview',{asset_class:'equity',symbols:['AAPL','etf.spy']});assert.deepEqual(out.rows.map(r=>r.label),['AAPL']);assert.equal(out.coverage.full_universe.rows,100);
+});
+
+test('official Treasury daily yields are normalized in percent with basis-point change',async()=>{
+  const r=event('UST2Y',{price:4.51,source:'treasury',source_symbol:'BC_2YEAR',price_basis:'daily_close',observed_at:null,observation_date:'2026-10-02',observation_timezone:'America/New_York',observation_granularity:'day',session:'daily',quote_ts:null,collector_received_at:null,reference:{instrument_id:'yld.us02y.cmt',value:4.46,source:'treasury',source_symbol:'BC_2YEAR',price_basis:'daily_close',observed_at:null,observation_date:'2026-10-01',observation_timezone:'America/New_York',observation_granularity:'day',session:'daily',adjustment_basis:'raw'}});
+  const out=await one(setup({UST2Y:r}),'UST2Y');
+  assert.equal(out.price,4.51);assert.equal(out.change.bps,5);assert.equal(out.freshness.live,false);
 });

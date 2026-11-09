@@ -5,6 +5,7 @@ Cache/carry-forward retain the entire observation/reference pair and disclose
 newer refresh failures. Provider requests and publication cadence are unchanged.
 """
 
+from concurrent.futures import ThreadPoolExecutor
 import copy
 import json
 import math
@@ -82,11 +83,12 @@ def _instrument_id(label):
 
 YF_FETCH_TIMEOUT_SECS = 20
 YF_COOLDOWN_SECS = 300
-YF_MIN_INTERVAL_SECS = 60
+YF_MIN_INTERVAL_SECS = 300
 _yf_cooldown_until: list = [None]
 _yf_cache: dict = {"ts": None, "data": None}
 _yf_lock = threading.Lock()
 _yf_inflight = None
+_yf_result = None
 
 
 def _failure(error, now=None):
@@ -94,35 +96,37 @@ def _failure(error, now=None):
             "refresh_error": error}
 
 
-def fetch_yf_prices() -> dict:
+def fetch_yf_prices(labels=None) -> dict:
     """Get dated, unadjusted daily bars; no fast_info or invented close time.
 
     The provider's exchange-local date and timezone are retained, including a
     possibly still-forming last bar. 'daily_bar_close' is not 'official_close'.
     The preceding valid bar is a dated reference, not an inferred yesterday.
     """
-    result = {}
-    tickers = yf.Tickers(" ".join(YF_SYMBOL_MAP.values()))
-    for label, sym in YF_SYMBOL_MAP.items():
+    selected = {k: v for k, v in YF_SYMBOL_MAP.items() if labels is None or k in labels}
+    tickers = yf.Tickers(" ".join(selected.values()))
+    def fetch_one(item):
+        label, sym = item
+        result = {}
         try:
-            bars = tickers.tickers[sym].history(period="5d", interval="1d", auto_adjust=False)
+            bars = tickers.tickers[sym].history(period="5d", interval="1d", auto_adjust=False, timeout=10)
             valid = [(stamp, _positive(row.get("Close"))) for stamp, row in bars.iterrows()]
             valid = [(stamp, price) for stamp, price in valid if price is not None]
             if not valid:
                 result[label] = _failure("no_dated_daily_observation")
-                continue
+                return label, result[label]
             stamp, price = valid[-1]
             zone = str(stamp.tzinfo) if stamp.tzinfo is not None else None
             # The consumer refuses an artifact whose zone it cannot interpret, so a
             # non-IANA zone string must not enter the public payload.
             if not zone:
                 result[label] = _failure("daily_observation_timezone_unknown")
-                continue
+                return label, result[label]
             try:
                 ZoneInfo(zone)
             except Exception:
                 result[label] = _failure("daily_observation_timezone_unknown")
-                continue
+                return label, result[label]
             now = datetime.now(timezone.utc).isoformat()
             identity = _instrument_id(label)
             reference = None
@@ -151,57 +155,71 @@ def fetch_yf_prices() -> dict:
         except Exception:
             # No raw provider exception text (URLs/credentials) in public artifacts.
             result[label] = _failure("daily_observation_fetch_failed")
-    return result
+        return label, result[label]
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        return dict(pool.map(fetch_one, selected.items()))
 
 
-def fetch_yf_prices_bounded() -> dict:
-    """Coalesced, bounded cache refresh; failed attempts never erase success."""
-    global _yf_inflight
+def fetch_yf_prices_bounded(labels=None) -> dict:
+    """One coalesced worker, four requests at once, five-minute refresh budget.
+
+    A timed-out worker retains its eventual result for the next publication.
+    Only currently missing instruments are requested, not the whole universe.
+    """
+    global _yf_inflight, _yf_result
+    wanted = set(YF_SYMBOL_MAP) if labels is None else set(labels)
     with _yf_lock:
         now = datetime.now(timezone.utc)
-        if (_yf_cache["ts"] is not None and
-                (now - _yf_cache["ts"]).total_seconds() < YF_MIN_INTERVAL_SECS):
-            return copy.deepcopy(_yf_cache["data"])
-        if _yf_cooldown_until[0] is not None and now < _yf_cooldown_until[0]:
-            return copy.deepcopy(_yf_cache["data"] or {})
-        box = [None]
-        if _yf_inflight is not None and _yf_inflight.is_alive():
-            result = {}
-            error = "daily_observation_fetch_still_running"
-        else:
+        # Consume completed work before checking the cooldown: timeout must not
+        # throw away a later successful response.
+        completed = _yf_inflight is not None and not _yf_inflight.is_alive()
+        result = _yf_result if completed else None
+        if completed:
+            _yf_inflight = None
+            _yf_result = None
+        elif (_yf_cache['ts'] is not None and
+                (now - _yf_cache['ts']).total_seconds() < YF_MIN_INTERVAL_SECS):
+            return copy.deepcopy(_yf_cache['data'] or {})
+        if result is None and _yf_inflight is None:
+            requested = wanted.copy()
             def worker():
+                global _yf_result
                 try:
-                    box[0] = fetch_yf_prices()
+                    data = fetch_yf_prices(requested)
+                    if 'UST2Y' in requested:
+                        from .overview_sources import fetch_treasury
+                        try:
+                            data['UST2Y'] = fetch_treasury()
+                        except Exception:
+                            data['UST2Y'] = _failure('treasury_daily_fetch_failed')
+                    _yf_result = data
                 except Exception:
-                    box[0] = {}
-            _yf_inflight = threading.Thread(target=worker, name="yf-fetch", daemon=True)
+                    _yf_result = {}
+            _yf_inflight = threading.Thread(target=worker, name='overview-daily', daemon=True)
             _yf_inflight.start()
             _yf_inflight.join(timeout=YF_FETCH_TIMEOUT_SECS)
-            result = box[0] or {}
-            error = "daily_observation_timeout" if _yf_inflight.is_alive() else "daily_observation_unavailable"
-        finished = datetime.now(timezone.utc)
-        merged = {}
-        failed = False
-        for label in YF_SYMBOL_MAP:
-            attempt = result.get(label)
-            if isinstance(attempt, dict) and _positive(attempt.get("price")) is not None:
+            if not _yf_inflight.is_alive():
+                result, _yf_result, _yf_inflight = _yf_result, None, None
+            error = 'daily_observation_timeout'
+        else:
+            error = 'daily_observation_fetch_still_running'
+        merged = copy.deepcopy(_yf_cache['data'] or {})
+        for label in wanted | set(result or {}):
+            attempt = (result or {}).get(label, _failure(error, now.isoformat()))
+            if _finite(attempt.get('price')) is not None:
                 merged[label] = copy.deepcopy(attempt)
             else:
-                failed = True
-                remembered = (_yf_cache["data"] or {}).get(label, {})
-                merged[label] = copy.deepcopy(remembered)
-                merged[label].update(last_attempt_at=(attempt or {}).get("last_attempt_at", now.isoformat())
-                                     if isinstance(attempt, dict) else now.isoformat(),
-                                     refresh_error=attempt.get("refresh_error", error) if isinstance(attempt, dict) else error)
-                merged[label].setdefault("price", None)
-        _yf_cache.update(ts=finished, data=merged)
-        _yf_cooldown_until[0] = finished + timedelta(seconds=YF_COOLDOWN_SECS) if failed else None
+                merged.setdefault(label, {'price': None}).update(
+                    last_attempt_at=attempt.get('last_attempt_at', now.isoformat()),
+                    refresh_error=attempt.get('refresh_error', error))
+        _yf_cache.update(ts=now, data=merged)
+        _yf_cooldown_until[0] = now + timedelta(seconds=YF_MIN_INTERVAL_SECS)
         return copy.deepcopy(merged)
 
 
 def _dx_row(label, sym, raw, selected=None):
     bid, ask, last = (_positive(raw.get(k)) for k in ("bid", "ask", "last"))
-    mid = round((bid + ask) / 2, 4) if bid is not None and ask is not None else None
+    mid = _finite(round(bid / 2 + ask / 2, 4)) if bid is not None and ask is not None else None
     if selected is None:
         price, basis = (last, "last_trade") if last is not None else (mid, "bid_ask_midpoint" if mid is not None else None)
         receipt = raw.get("last_ts") if last is not None else (
@@ -215,6 +233,8 @@ def _dx_row(label, sym, raw, selected=None):
         observed = (min(raw["bid_observed_at"], raw["ask_observed_at"])
                     if raw.get("bid_observed_at") and raw.get("ask_observed_at") else None)
         session = None  # Quote has no trustworthy session discriminator.
+    from .overview_sources import RESOLVED_CONTRACTS
+    contract = RESOLVED_CONTRACTS.get(label)
     identity = _instrument_id(label)
     prev = _finite(raw.get("prev_close"))
     reference = None
@@ -226,7 +246,7 @@ def _dx_row(label, sym, raw, selected=None):
             "observation_date": raw.get("prev_close_date"), "observation_timezone": None,
             # Day ID retains its provider date, but Summary supplies no zone.
             "observation_granularity": None,
-            "session": None, "adjustment_basis": "unknown", "resolved_contract": None,
+            "session": None, "adjustment_basis": "unknown", "resolved_contract": contract,
         }
     return {
         "instrument_id": identity, "price": price, "bid": bid, "ask": ask,
@@ -238,7 +258,7 @@ def _dx_row(label, sym, raw, selected=None):
         "observation_time_reason": None if observed and price is not None else "provider_event_time_unavailable",
         "observation_date": None, "observation_timezone": "UTC" if observed else None,
         "observation_granularity": "event" if observed else None, "session": session,
-        "adjustment_basis": "unknown", "resolved_contract": None,
+        "adjustment_basis": "unknown", "resolved_contract": contract,
         "acquired_at": receipt, "last_success_at": receipt,
         "last_attempt_at": receipt, "refresh_error": None, "reference": reference,
     }
@@ -261,7 +281,7 @@ def _change(row):
         row["chg_pct"] = None
         return
     row["prev_close"] = prev
-    row["chg_pct"] = round((row["price"] - prev) / prev * 100, 2) if row.get("price") is not None and prev is not None and prev > 0 else None
+    row["chg_pct"] = _finite(round((row["price"] - prev) / prev * 100, 2)) if row.get("price") is not None and prev is not None and prev > 0 else None
 
 
 def push_prices(s3, feed: DXLinkFeed, counters: Counters,
@@ -272,15 +292,15 @@ def push_prices(s3, feed: DXLinkFeed, counters: Counters,
     feed_stale = last_event is None or (ts_utc - last_event).total_seconds() > STALE_FEED_SECS
     prices = {label: _dx_row(label, sym, state.get(sym, {})) for label, sym in PRICE_TICKERS.items()}
     missing = [label for label, row in prices.items() if row["price"] is None]
-    yf_data = _entry.fetch_yf_prices_bounded() if missing else {}
+    yf_data = _entry.fetch_yf_prices_bounded(missing) if missing else {}
     for label in missing:
         row = prices[label]
         attempt = yf_data.get(label)
         # Explicit map gate excludes JPY spot and any unapproved fallback.
-        if (label in YF_SYMBOL_MAP and isinstance(attempt, dict)
+        if ((label in YF_SYMBOL_MAP or label == "UST2Y") and isinstance(attempt, dict)
                 and _positive(attempt.get("price")) is not None
                 and attempt.get("instrument_id") == row["instrument_id"]
-                and attempt.get("source_symbol") == YF_SYMBOL_MAP[label]):
+                and attempt.get("source_symbol") == ("BC_2YEAR" if label == "UST2Y" else YF_SYMBOL_MAP[label])):
             prices[label] = copy.deepcopy(attempt)
             if label == "QQQ":
                 QQQ_SESSION.last_spot[:] = [attempt["price"], None]
