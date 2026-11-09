@@ -24,13 +24,17 @@ class Activation(unittest.TestCase):
             'future-product': {'code': 'CL'}, 'streamer-symbol': '/CLF99:XNYM'},
             {'active-month': False, 'active': True, 'expiration-date': '2099-02-20',
             'future-product': {'code': 'CL'}, 'streamer-symbol': '/CLG99:XNYM'}]
-        with patch.object(sources, 'PRICE_TICKERS', {}), patch.object(sources, 'RESOLVED_CONTRACTS', {}), patch.object(sources.requests, 'get') as get:
+        with patch.object(sources, 'PRICE_TICKERS', {}), patch.object(sources, 'RESOLVED_CONTRACTS', {}), patch.object(sources, '_RESOLVED_FOR_DATE', None), patch.object(sources.requests, 'get') as get:
             get.return_value.json.return_value = {'data': {'items': items}}
             sources.resolve_futures('test')
             self.assertEqual(sources.PRICE_TICKERS['/CL'], '/CLF99:XNYM')
             self.assertEqual(sources.RESOLVED_CONTRACTS['/CL']['root'], 'CL')
-            get.side_effect = RuntimeError('provider unavailable')
+            # A same-day repeat is a cache read, so the shared lane/session
+            # caller cannot clear the other's symbols mid-publish.
             sources.resolve_futures('test')
+            self.assertEqual(get.call_count, 1)
+            get.side_effect = RuntimeError('provider unavailable')
+            sources.resolve_futures('test', force=True)
             self.assertIsNone(sources.PRICE_TICKERS['/CL'])
             self.assertEqual(sources.RESOLVED_CONTRACTS, {})
 

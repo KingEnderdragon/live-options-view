@@ -21,6 +21,7 @@ from .config import (
     COLLECT_SPY,
     ET,
     HEALTH_SECS,
+    PRICE_LANE_ENABLED,
     PRICES_SECS,
     PRICE_TICKERS,
     SNAPSHOT_SECS,
@@ -43,6 +44,7 @@ from .prices import (
     make_s3,
     prices_loop,
 )
+from .price_lane import PriceLane, build_rolling_store
 from .quotes import (
     LiveQuoteRegistry,
     _fresh_spy_spot,
@@ -60,6 +62,16 @@ from .state import (
     restore_state,
 )
 from .sessions import weekly_snapshot_loop
+
+
+def price_writer_plan() -> str:
+    """The single decision point for who writes intraday/prices.json (#178).
+
+    main() starts the continuous lane for this plan; _run_session() starts the
+    legacy in-session loop only for the other value. Keeping one function means
+    the two can never both be active because of duplicated env checks.
+    """
+    return "continuous_price_lane" if PRICE_LANE_ENABLED else "in_session_legacy"
 
 def _run_session(token_manager: OAuthTokenManager, quote_registry: LiveQuoteRegistry):
     run_id        = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ-") + secrets.token_hex(3)
@@ -230,10 +242,18 @@ def _run_session(token_manager: OAuthTokenManager, quote_registry: LiveQuoteRegi
     if "SPY" in extra_trackers:
         spy_context["counters"], spy_context["tracker"] = extra_trackers["SPY"]
 
-    prices_thread = threading.Thread(
-        target=prices_loop, args=(s3, feed, counters, quote_registry), daemon=True)
-    prices_thread.start()
-    log.info(f"prices thread started (every {PRICES_SECS}s)")
+    prices_thread = None
+    if price_writer_plan() == "in_session_legacy":
+        # Legacy rollback path: the chain session remains the price writer.
+        prices_thread = threading.Thread(
+            target=prices_loop, args=(s3, feed, counters, quote_registry), daemon=True)
+        prices_thread.start()
+        log.info(f"prices thread started (every {PRICES_SECS}s, legacy in-session writer)")
+    else:
+        # The continuous price lane owns intraday/prices.json (#178). Starting a
+        # second publisher here would race it, so this thread is deliberately
+        # absent.
+        log.info("price publication owned by the continuous price lane (options=0 subscriptions there)")
 
     health_thread = threading.Thread(
         target=health_loop,
@@ -335,6 +355,19 @@ def main():
 
     quote_registry = LiveQuoteRegistry()
     _entry.start_live_quote_server(quote_registry)
+
+    # Continuous price lane (#178). It owns its own authenticated DXLink
+    # connection and the prices.json write, independent of the option-chain
+    # session below. PRICE_LANE_ENABLED=0 restores the legacy path in
+    # _run_session; the two are mutually exclusive.
+    price_lane = None
+    if price_writer_plan() == "continuous_price_lane":
+        lane_s3 = _entry.make_s3()
+        price_lane = PriceLane(
+            token_manager, quote_registry, lane_s3,
+            rolling_store=build_rolling_store(lane_s3),
+        )
+        price_lane.start()
 
     # Independent of the QQQ market session (unlike prices_loop/health_loop,
     # started fresh inside every _run_session): EIA STEO has nothing to do

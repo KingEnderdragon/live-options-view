@@ -264,6 +264,52 @@ def _dx_row(label, sym, raw, selected=None):
     }
 
 
+def _attach_lane_observations(prices, lane_context, rolling_store, now):
+    """Additive (#178) session and reference fields; the legacy contract is untouched."""
+    from .price_history import change_percent
+
+    sessions = lane_context.get("sessions") or {}
+    instruments = {row["label"]: row for row in INSTRUMENTS}
+    for label, row in prices.items():
+        instrument = instruments.get(label) or {}
+        session = sessions.get(label)
+        if session:
+            row["market_session"] = session
+        asset_class = instrument.get("asset_class")
+        if asset_class == "crypto":
+            reference = None
+            if rolling_store is not None:
+                if (row.get("price") is not None and row.get("source") == "dxlink"
+                        and not row.get("stale")):
+                    rolling_store.observe(label, row["price"],
+                                          row.get("observed_at") or row.get("quote_ts"))
+                reference = rolling_store.reference(
+                    label, now, instrument_id=row.get("instrument_id"),
+                    source_symbol=row.get("source_symbol") or instrument.get("dxlink_symbol"))
+            row["rolling_reference"] = reference
+            row["rolling_change_pct"] = change_percent(row.get("price"), reference) if reference else None
+            row["change_basis"] = "rolling_24h" if reference else "unavailable"
+        elif instrument.get("profile") == "FU":
+            reference = row.get("reference") or {}
+            current_contract = row.get("resolved_contract") or {}
+            same_contract = bool(current_contract) and (
+                reference.get("resolved_contract") == current_contract)
+            row["rolling_reference"] = None
+            row["rolling_change_pct"] = None
+            row["change_basis"] = ("prior_day_close_same_contract" if same_contract
+                                   else "contract_reference_unverified")
+        elif row.get("source") in ("dxlink", "last-known") and instrument.get("asset_class") in (
+                "equity", "etf", "index"):
+            row["rolling_reference"] = None
+            row["rolling_change_pct"] = None
+            row["change_basis"] = "previous_close_unverified"
+        else:
+            row["rolling_reference"] = None
+            row["rolling_change_pct"] = None
+            row["change_basis"] = "dated_or_unknown"
+    return prices
+
+
 def _change(row):
     reference = row.get("reference")
     # Never combine a fallback's value with another identity/source's Summary.
@@ -285,9 +331,12 @@ def _change(row):
 
 
 def push_prices(s3, feed: DXLinkFeed, counters: Counters,
-                quote_registry: Optional[LiveQuoteRegistry] = None):
+                quote_registry: Optional[LiveQuoteRegistry] = None, *,
+                lane_context: Optional[dict] = None,
+                rolling_store=None,
+                now_utc: Optional[datetime] = None):
     state, fh = feed.get_state(), feed.get_health()
-    ts_utc = datetime.now(timezone.utc)
+    ts_utc = now_utc or datetime.now(timezone.utc)
     last_event = fh["last_feed_event_time"]
     feed_stale = last_event is None or (ts_utc - last_event).total_seconds() > STALE_FEED_SECS
     prices = {label: _dx_row(label, sym, state.get(sym, {})) for label, sym in PRICE_TICKERS.items()}
@@ -329,13 +378,22 @@ def push_prices(s3, feed: DXLinkFeed, counters: Counters,
         if row["price"] is not None and label != "SPY":
             # SPY is not a legacy macro CSV column or last-known tile.
             _last_prices[label] = copy.deepcopy(row)
+    if lane_context is not None:
+        _attach_lane_observations(prices, lane_context, rolling_store, ts_utc)
     if quote_registry is not None:
         quote_registry.update_ticker_fallbacks(prices, ts_utc.isoformat())
-    payload = json.dumps({
+    payload = {
         "schema_version": 2, "universe_version": UNIVERSE_VERSION, "timestamp": ts_utc.isoformat(),
         "snapshot_time": ts_utc.astimezone(ET).strftime("%H:%M ET"),
         "feed_stale": feed_stale, "prices": prices,
-    }, default=str, allow_nan=False)
+    }
+    if lane_context is not None:
+        payload["price_lane"] = {
+            "writer_id": lane_context.get("writer_id"),
+            **copy.deepcopy(lane_context.get("summary") or {}),
+            "sessions_by_label": dict(lane_context.get("sessions") or {}),
+        }
+    payload = json.dumps(payload, default=str, allow_nan=False)
     try:
         s3.put_object(Bucket=R2_BUCKET, Key="intraday/prices.json", Body=payload.encode(),
                       ContentType="application/json", CacheControl="no-cache, max-age=0")
