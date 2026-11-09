@@ -30,7 +30,7 @@ retrospective hindsight. The 30-minute quote-side freshness limit is unchanged.
 
 ## Acceptance checkboxes → exact tests (all passing)
 
-Suite: OA-203, **161 tests, OK** (local and MSI; 1 skipped on MSI).
+Suite: OA-203, **162 tests, OK** (local and MSI; 1 skipped on MSI).
 Run: `~/workspace/.tools/182-venv/bin/python -m unittest
 tests.test_oa203_windows tests.test_oa203_windows_outputs
 tests.test_oa203_windows_replay tests.test_oa203_return_scanner
@@ -174,8 +174,18 @@ evidence, coverage and calculation versions
   unexpected or duplicate batch, a non-disjoint or incomplete union, or
   an inconsistent source lock FAILS the run (exit non-zero) instead of
   producing a partial result. It then asserts each window's rows are
-  fully accounted for: combined rows + pure duplicates + conflicting
-  attributions == the sum of the 14 batch summaries (71,818).
+  fully accounted for with **two separate accountings**: raw-row
+  accounting (combined rows + removed duplicate rows + conflicting
+  attributions == the sum of the 14 batch summaries, 71,818) and
+  distinct-symbol accounting (kept symbols + conflicting symbols ==
+  distinct symbols). Removed duplicate rows are counted as
+  `len(group)-1` per pure-duplicate group (so 3+ identical copies
+  remove 2+ rows), and `kept` already contains one entry per
+  pure-duplicate group, so the duplicate-group count is NOT added to
+  the distinct-symbol accounting (a defect in the earlier accounting
+  double-counted pure-duplicate groups and raised AssertionError on
+  byte-identical duplicates; fixed and covered by
+  `test_identical_duplicate_dedups_and_metadata_or_flags_conflict`).
   **Data-quality finding: 54 OCC symbols are attributed to two
   underlyings in the source archive — PSKY and SKYD share 54 SKYD-rooted
   symbols** (the same contract appears under both the PSKY chain and the
@@ -188,22 +198,35 @@ evidence, coverage and calculation versions
   a symbol whose attributions differ in evidence is EXCLUDED from the
   combined ranked output — it is not ranked, not eligible, and no
   canonical economic identity is asserted from root spelling; its paths
-  are NOT stitched. Both provenance/coverage records are preserved in
-  `conflicts.csv` (108 rows per window: 2 attributions × 54 symbols;
-  540 rows total). The 54 conflicting symbols are absent from all five
-  combined CSVs (verified: 0 rows for the example symbol in each).
-  Eligible counts are unchanged by the exclusion (all 54 were excluded
-  in both attributions). Regression tests:
-  `test_conflicting_duplicates_fail_closed_with_both_records` and
-  `test_missing_or_inconsistent_batch_fails`.
+  are NOT stitched. Evidence for the comparison includes the identity
+  fields (`option_type`, `strike`, `expiration`) and the quality fields
+  (`flags`, `abs_change_per_contract`) as well as status, reasons,
+  values and sessions, so a metadata-only or flags-only difference is
+  a conflict, not a silent selection. Both provenance/coverage records
+  are preserved in `conflicts.csv` (108 rows per window: 2 attributions
+  × 54 symbols; 540 rows total), with the complete record including
+  `abs_change_per_contract`. The 54 conflicting symbols are absent from
+  all five combined CSVs (verified: 0 rows for the example symbol in
+  each). Eligible counts are unchanged by the exclusion (all 54 were
+  excluded in both attributions). Regression tests:
+  `test_conflicting_duplicates_fail_closed_with_both_records`,
+  `test_identical_duplicate_dedups_and_metadata_or_flags_conflict`
+  (byte-identical dedup, 3+ copies, metadata-only and flags-only
+  conflicts) and `test_missing_or_inconsistent_batch_fails`.
 - **Hashes (sha256, `replay-130-full-combined/`):**
-  - `full_universe_summary.json`: `a98b82231d2291d8a41e247ee6ef7de69484893b4565f815cc5be91905db959f`
-  - `conflicts.csv`: `5cc0236837b9ea34f6db87704a1f64d63a07a89f694b23bb9f8d016ae5ab0807`
+  - `full_universe_summary.json`: `c70253f79aacd5e6e54ad63b3241506cc1370f8debce63d7574489939ba1fb6e`
+  - `conflicts.csv`: `c5942a099b42d5400e9a5d82030bc9016dca65a83158c9bdc2c7d7d2824ba89d`
+    (changed from round 4 because the receipt now includes
+    `abs_change_per_contract`)
   - `overnight-2026-10-05_2026-10-06.csv`: `0500e7d439044dfd710bc119657fb7e3bb662db9a22ce1a351f16b1afe24fa36`
   - `overnight-2026-10-06_2026-10-07.csv`: `de08d1446bcb8eab870b31e08e2907f446cd46e4cbf8357d5fd5fa26c6f6ebdc`
   - `sessions2-2026-10-05_2026-10-06.csv`: `8b07d0f8aa0d027327f1159a649f1925c66ec8226ca99a16c24138df7aa95e96`
   - `sessions2-2026-10-06_2026-10-07.csv`: `08b5fc01b192210238e9b027062cd516e0425195700ea13e737bee9c97857996`
   - `sessions3-2026-10-05_2026-10-07.csv`: `4f92b5e11f422448bb92a3450a8e4cf2cf2153a175ab06629e51d1fbf7d5fd43`
+  - The five combined CSV hashes are **unchanged from round 4** (the
+    accounting and evidence-field fixes do not change the real ranking);
+    only `conflicts.csv` and the summary changed (new receipt column and
+    renamed summary fields).
 - **Source lock:** each batch's `source_lock.json` records every fetched
   blob with its SHA-256 (237 source blobs per batch: 228 sweeps — 76 per
   day, the truncated final sweep per day is not fetched — plus
@@ -232,7 +255,8 @@ evidence, coverage and calculation versions
   `test_calendar_rejects_missing_session_and_wrong_bounds`,
   plus the `OutputSchema` tests (ranked CSV schema, per-basis
   summary, cache reuse + hash verification, conflicting duplicates
-  fail-closed with both records preserved, missing/inconsistent batch
+  fail-closed with both records preserved, identical dedup with 3+
+  copies and metadata/flags-only conflicts, missing/inconsistent batch
   fails).
 - Each replay report records `policy` (version `oa203-windows-v1` and
   `decisions_status`), `window` (id, kind, sessions), `sources`

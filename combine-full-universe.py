@@ -48,12 +48,15 @@ COLUMNS = ["rank", "symbol", "underlying", "option_type", "strike", "expiration"
            "abs_change_per_contract", "entry_session", "exit_session", "entry_ms", "exit_ms", "flags", "status", "reasons"]
 # Evidence fields that must agree for two rows of the same symbol to be a
 # pure duplicate rather than a conflict. Attribution (underlying/batch)
-# may differ; evidence must not.
+# may differ; evidence must not. Identity fields (option_type, strike,
+# expiration) and quality fields (flags, abs_change_per_contract) are
+# evidence too: differing identity/quality must not be silently selected.
 EVIDENCE_FIELDS = ["status", "reasons", "pct", "entry", "exit", "abs_change_per_contract",
-                   "entry_session", "exit_session", "entry_ms", "exit_ms"]
+                   "entry_session", "exit_session", "entry_ms", "exit_ms",
+                   "option_type", "strike", "expiration", "flags"]
 CONFLICT_COLUMNS = ["window", "symbol", "batch", "underlying", "option_type", "strike", "expiration",
-                    "status", "reasons", "pct", "entry", "exit", "entry_session", "exit_session",
-                    "entry_ms", "exit_ms", "flags"]
+                    "status", "reasons", "pct", "entry", "exit", "abs_change_per_contract",
+                    "entry_session", "exit_session", "entry_ms", "exit_ms", "flags"]
 
 
 def pct_of(row):
@@ -152,14 +155,16 @@ def main():
             by_symbol[r["symbol"]].append(r)
         kept = []
         conflicts = []
-        pure_dupes = 0
+        pure_dupe_groups = 0
+        removed_dupes = 0
         for sym, group in by_symbol.items():
             if len(group) == 1:
                 kept.append(group[0])
                 continue
             first = {k: group[0].get(k, "") for k in EVIDENCE_FIELDS}
             if all({k: r.get(k, "") for k in EVIDENCE_FIELDS} == first for r in group[1:]):
-                pure_dupes += 1
+                pure_dupe_groups += 1
+                removed_dupes += len(group) - 1
                 kept.append(group[0])
                 continue
             # Conflict: differing evidence. Exclude from the ranked output;
@@ -170,19 +175,25 @@ def main():
             for r in group:
                 all_conflicts.append({"window": win, **{c: r.get(c, "") for c in CONFLICT_COLUMNS[1:]},
                                       "batch": r["_batch"]})
-        # No-missing audit: every raw row is accounted for exactly once —
-        # either in the combined output, as a pure duplicate, or as a
-        # conflicting attribution in the conflict report.
-        accounted = len(kept) + pure_dupes + sum(len(g) for _, g in conflicts)
+        # Raw-row accounting: every raw row is accounted for exactly once —
+        # either in the combined output, as a removed duplicate row, or as
+        # a conflicting attribution in the conflict report.
+        accounted = len(kept) + removed_dupes + sum(len(g) for _, g in conflicts)
         assert accounted == expected_total, (
             f"{win}: accounted {accounted} != expected {expected_total}")
-        assert len(kept) + pure_dupes + len(conflicts) == len(by_symbol), (
-            f"{win}: symbol accounting mismatch")
+        # Distinct-symbol accounting (separate from raw rows): every
+        # distinct symbol is either kept once or conflicting. `kept`
+        # already contains one entry per pure-duplicate group, so the
+        # duplicate-group count is NOT added here.
+        assert len(kept) + len(conflicts) == len(by_symbol), (
+            f"{win}: kept {len(kept)} + conflicting {len(conflicts)} "
+            f"!= distinct symbols {len(by_symbol)}")
         if conflicts:
             print(f"{win}: {len(conflicts)} conflicting symbols excluded (fail closed); "
                   f"{sum(len(g) for _, g in conflicts)} rows preserved in conflict report", flush=True)
-        if pure_dupes:
-            print(f"{win}: {pure_dupes} pure duplicates deduped", flush=True)
+        if pure_dupe_groups:
+            print(f"{win}: {pure_dupe_groups} pure-duplicate groups deduped "
+                  f"({removed_dupes} rows removed)", flush=True)
         rows = kept
         # Global re-rank (qualified basis): eligible by pct desc, symbol asc.
         elig = sorted((r for r in rows if r["status"] == "eligible"),
@@ -211,7 +222,8 @@ def main():
             "contracts": len(rows), "eligible": n_elig,
             "excluded": len(rows) - n_elig,
             "conflicting_symbols": len(conflicts),
-            "pure_duplicates": pure_dupes,
+            "pure_duplicate_groups": pure_dupe_groups,
+            "pure_duplicate_rows_removed": removed_dupes,
             "top_exclusion_reasons": dict(reasons.most_common(5)),
             "top": [{"rank": r["rank"], "symbol": r["symbol"], "pct": r["pct"],
                      "entry": r["entry"], "exit": r["exit"]} for r in elig[:5]],

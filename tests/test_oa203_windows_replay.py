@@ -292,6 +292,122 @@ class OutputSchema(unittest.TestCase):
             self.assertEqual(summary["conflicts"]["symbols"], 1)
             self.assertEqual(summary["conflicts"]["rows"], 10)
 
+    def test_identical_duplicate_dedups_and_metadata_or_flags_conflict(self):
+        # (a) Two byte-identical evidence rows for one symbol dedup to a
+        # single row in the combined output (no conflict, exit 0) — the
+        # reproducer for the line-179 accounting defect. Three identical
+        # rows remove len(group)-1 = 2 rows. (b) Rows identical except for
+        # a metadata field (strike) or a quality field (flags) are a
+        # conflict, not a pure duplicate: excluded fail-closed, both
+        # records preserved. Differing identity/quality evidence is never
+        # silently selected.
+        import subprocess
+        import tempfile
+        root = Path(__file__).resolve().parents[1]
+        cols = ["rank", "symbol", "underlying", "option_type", "strike", "expiration", "pct", "entry", "exit",
+                "abs_change_per_contract", "entry_session", "exit_session", "entry_ms", "exit_ms", "flags", "status", "reasons"]
+        wins = ["overnight-2026-10-05_2026-10-06", "overnight-2026-10-06_2026-10-07",
+                "sessions2-2026-10-05_2026-10-06", "sessions2-2026-10-06_2026-10-07",
+                "sessions3-2026-10-05_2026-10-07"]
+        win = wins[0]
+
+        def base_row(symbol, underlying, **over):
+            r = {"rank": "", "symbol": symbol, "underlying": underlying, "option_type": "put",
+                 "strike": "4.0", "expiration": "2026-10-09", "pct": "", "entry": "", "exit": "",
+                 "abs_change_per_contract": "", "entry_session": "", "exit_session": "",
+                 "entry_ms": "", "exit_ms": "", "flags": "", "status": "excluded",
+                 "reasons": "missing_session:2026-10-05"}
+            r.update(over)
+            return r
+
+        def run_case(rows_by_batch, contracts_per_batch):
+            # rows_by_batch: list of (underlying, [row, ...]) per batch.
+            # Each batch has the same rows in every window. Returns
+            # (returncode, stderr, combined rows per window, conflict rows,
+            # summary) — read inside the temp dir before it is removed.
+            with tempfile.TemporaryDirectory() as tmp:
+                tmp = Path(tmp)
+                batches_dir = tmp / "batches"
+                planned = [[u] for u, _ in rows_by_batch]
+                (tmp / "batches.json").write_text(json.dumps(planned))
+                (tmp / "union.json").write_text(json.dumps([u for u, _ in rows_by_batch]))
+                lock = {"sources": [{"key": "k", "sha256": "a" * 64, "bytes": 1}]}
+                for i, (under, rows) in enumerate(rows_by_batch, 1):
+                    d = batches_dir / f"batch-{i:02d}"
+                    d.mkdir(parents=True)
+                    (d / "replay_summary.json").write_text(json.dumps(
+                        {"contracts": contracts_per_batch, "underlyings": [under]}))
+                    (d / "source_lock.json").write_text(json.dumps(lock))
+                    for w in wins:
+                        with open(d / f"{w}.csv", "w", newline="") as f:
+                            wr = csv.DictWriter(f, fieldnames=cols, lineterminator="\n")
+                            wr.writeheader()
+                            for r in rows:
+                                wr.writerow(r)
+                out = tmp / "combined"
+                r = subprocess.run([sys.executable, str(root / "combine-full-universe.py"),
+                                    "--batches-dir", str(batches_dir), "--out", str(out),
+                                    "--planned-batches", str(tmp / "batches.json"),
+                                    "--planned-union", str(tmp / "union.json")],
+                                   capture_output=True, text=True)
+                if r.returncode != 0:
+                    return r.returncode, r.stderr, None, None, None
+                combined = {}
+                for w in wins:
+                    with open(out / f"{w}.csv", newline="") as f:
+                        combined[w] = list(csv.DictReader(f))
+                with open(out / "conflicts.csv", newline="") as f:
+                    conf = list(csv.DictReader(f))
+                summary = json.loads((out / "full_universe_summary.json").read_text())
+                return r.returncode, r.stderr, combined, conf, summary
+
+        # (a) Two byte-identical rows (only the underlying/batch differs):
+        # dedup to one row, no conflict, exit 0.
+        rc, err, combined, conf, summary = run_case(
+            [("AA", [base_row("AA261009P00004000", "AA")]),
+             ("BB", [base_row("AA261009P00004000", "BB")])], 1)
+        self.assertEqual(rc, 0, err)
+        got = combined[win]
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0]["symbol"], "AA261009P00004000")
+        self.assertEqual(conf, [])
+        self.assertEqual(summary["windows"][win]["pure_duplicate_groups"], 1)
+        self.assertEqual(summary["windows"][win]["pure_duplicate_rows_removed"], 1)
+        self.assertEqual(summary["windows"][win]["conflicting_symbols"], 0)
+
+        # (a2) Three identical rows: dedup to one, 2 rows removed.
+        rc, err, combined, conf, summary = run_case(
+            [("AA", [base_row("AA261009P00004000", "AA")]),
+             ("BB", [base_row("AA261009P00004000", "BB")]),
+             ("CC", [base_row("AA261009P00004000", "CC")])], 1)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(len(combined[win]), 1)
+        self.assertEqual(summary["windows"][win]["pure_duplicate_groups"], 1)
+        self.assertEqual(summary["windows"][win]["pure_duplicate_rows_removed"], 2)
+
+        # (b) Metadata-only difference (strike): a conflict, excluded.
+        rc, err, combined, conf, summary = run_case(
+            [("AA", [base_row("AA261009P00004000", "AA")]),
+             ("BB", [base_row("AA261009P00004000", "BB", strike="5.0")])], 1)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(combined[win], [])
+        conf_win = [c for c in conf if c["window"] == win]
+        self.assertEqual(len(conf_win), 2)
+        self.assertEqual({c["strike"] for c in conf_win}, {"4.0", "5.0"})
+        # The conflict receipt preserves the complete record.
+        self.assertIn("abs_change_per_contract", conf_win[0])
+        self.assertEqual(summary["windows"][win]["conflicting_symbols"], 1)
+
+        # (b2) Flags-only difference: also a conflict, excluded.
+        rc, err, combined, conf, summary = run_case(
+            [("AA", [base_row("AA261009P00004000", "AA")]),
+             ("BB", [base_row("AA261009P00004000", "BB", flags="exit_on_expiration_day")])], 1)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(combined[win], [])
+        conf_win = [c for c in conf if c["window"] == win]
+        self.assertEqual(len(conf_win), 2)
+        self.assertEqual({c["flags"] for c in conf_win}, {"", "exit_on_expiration_day"})
+
     def test_missing_or_inconsistent_batch_fails(self):
         # A missing batch, an unexpected batch, a non-disjoint union, or
         # an inconsistent source lock FAILS the combine instead of
