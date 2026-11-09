@@ -32,7 +32,8 @@ test('exact-100 registry, original aliases, disabled candidates and full denomin
   assert.equal(a.coverage.full_universe.available_prices,1);assert.equal(a.coverage.full_universe.missing_prices,99);
   assert.equal(a.coverage.full_universe.ok_changes,1);assert.equal(a.coverage.full_universe.unavailable_changes,99);
   assert.equal(a.actual.universe_version,'market-overview-100-v1');
-  const missing=[...a.rows,...b.rows].find(r=>r.label==='MSFT');assert.equal(missing.enabled,false);assert.equal(missing.price,null);assert.equal(missing.coverage.reason,'candidate_disabled_pending_provider_review');
+  const missing=[...a.rows,...b.rows].find(r=>r.label==='MSFT');assert.equal(missing.enabled,false);assert.equal(missing.compact,false);assert.equal(missing.price,null);assert.equal(missing.coverage.reason,'candidate_disabled_pending_provider_review');
+  assert.equal([...a.rows,...b.rows].filter(r=>r.compact).length,18);
   const original=['QQQ','SPY','SMH','IGV','USO','VIX','OVX','KOSPI','10Y','JPY/USD','BTC/USD','META','GOOGL','AMZN','TSLA','MU','AAPL','SPCX'];
   assert.deepEqual(overview.universe.instruments.slice(0,18).map(i=>i.label),original);
   assert.equal(LIMITS.rows,50);assert.equal(LIMITS.references,64);assert.equal(s.reads(),2);
@@ -102,6 +103,22 @@ test('a quote midpoint without a reported session, or an event outside any sessi
   assert.equal(r.freshness.observation_window,'closed');assert.equal(r.freshness.live,false);
 });
 
+test('an unactivated candidate published by a producer is never used, and bad session labels fail closed',async()=>{
+  const injected=await setup({MSFT:event('MSFT')}).consumer.call('market_overview',{symbols:['MSFT']});
+  assert.notEqual(injected.status,'failed');const row=injected.rows[0];
+  assert.equal(row.enabled,false);assert.equal(row.price,null);assert.equal(row.coverage.reason,'published_without_activation');
+  assert.equal(row.change.status,'unavailable');assert.equal(row.freshness.live,false);assert.equal(row.raw_price,202);
+  for(const override of [{session:'banana'},{reference:{...event('AAPL').reference,session:'banana'}}]){
+    const out=await setup({AAPL:event('AAPL',override)}).consumer.call('market_overview');assert.equal(out.status,'failed');assert.equal(out.errors[0].code,'incompatible_schema');
+  }
+});
+
+test('a reference more than one exchange session old cannot produce a previous-close move',async()=>{
+  const stale=event('AAPL');stale.reference={...stale.reference,observed_at:'2026-09-01T20:00:00Z'};
+  const r=await one(setup({AAPL:stale}),'AAPL');
+  assert.equal(r.change.status,'unavailable');assert.equal(r.change.absolute,null);assert.ok(r.change.reasons.includes('reference_not_previous_session'));
+});
+
 test('unverified calendars stay unknown; crypto can be continuous and equity holiday is closed',async()=>{  let r=await one(setup({KOSPI:event('KOSPI')}),'KOSPI');assert.equal(r.freshness.market_state,'unknown');assert.equal(r.freshness.live,false);
   r=await one(setup({'BTC/USD':event('BTC/USD')}),'BTC/USD');assert.equal(r.freshness.market_state,'continuous_market');assert.equal(r.freshness.live,true);
   const now=Date.parse('2026-11-26T16:10:00Z');r=await one(setup({AAPL:event('AAPL',{observed_at:'2026-11-26T16:09:50Z'})},{now}));assert.equal(r.freshness.market_state,'closed');assert.equal(r.freshness.live,false);
@@ -111,8 +128,16 @@ test('negative commodity futures allowed only for a matched resolved contract; u
   const i=overview.universe.instruments.find(i=>i.id==='fut.cl');assert.ok(i);
   const c={symbol:'/CLZ26:XNYM',expiry:'2026-11-20',root:'CL',exchange:'XNYM',selection_at:'2026-10-02T15:00:00Z',roll_rule:'explicit dated contract'};
   const e=event(i.label,{price:-20,source_symbol:c.symbol,resolved_contract:c});e.reference={...e.reference,value:-10,source_symbol:c.symbol,resolved_contract:c};
-  let r=await one(setup({[i.label]:e}),i.label);assert.equal(r.price,-20);assert.equal(r.change.absolute,-10);assert.equal(r.change.percent,100);
-  e.reference.resolved_contract={...c,symbol:'/CLF27:XNYM'};r=await one(setup({[i.label]:e}),i.label);assert.equal(r.change.status,'unavailable');assert.equal(r.price,null);assert.ok(r.change.reasons.includes('contract_unresolved_or_mismatch'));
+  // A disabled candidate published by a producer is never used.
+  let r=await one(setup({[i.label]:e}),i.label);assert.equal(r.price,null);assert.equal(r.change.status,'unavailable');
+  // Its contract arithmetic still holds once that slot is activated.
+  const activated={...i,enabled:true};
+  const payload={schema_version:2,timestamp:'2026-10-02T16:09:58Z',feed_stale:false,prices:{[i.label]:e}};
+  let out=overview.rows(payload,NOW,[activated]).known[0];
+  assert.equal(out.price,-20);assert.equal(out.change.absolute,-10);assert.equal(out.change.percent,100);
+  e.reference.resolved_contract={...c,symbol:'/CLF27:XNYM'};
+  out=overview.rows(payload,NOW,[activated]).known[0];
+  assert.equal(out.change.status,'unavailable');assert.equal(out.price,null);assert.ok(out.change.reasons.includes('contract_unresolved_or_mismatch'));
 });
 
 test('both percent orders page the full universe with deterministic missing-value ties and bounded output',async()=>{

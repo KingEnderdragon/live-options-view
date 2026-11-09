@@ -72,6 +72,9 @@ function validate(p) {
     if (p.schema_version === 2) {
       const expectedId = label === 'JPY/USD' && origin === 'yfinance' ? JPY_SPOT.id : INSTRUMENTS[label]?.id;
       check(r.instrument_id == null || !expectedId || r.instrument_id === expectedId, `Instrument identity mismatch for ${label}.`);
+      check([undefined, null, 'regular', 'extended', 'daily'].includes(r.session) &&
+        (r.reference == null || [undefined, null, 'regular', 'extended', 'daily'].includes(r.reference.session)),
+        `Unknown session label for ${label}.`);
       check(observationValid(r) && ['instrument_id','session','adjustment_basis','observation_time_reason'].every(k => r[k] == null || typeof r[k] === 'string') &&
         (r.resolved_contract == null || object(r.resolved_contract)) && ['collector_received_at','acquired_at','last_success_at','last_attempt_at'].every(k => time(r[k])) &&
         (r.refresh_error == null || typeof r.refresh_error === 'string' || object(r.refresh_error)), `Invalid observation provenance for ${label}.`);
@@ -90,16 +93,26 @@ const round = (v, places) => v === null ? null : Number(v.toFixed(places));
 
 const eastern = ms => Object.fromEntries(new Intl.DateTimeFormat('en-US', {timeZone:'America/New_York',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).formatToParts(new Date(ms)).filter(p=>p.type!=='literal').map(p=>[p.type,Number(p.value)]));
 const tradingDays = new Set(calendar.slots.map(s => { const t = eastern(Date.parse(s)); return `${t.year}-${String(t.month).padStart(2,'0')}-${String(t.day).padStart(2,'0')}`; }));
+const tradingDayList = [...tradingDays].sort();
+// Trading sessions strictly between two XNYS dates, or null when outside the
+// published calendar (unverifiable is not the same as one session).
+function sessionsBetween(earlier, later) {
+  const a = tradingDayList.indexOf(earlier), b = tradingDayList.indexOf(later);
+  return a < 0 || b < 0 || b < a ? null : b - a;
+}
 function equitySession(ms) {
   const t = eastern(ms), day = `${t.year}-${String(t.month).padStart(2,'0')}-${String(t.day).padStart(2,'0')}`;
   if (ms < Date.parse(calendar.valid_from) || ms >= Date.parse(calendar.valid_until)) return 'unknown';
   if (!tradingDays.has(day)) return 'closed';
   const minutes = t.hour * 60 + t.minute;
+  // The published calendar names trading days but carries no session-close
+  // metadata. A commonly shortened session therefore cannot be certified as
+  // regular-length or closed; report unknown rather than guess either way.
   const thanksgiving = t.month === 11 && t.day >= 23 && t.day <= 29 && new Date(Date.UTC(t.year,t.month-1,t.day)).getUTCDay() === 5;
-  const earlyClose = thanksgiving || (t.month === 7 && [2,3].includes(t.day)) || (t.month === 12 && [23,24].includes(t.day));
+  if (thanksgiving || (t.month === 7 && [2,3].includes(t.day)) || (t.month === 12 && [23,24].includes(t.day))) return 'unknown';
   if (minutes >= 390 && minutes < 570) return 'premarket';
-  if (minutes >= 570 && minutes < (earlyClose ? 780 : 960)) return 'regular';
-  if (minutes >= (earlyClose ? 780 : 960) && minutes < 975) return earlyClose ? 'closed' : 'postmarket';
+  if (minutes >= 570 && minutes < 960) return 'regular';
+  if (minutes >= 960 && minutes < 975) return 'postmarket';
   return 'closed';
 }
 
@@ -235,7 +248,7 @@ function enrich(out, r, p, now) {
   out.freshness = {...out.freshness, status, age_seconds:observed && !invalidTimes ? (now-Date.parse(observed))/1000 : null,
     basis:observed ? 'provider observed_at' : r.observation_granularity === 'day' ? 'provider observation_date; no synthetic intraday timestamp' : 'provider observation time unavailable',
     observation_date:r.observation_date ?? null, observation_age_days:observationAgeDays,
-    observation_window:observedWindow, live:status === 'fresh' && r.source === 'dxlink' && !carried && !p.feed_stale && !r.refresh_error && r.observation_granularity === 'event' && ['last_trade','bid_ask_midpoint'].includes(r.price_basis) && Boolean(r.session) && liveWindow};
+    observation_window:observedWindow, live:status === 'fresh' && r.source === 'dxlink' && !carried && !p.feed_stale && !r.refresh_error && r.observation_granularity === 'event' && ['last_trade','bid_ask_midpoint'].includes(r.price_basis) && ['regular','extended'].includes(r.session) && liveWindow};
   const reasons = [];
   if (out.price == null) reasons.push(r.price == null ? 'missing_current' : 'invalid_current');
   if (out.previous_close == null) reasons.push(ref.value == null ? 'missing_reference' : 'invalid_reference');
@@ -247,6 +260,13 @@ function enrich(out, r, p, now) {
   if (ref.source_symbol != null && out.source_symbol != null && ref.source_symbol !== out.source_symbol) reasons.push('reference_symbol_mismatch');
   if (ref.adjustment_basis != null && r.adjustment_basis != null && ref.adjustment_basis !== r.adjustment_basis) reasons.push('adjustment_basis_mismatch');
   if (ref.observed_at != null && Date.parse(ref.observed_at) > now || currentDate && referenceDate && referenceDate >= currentDate) reasons.push('invalid_reference_date');
+  // A prior close more than one exchange session back is not the previous
+  // session; comparing across the gap would mislabel a multi-day move. Outside
+  // the published calendar the session count is unknowable, so a conservative
+  // calendar-day bound still catches a clearly stale reference.
+  const sessionGap = currentDate && referenceDate && ['E','V','Y'].includes(inst.profile) ? sessionsBetween(referenceDate, currentDate) : null;
+  const dayGap = currentDate && referenceDate ? (Date.parse(currentDate) - Date.parse(referenceDate)) / 86400000 : null;
+  if (sessionGap !== null ? sessionGap > 1 : dayGap !== null && dayGap > 5) reasons.push('reference_not_previous_session');
   const unavailable = reasons.length > 0;
   const partial = [];
   if (!observed && !r.observation_date) partial.push('observation_time_unverified');
@@ -275,13 +295,23 @@ function enrich(out, r, p, now) {
   if (futureObservation) out.warnings.push('Provider observation is in the future; live status and comparisons are withheld.');
   return out;
 }
-function rows(p, now) {
-  const known = universe.instruments.map(inst => {
+function rows(p, now, members = universe.instruments) {
+  const known = members.map(inst => {
     const r = p.prices[inst.label] ?? {};
     const out = enrich(row(inst.label,r,p.timestamp,now,p.feed_stale),r,p,now);
-    out.enabled = inst.enabled; out.support_status = inst.status ?? null; out.source_readiness = inst.source_readiness ?? null;
+    out.enabled = inst.enabled; out.compact = Boolean(inst.compact); out.support_status = inst.status ?? null; out.source_readiness = inst.source_readiness ?? null;
     out.profile = inst.profile; out.universe_version = universe.universe_version;
+    // Activation is a production gate. A row the registry has not enabled is
+    // never presented as usable, even if a producer unexpectedly published it;
+    // the raw artifact value stays visible as evidence rather than being used.
+    const unexpected = !inst.enabled && Object.hasOwn(p.prices, inst.label);
+    if (unexpected) {
+      out.price = null; out.previous_close = null; out.freshness.live = false;
+      out.change = {...out.change, status:'unavailable', reasons:['candidate_not_activated'], absolute:null, percent:null, bps:null};
+      out.warnings = [...out.warnings, 'Published data for an instrument the registry has not enabled; not used for price, change or live status.'];
+    }
     out.coverage = {status:out.price == null ? 'missing' : 'available', reason:out.price == null ?
+      unexpected ? 'published_without_activation' :
       !Object.hasOwn(p.prices,inst.label) ? inst.enabled ? 'not_published' : 'candidate_disabled_pending_provider_review' : 'price_unavailable' : null};
     return out;
   });

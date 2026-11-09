@@ -167,12 +167,14 @@ test('even small future receipt or collector-cycle skew cannot assert live fresh
   assert.equal(discovery.capabilities[4].freshness.status, 'invalid_time');
 });
 
-test('equity session labels cover premarket, postmarket, holiday, early close and DST', async () => {
+test('equity session labels cover premarket, postmarket, holiday, shortened-session uncertainty and DST', async () => {
   for (const [stamp, expected] of [
     ['2026-10-02T13:00:00Z','premarket'],
     ['2026-10-02T20:01:00Z','postmarket'],
     ['2026-11-26T16:00:00Z','closed'],
-    ['2026-11-27T19:00:00Z','closed'],
+    ['2026-11-27T19:00:00Z','unknown'],
+    ['2026-12-23T16:00:00Z','unknown'],
+    ['2026-12-22T16:00:00Z','regular'],
     ['2026-11-02T14:31:00Z','regular'],
   ]) {
     const s = setup({now:() => Date.parse(stamp)});
