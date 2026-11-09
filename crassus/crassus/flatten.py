@@ -108,6 +108,13 @@ def maybe_flatten(ctx: StrategyContext, params: dict[str, Any]) -> Decision | No
     if ctx.session_phase != "open":
         return None
 
+    # Opt-in only: a strategy that explicitly holds an underlying across
+    # sessions (the daily SMA bot) must not be force-flattened. The default
+    # remains mandatory for every existing account, so this does not weaken
+    # the intraday policy for options strategies.
+    if params.get("overnight_hold") is True:
+        return None
+
     minutes_before_close = _resolve_window_minutes(params)
     close_time = exchange_calendar.session_close(ctx.now_et.date())
     market_close = ctx.now_et.replace(

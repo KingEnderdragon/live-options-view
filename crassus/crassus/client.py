@@ -343,6 +343,8 @@ class AccountSession:
                 "password": self.account.password,
                 "alias": self.account.alias,
                 "strategy_id": self.account.strategy_id,
+                "paper_margin_limit": self.account.paper_margin_limit,
+                "paper_financing_rate": self.account.paper_financing_rate,
             },
         )
 
@@ -353,7 +355,7 @@ class AccountSession:
             json={"username": self.account.username, "password": self.account.password},
         )
 
-    def sync_metadata(self) -> requests.Response:
+    def sync_metadata(self, strategy_state: dict[str, Any] | None = None) -> requests.Response:
         """Push this account's authoritative alias/strategy to the Worker.
 
         accounts.json owns the strategy assignment; the Worker only learns it
@@ -361,16 +363,26 @@ class AccountSession:
         moved to a new strategy would go on being credited to the old one in
         the public roster forever. Called on every startup, not just the first,
         so the roster tracks the config that is actually running.
+
+        ``strategy_state`` is an optional small, already-sanitized public
+        summary (signal/SMA/position/reason) for the Automated card. It is
+        only sent when a strategy supplies one; existing strategies are
+        unchanged.
         """
+        payload = {
+            "username": self.account.username,
+            "alias": self.account.alias,
+            "strategy_id": self.account.strategy_id,
+            "paper_margin_limit": self.account.paper_margin_limit,
+            "paper_financing_rate": self.account.paper_financing_rate,
+        }
+        if strategy_state is not None:
+            payload["strategy_state"] = strategy_state
         return self._request(
             "POST",
             "/api/bot-metadata",
             headers=self._bot_headers(),
-            json={
-                "username": self.account.username,
-                "alias": self.account.alias,
-                "strategy_id": self.account.strategy_id,
-            },
+            json=payload,
         )
 
     def ensure_session(self) -> AccountState:
@@ -551,6 +563,7 @@ class ExecutionClient:
             symbol=intent["symbol"],
             side=intent["side"],
             quantity=intent["quantity"],
+            instrument_type=intent.get("instrument_type"),
             execution_request_id=request_id,
             decision_id=intent.get("decision_id"),
             strategy_id=intent.get("strategy_id"),
@@ -574,6 +587,7 @@ class ExecutionClient:
         symbol: str,
         side: str,
         quantity: int,
+        instrument_type: str | None = None,
         execution_request_id: str | None = None,
         decision_id: str | None = None,
         strategy_id: str | None = None,
@@ -599,6 +613,8 @@ class ExecutionClient:
         just noticing a trade happened with no reason attached to it.
         """
         request_id = execution_request_id or str(uuid.uuid4())
+        if instrument_type not in (None, "option", "share"):
+            raise ValueError("instrument_type must be 'option' or 'share'")
 
         with self.session._mutation_lock:  # invariant 2: one mutation per account
             intent = {
@@ -606,6 +622,7 @@ class ExecutionClient:
                 "symbol": symbol,
                 "side": side,
                 "quantity": quantity,
+                "instrument_type": instrument_type,
                 "decision_id": decision_id,
                 "strategy_id": strategy_id,
                 "strategy_version": strategy_version,
@@ -626,6 +643,8 @@ class ExecutionClient:
                 "side": side,
                 "qty": quantity,
             }
+            if instrument_type is not None:
+                body["instrument_type"] = instrument_type
 
             last: ExecutionResult | None = None
             for attempt in range(1, self.max_attempts + 1):
