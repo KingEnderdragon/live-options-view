@@ -11,6 +11,11 @@ COMPACT_LABELS = frozenset({
     'JPY/USD', 'BTC/USD', 'META', 'GOOGL', 'AMZN', 'TSLA', 'MU', 'AAPL', 'SPCX',
 })
 
+# Instruments whose DXLink symbol was an unverified guess and never produced
+# data. They are explicitly daily-only: no streaming subscription is requested,
+# and the dated Yahoo bar is the designated source, never a live claim (#16).
+DAILY_ONLY_LABELS = frozenset({'VIX', '10Y', 'KOSPI'})
+
 
 def _validate(config):
     members = config['instruments']
@@ -30,6 +35,16 @@ def _validate(config):
         raise ValueError('Duplicate provider mappings')
     if any(r['label'] == 'JPY/USD' and r['yahoo_symbol'] for r in members):
         raise ValueError('Yen futures must not carry a spot fallback')
+    for row in members:
+        if row['label'] in DAILY_ONLY_LABELS:
+            if (row.get('provider_policy') != 'daily_only'
+                    or row.get('dxlink_symbol') is not None
+                    or not row.get('yahoo_symbol')):
+                raise ValueError(
+                    f"Daily-only provider policy is inconsistent for {row['label']}")
+        elif row.get('provider_policy') not in (None, 'streaming'):
+            raise ValueError(
+                f"Unexpected provider policy for {row['label']}: {row.get('provider_policy')!r}")
     return config
 
 

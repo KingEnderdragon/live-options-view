@@ -160,6 +160,57 @@ class ProducerObservations(unittest.TestCase):
         self.assertEqual(yahoo, p.YF_SYMBOL_MAP)
         self.assertEqual(dx["JPY/USD"], None)
 
+    def test_daily_only_instruments_request_no_streaming_symbol(self):
+        dx, yahoo = producer_maps()
+        rows = {row["label"]: row for row in INSTRUMENTS}
+        for label in overview.DAILY_ONLY_LABELS:
+            self.assertIsNone(dx[label], f"{label} must not subscribe")
+            self.assertIn(label, yahoo)
+            self.assertEqual(rows[label]["provider_policy"], "daily_only")
+            self.assertIsNone(rows[label]["dxlink_symbol"])
+            self.assertIsNotNone(rows[label]["provider_policy_reason"])
+
+    def test_daily_only_values_publish_dated_and_never_live(self):
+        # The designated source is the dated Yahoo bar: it carries a date,
+        # no provider event time and no receipt, and must not claim live.
+        rows = self.publish({}, {
+            "VIX": observation("VIX", price=15.5),
+            "10Y": observation("10Y", price=4.69),
+            "KOSPI": observation("KOSPI", price=2600.0),
+        })
+        for label, value in (("VIX", 15.5), ("10Y", 4.69), ("KOSPI", 2600.0)):
+            row = rows[label]
+            self.assertEqual(row["price"], value)
+            self.assertEqual(row["source"], "yfinance")
+            self.assertEqual(row["observation_date"], "2026-10-09")
+            self.assertIsNone(row["observed_at"])
+            self.assertIsNone(row["quote_ts"])
+            self.assertIsNone(row["collector_received_at"])
+            self.assertNotIn("stale", row)
+
+    def test_yield_scale_contract_makes_a_source_switch_continuous(self):
+        # The registry declares each source's raw scale, so the consumer can
+        # normalize without a magnitude heuristic: Cboe TNX arrives x10 over
+        # DXLink and already in percent from Yahoo. Any future live mapping
+        # therefore cannot step 4.69 -> 46.9.
+        row = next(row for row in INSTRUMENTS if row["label"] == "10Y")
+        self.assertEqual(row["scale"], {"dxlink": 10, "yfinance": 1})
+        self.assertAlmostEqual(46.9 / row["scale"]["dxlink"], 4.69 / row["scale"]["yfinance"])
+
+
+class DailyOnlyRegistry(unittest.TestCase):
+    def test_registry_rejects_a_daily_only_instrument_with_a_stream(self):
+        cfg = copy.deepcopy(overview.load_universe())
+        next(row for row in cfg["instruments"] if row["label"] == "VIX")["dxlink_symbol"] = "$VIX.X"
+        with self.assertRaises(ValueError):
+            overview._validate(cfg)
+
+    def test_registry_rejects_a_mislabelled_streaming_instrument(self):
+        cfg = copy.deepcopy(overview.load_universe())
+        next(row for row in cfg["instruments"] if row["label"] == "KOSPI")["provider_policy"] = "streaming"
+        with self.assertRaises(ValueError):
+            overview._validate(cfg)
+
 
 class RegistryGate(unittest.TestCase):
     def test_activation_preserves_exact_universe_and_compact_strip(self):
