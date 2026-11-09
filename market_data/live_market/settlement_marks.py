@@ -14,6 +14,13 @@ pre-close). Callers pair the price with its provider time via
 quotes._provider_observed_spy_price (Brian #184's
 UnderlyingSelection.provider_observed_at model); a remembered/carried-
 forward spot has no provider time and can never publish.
+
+Taking the min (oldest) contributing leg proves the oldest leg isn't
+stale, but hides a future newer leg: a valid bid at 21:00:30 plus a
+FUTURE ask at 21:01:01 (now 21:00:40) would publish stamped 21:00:30.
+So callers must validate EVERY contributing provider timestamp with
+contributing_provider_times_valid before publishing; the publisher alone
+only sees the one `observed_at` it is given.
 """
 import json
 import math
@@ -22,9 +29,10 @@ from datetime import datetime
 from .config import ET, R2_BUCKET
 
 
-def publish_settlement_mark(s3, symbol, expiration, spot, observed_at, now):
-    if symbol not in {"SPY", "IBIT"} or not isinstance(spot, (int, float)) or not math.isfinite(spot) or spot <= 0:
-        return False
+def _is_valid_observation(observed_at, expiration, now):
+    """One provider timestamp is a valid post-close observation: it parses,
+    is tz-aware, falls on the expiry date in the 16:00-16:15 ET window,
+    and is fresh (age 0-120s -- not in the future, not stale)."""
     try:
         observed = datetime.fromisoformat(observed_at)
         if observed.tzinfo is None:
@@ -33,7 +41,24 @@ def publish_settlement_mark(s3, symbol, expiration, spot, observed_at, now):
         age = (now - observed).total_seconds()
     except (TypeError, ValueError):
         return False
-    if local.date().isoformat() != expiration or local.hour != 16 or local.minute > 15 or not 0 <= age <= 120:
+    return (local.date().isoformat() == expiration and local.hour == 16
+            and local.minute <= 15 and 0 <= age <= 120)
+
+
+def contributing_provider_times_valid(provider_times, expiration, now):
+    """Every contributing provider timestamp must be a valid post-close
+    observation (see _is_valid_observation). An empty list is invalid
+    (unknown evidence); a single future or out-of-window leg vetoes the
+    mark even when the oldest leg is valid."""
+    if not provider_times:
+        return False
+    return all(_is_valid_observation(ts, expiration, now) for ts in provider_times)
+
+
+def publish_settlement_mark(s3, symbol, expiration, spot, observed_at, now):
+    if symbol not in {"SPY", "IBIT"} or not isinstance(spot, (int, float)) or not math.isfinite(spot) or spot <= 0:
+        return False
+    if not _is_valid_observation(observed_at, expiration, now):
         return False
     payload = {"schema_version": 1, "symbol": symbol, "expiration": expiration,
                "date": expiration, "spot": spot, "observed_at": observed_at,

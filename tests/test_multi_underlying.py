@@ -130,6 +130,25 @@ class MultiUnderlying(unittest.TestCase):
   self.assertEqual([w["Key"] for w in _snapshot_settlement_writes(KNOWN_QUOTE, "IBIT")],
                    ["settlement/ibit/2026-11-09.json"])
   self.assertEqual(_snapshot_settlement_writes(UNKNOWN_QUOTE, "IBIT"), [])
+ def test_take_snapshot_future_contributing_leg_vetoes(self):
+  # The provider time is the OLDEST contributing leg, which proves the
+  # oldest leg isn't stale but hides a future newer leg: a valid bid at
+  # 21:00:30 plus a FUTURE ask at 21:01:01 (now 21:00:40) must not publish,
+  # for either root and either bid/ask permutation. Every contributing
+  # provider timestamp is validated against the window and now.
+  for symbol in ("SPY", "IBIT"):
+   for leg in ("bid_observed_at", "ask_observed_at"):
+    with self.subTest(msg=f"{symbol} {leg}"):
+     self.assertEqual(_snapshot_settlement_writes(
+      dict(KNOWN_QUOTE, **{leg: "2026-11-09T21:01:01+00:00"}), symbol), [])
+  # Last trade with a future event time is vetoed the same way; the valid
+  # and unknown cases stay green.
+  self.assertEqual(_snapshot_settlement_writes(
+   {"last": 670.1, "last_ts": "2026-11-09T21:00:30+00:00",
+    "last_observed_at": "2026-11-09T21:01:00+00:00"}), [])
+  self.assertEqual([w["Key"] for w in _snapshot_settlement_writes(KNOWN_QUOTE)],
+                   ["settlement/spy/2026-11-09.json"])
+  self.assertEqual(_snapshot_settlement_writes(UNKNOWN_QUOTE), [])
  def test_settlement_mark_is_immutable_and_repeated_publish_fails(self):
   sink = ConflictSink(); now = datetime(2026, 11, 9, 21, 0, 40, tzinfo=timezone.utc)
   self.assertTrue(settlement_marks.publish_settlement_mark(
