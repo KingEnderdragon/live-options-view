@@ -16,3 +16,8 @@ site/**
 !site/shared/
 !site/shared/**
 !site/squeeze-calendar.json
+!market_data/
+market_data/**
+!market_data/overview/
+market_data/overview/**
+!market_data/overview/universe.json

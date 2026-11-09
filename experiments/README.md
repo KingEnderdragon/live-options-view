@@ -5,7 +5,7 @@ mean they are deployed or power an existing Options View feature.
 
 | Home | Status and boundary |
 |---|---|
-| [market_overview](market_overview/__init__.py) | Pure arithmetic and candidate universe for broader coverage; currently used by fixtures. The working overview tool is [market_mcp/overview.js](../market_mcp/overview.js). See the [specification](../docs/specs/CROSS_MARKET_OVERVIEW.md). |
+| [market_overview](market_overview/__init__.py) | Historical 132-stock/watchlist proposal and fixtures for later scope, not the accepted universe. Shared arithmetic now lives in [market_data/overview/calculations.py](../market_data/overview/calculations.py); the exact-100 registry is [market_data/overview/universe.json](../market_data/overview/universe.json). The working tool is [market_mcp/overview.js](../market_mcp/overview.js). |
 
 The overview's [symbol probe](market_overview/probe_symbols.py) can open a separate
 provider connection; moving it here does not authorize running it.

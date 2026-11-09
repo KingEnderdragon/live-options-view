@@ -11,7 +11,7 @@ import json
 import math
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import websocket
@@ -219,10 +219,10 @@ class DXLinkFeed:
                 "type": "FEED_SETUP", "channel": 1,
                 "acceptDataFormat": "FULL",
                 "acceptEventFields": {
-                    "Quote":    ["eventType", "eventSymbol", "bidPrice", "askPrice"],
-                    "Summary":  ["eventType", "eventSymbol", "openInterest", "prevDayClosePrice", "dayOpenPrice"],
-                    "Trade":    ["eventType", "eventSymbol", "dayVolume", "price"],
-                    "TradeETH": ["eventType", "eventSymbol", "price"],
+                    "Quote":    ["eventType", "eventSymbol", "bidPrice", "askPrice", "bidTime", "askTime"],
+                    "Summary":  ["eventType", "eventSymbol", "openInterest", "prevDayClosePrice", "dayOpenPrice", "prevDayId"],
+                    "Trade":    ["eventType", "eventSymbol", "dayVolume", "price", "time"],
+                    "TradeETH": ["eventType", "eventSymbol", "price", "time"],
                     "Greeks":   ["eventType", "eventSymbol", "volatility", "delta", "gamma", "theta", "vega"],
                 },
             })
@@ -270,7 +270,7 @@ class DXLinkFeed:
         try:
             f = float(val)
             import math
-            return None if math.isnan(f) else int(f)
+            return int(f) if math.isfinite(f) else None
         except (TypeError, ValueError):
             return None
 
@@ -280,8 +280,30 @@ class DXLinkFeed:
         try:
             import math
             f = float(val)
-            return None if math.isnan(f) else f
+            return f if math.isfinite(f) else None
         except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _event_time(value):
+        """dxFeed time fields are Unix milliseconds, never collector receipt."""
+        try:
+            millis = float(value)
+            if not math.isfinite(millis) or millis <= 0:
+                return None
+            return datetime.fromtimestamp(millis / 1000, timezone.utc).isoformat()
+        except (TypeError, ValueError, OverflowError, OSError):
+            return None
+
+    @staticmethod
+    def _day_id(value):
+        """Summary day IDs are calendar days since 1970-01-01, not times."""
+        try:
+            days = float(value)
+            if not math.isfinite(days) or not days.is_integer() or days <= 0:
+                return None
+            return (datetime(1970, 1, 1) + timedelta(days=int(days))).date().isoformat()
+        except (TypeError, ValueError, OverflowError):
             return None
 
     def _ingest(self, data):
@@ -304,9 +326,11 @@ class DXLinkFeed:
                     if b is not None:
                         s["bid"] = b
                         s["bid_ts"] = now.isoformat()
+                        s["bid_observed_at"] = self._event_time(event.get("bidTime"))
                     if a is not None:
                         s["ask"] = a
                         s["ask_ts"] = now.isoformat()
+                        s["ask_observed_at"] = self._event_time(event.get("askTime"))
                 elif et == "Summary":
                     oi = self._to_int(event.get("openInterest"))
                     if oi is not None:
@@ -314,6 +338,8 @@ class DXLinkFeed:
                     pc = self._to_float(event.get("prevDayClosePrice"))
                     if pc is not None:
                         s["prev_close"] = pc
+                        s["prev_close_date"] = self._day_id(event.get("prevDayId"))
+                        s["summary_ts"] = now.isoformat()
                     do = self._to_float(event.get("dayOpenPrice"))
                     if do is not None:
                         s["day_open"] = do
@@ -325,11 +351,15 @@ class DXLinkFeed:
                     if px is not None:
                         s["last"] = px
                         s["last_ts"] = now.isoformat()
+                        s["last_observed_at"] = self._event_time(event.get("time"))
+                        s["last_session"] = "extended" if et == "TradeETH" else "regular"
                 elif et == "TradeETH":
                     px = self._to_float(event.get("price"))
                     if px is not None:
                         s["last"] = px
                         s["last_ts"] = now.isoformat()
+                        s["last_observed_at"] = self._event_time(event.get("time"))
+                        s["last_session"] = "extended" if et == "TradeETH" else "regular"
                 elif et == "Greeks":
                     for field in ("volatility", "delta", "gamma", "theta", "vega"):
                         v = self._to_float(event.get(field))

@@ -260,10 +260,10 @@ def test_price_receipt_tracks_selected_input_and_carry_origin():
                      ("last_trade", old), "fresh quote side does not refresh older trade")
         assert_equal((prices["QQQ"]["price_basis"], prices["QQQ"]["quote_ts"]),
                      ("bid_ask_midpoint", old), "midpoint age uses older side")
-        assert_equal((prices["JPY/USD"]["source"], prices["JPY/USD"]["source_symbol"], prices["JPY/USD"]["quote_ts"]),
-                     ("yfinance", "JPYUSD=X", None), "spot fallback retains its identity and no event time")
-        assert_equal((prices["JPY/USD"]["bid"], prices["JPY/USD"]["prev_close"]),
-                     (None, None), "futures bid and reference cannot accompany Yahoo spot")
+        assert_equal((prices["JPY/USD"]["price"], prices["JPY/USD"]["source"]),
+                     (None, None), "spot fallback cannot replace the yen future")
+        assert_equal(prices["JPY/USD"]["instrument_id"], "fut.6j",
+                     "unresolved yen retains its futures identity")
         state.pop("AAPL")
         collector.fetch_yf_prices_bounded = lambda: {}
         collector.push_prices(s3, FakeFeed(state, last_event_time=datetime.now(timezone.utc)), collector.Counters())

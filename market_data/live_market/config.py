@@ -106,38 +106,6 @@ MOMENTUM_MAX_ANCHOR_OVERSHOOT_MIN  = 10.0
 MOMENTUM_NEUTRAL_BAND_PCT          = 0.05  # display-only up/down/flat threshold
 MOMENTUM_RETAIN_MINUTES            = 24 * 60.0  # generous, decoupled from the configured lookback
 
-PRICE_TICKERS: dict[str, str] = {
-    "QQQ":     "QQQ",
-    "USO":     "USO",
-    "VIX":     "$VIX.X",
-    # Cboe Crude Oil ETF Volatility Index. Same unverified-guess situation as
-    # KOSPI below: tastytrade/dxFeed may or may not carry this index symbol
-    # at all. If the guess is wrong this ticker just never gets DXLink data
-    # and always falls through to the yfinance path (a real, working ^OVX
-    # symbol) -- same graceful degradation every ticker here already has
-    # pre-market.
-    "OVX":     "$OVX.X",
-    "SMH":     "SMH",
-    "IGV":     "IGV",
-    "10Y":     "$TNX.X",      # CBOE 10-year Treasury yield index (value = yield × 10)
-    "JPY/USD": "/6J:XCME",    # CME yen futures, USD-per-JPY; inverted for display
-    # KOSPI Composite Index — tastytrade/dxFeed is a US-brokerage feed and may
-    # not carry this at all; unverified guess at the dxFeed index-symbol
-    # convention (cf. $VIX.X/$TNX.X above). If it's wrong this ticker simply
-    # never gets DXLink data and always falls through to the yfinance path
-    # below, which is a real, working symbol — same graceful-degradation
-    # behavior every ticker already has pre-market.
-    "KOSPI":   "$KOSPI.X",
-    "BTC/USD": "BTC/USD:CXERX",
-    "META":    "META",
-    "GOOGL":   "GOOGL",
-    "AMZN":    "AMZN",
-    "TSLA":    "TSLA",
-    "MU":      "MU",
-    "SPCX":    "SPCX",
-    "AAPL":    "AAPL",
-}
-
 TICKER_CLASSES: dict[str, str] = {
     "QQQ": "equity", "SPY": "equity", "USO": "equity", "SMH": "equity", "IGV": "equity",
     "META": "equity", "GOOGL": "equity", "AMZN": "equity", "TSLA": "equity",
@@ -146,28 +114,10 @@ TICKER_CLASSES: dict[str, str] = {
     "KOSPI": "international", "BTC/USD": "crypto",
 }
 
-# Yahoo Finance symbols for the same tickers (fallback when DXLink has no data)
-YF_SYMBOL_MAP: dict[str, str] = {
-    "QQQ":     "QQQ",
-    "USO":     "USO",
-    "VIX":     "^VIX",       # pre-market: None expected (CBOE only calculates at open)
-    "OVX":     "^OVX",       # pre-market: same CBOE-open-only caveat as VIX above
-    "SMH":     "SMH",
-    "IGV":     "IGV",
-    "10Y":     "^TNX",       # yields the rate directly (e.g. 4.485), NOT × 10
-    "JPY/USD": "JPYUSD=X",
-    "KOSPI":   "^KS11",      # KOSPI Composite Index
-    "BTC/USD": "BTC-USD",
-    "META":    "META",
-    "GOOGL":   "GOOGL",
-    "AMZN":    "AMZN",
-    "TSLA":    "TSLA",
-    "MU":      "MU",
-    "SPCX":    "SPCX",
-    "AAPL":    "AAPL",
-}
-
-
+# Canonical release-gated registry owns producer requests. SPY retains its
+# separate existing subscription/tile path; disabled candidates request nothing.
+from market_data.overview import producer_maps
+PRICE_TICKERS, YF_SYMBOL_MAP = producer_maps()
 
 # -- session clock ------------------------------------------------------------
 # Pure ET wall-clock helpers on the constants above. They lived in the
