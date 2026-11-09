@@ -40,7 +40,7 @@ Historical reads a different product: `manifest.json.dates` and daily `raw/qqq_c
 
 ## What runs without an open browser?
 
-The Railway collector runs its session lifecycle, snapshot/price/health loops and optional EIA loop independently of browser traffic. Crassus has its own five-minute strategy loop. Cloudflare invokes the Worker's settlement sweep every fifteen minutes during `12–23` UTC on weekdays. Two other Railway services start daily Tradier capture and OA-203 scanning on service-managed UTC cron schedules. The browser only polls and renders their outputs; closing the page does not stop those market_data.
+The Railway collector runs its session lifecycle, snapshot/price/health loops and optional EIA loop independently of browser traffic. Crassus has its own five-minute strategy loop. Cloudflare invokes the Worker's settlement sweep every fifteen minutes during `12–23` UTC on weekdays. Two other Railway services start daily Tradier capture and OA-203 scanning on service-managed UTC cron schedules. The browser only polls and renders their outputs; closing the page does not stop those producers.
 
 [Architecture](ARCHITECTURE.md#runtime-map) gives entry commands, trigger ownership and the date of available runtime evidence. Configuration, a successful deployment and a fresh market observation are different claims. In particular, an external archive schedule is still unconfirmed; Tradier's daily time-and-sales has no consumer in this repo; and a policy or test for active rankings does not establish a live in-session result. Settlement-source and closed-account policy changes are outside this documentation work.
 

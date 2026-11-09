@@ -23,7 +23,7 @@ V8 old-space limit. Its explicit copies and Dockerfile-specific context allowlis
 now include the seven runtime modules named in the [Dockerfile](Dockerfile),
 `site/shared.js`, `site/shared/` and `site/squeeze-calendar.json`. These are
 current packaging paths, updated after the browser helper split and site migration;
-the original deployment/deployment evidence below remains dated history.
+the original runtime/deployment evidence below remains dated history.
 No scanner, Worker, Discord code, test signing keys, credentials or fixture
 artifacts enter the image. Build from the repository root:
 
@@ -120,7 +120,7 @@ three-second deadline, five-minute expiry, single-flight requests and a
 thirty-second cooldown. Expired-key outages return 503 and fail readiness.
 There are no client-selected URLs, redirects or private credential reads.
 The server does not store tokens, exchange authorization codes or pass tokens
-to market_data. Offline JWT validation has no immediate per-token revocation;
+to producers. Offline JWT validation has no immediate per-token revocation;
 an urgent stop must stop this resource service, and tokens expire within one hour.
 
 The local tests include a mock authorization-code/S256 PKCE exchange, wrong
