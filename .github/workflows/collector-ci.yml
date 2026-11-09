@@ -7,31 +7,31 @@ on:
   push:
     branches: [master]
     paths:
-      - "producers/**"
-      - "runtime/python/**"
+      - "market_data/**"
+      - "deployment/python/**"
       - "tests/producer_packaging.py"
       - "experiments/market_overview/**"
       - "tests/test_market_overview.py"
       - "experiments/market_overview/probe_symbols.py"
       - "tests/test_probe_cross_market_symbols.py"
-      - "producers/live_market/probe_oauth.py"
-      - "producers/tradier/probe.py"
-      - "producers/tradier/__main__.py"
-      - "producers/diagnostics.py"
+      - "market_data/live_market/probe_oauth.py"
+      - "market_data/tradier/probe.py"
+      - "market_data/tradier/__main__.py"
+      - "market_data/diagnostics.py"
       - "tests/test_capture_diagnostics.py"
-      - "producers/options_scanner/__main__.py"
+      - "market_data/options_scanner/__main__.py"
       - "tests/test_auth_safety.py"
       - "tests/test_moo144_tradier_probe.py"
       - "tests/test_moo144_tradier_collector.py"
       - "tests/test_oa203_return_scanner.py"
       - "tests/test_oa203_active.py"
       - "tests/test_oa203_active_budget.py"
-      - "producers/options_scanner/active_budget.py"
-      - "producers/options_scanner/active_readiness.py"
-      - "producers/options_scanner/windows.py"
-      - "producers/options_scanner/windows_replay.py"
+      - "market_data/options_scanner/active_budget.py"
+      - "market_data/options_scanner/active_readiness.py"
+      - "market_data/options_scanner/windows.py"
+      - "market_data/options_scanner/windows_replay.py"
       - "tests/test_oa203_windows.py"
-      - "producers/options_scanner/windows_outputs.py"
+      - "market_data/options_scanner/windows_outputs.py"
       - "tests/test_oa203_windows_outputs.py"
       - "tests/test_oa203_windows_replay.py"
       - "tests/stage2_verification.py"
@@ -43,31 +43,31 @@ on:
       - ".github/workflows/collector-ci.yml"
   pull_request:
     paths:
-      - "producers/**"
-      - "runtime/python/**"
+      - "market_data/**"
+      - "deployment/python/**"
       - "tests/producer_packaging.py"
       - "experiments/market_overview/**"
       - "tests/test_market_overview.py"
       - "experiments/market_overview/probe_symbols.py"
       - "tests/test_probe_cross_market_symbols.py"
-      - "producers/live_market/probe_oauth.py"
-      - "producers/tradier/probe.py"
-      - "producers/tradier/__main__.py"
-      - "producers/diagnostics.py"
+      - "market_data/live_market/probe_oauth.py"
+      - "market_data/tradier/probe.py"
+      - "market_data/tradier/__main__.py"
+      - "market_data/diagnostics.py"
       - "tests/test_capture_diagnostics.py"
-      - "producers/options_scanner/__main__.py"
+      - "market_data/options_scanner/__main__.py"
       - "tests/test_auth_safety.py"
       - "tests/test_moo144_tradier_probe.py"
       - "tests/test_moo144_tradier_collector.py"
       - "tests/test_oa203_return_scanner.py"
       - "tests/test_oa203_active.py"
       - "tests/test_oa203_active_budget.py"
-      - "producers/options_scanner/active_budget.py"
-      - "producers/options_scanner/active_readiness.py"
-      - "producers/options_scanner/windows.py"
-      - "producers/options_scanner/windows_replay.py"
+      - "market_data/options_scanner/active_budget.py"
+      - "market_data/options_scanner/active_readiness.py"
+      - "market_data/options_scanner/windows.py"
+      - "market_data/options_scanner/windows_replay.py"
       - "tests/test_oa203_windows.py"
-      - "producers/options_scanner/windows_outputs.py"
+      - "market_data/options_scanner/windows_outputs.py"
       - "tests/test_oa203_windows_outputs.py"
       - "tests/test_oa203_windows_replay.py"
       - "tests/stage2_verification.py"
@@ -87,7 +87,7 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install dependencies
-        run: pip install -r runtime/python/requirements.txt
+        run: pip install -r deployment/python/requirements.txt
       - name: Run collector unit suite
         run: python tests/stage2_verification.py
       - name: Run OAuth and auth-circuit safety suite
@@ -120,5 +120,5 @@ jobs:
         run: python tests/verify_weekly_collection.py
       - name: Verify actual producer image entry points (offline)
         run: |
-          docker build -f runtime/python/Dockerfile -t producer-check .
+          docker build -f deployment/python/Dockerfile -t producer-check .
           docker run --rm producer-check python tests/producer_packaging.py

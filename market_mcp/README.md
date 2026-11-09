@@ -4,7 +4,7 @@ Start with the [system map](../ARCHITECTURE.md) for producers and consumers.
 [ROLLOUT.md](ROLLOUT.md) and [PRODUCTION.md](PRODUCTION.md) preserve dated rollout
 evidence, not a current live-service inventory. The current browser helper and calendar
 home is `site/`; external documentation URLs retain their own `/docs/` paths.
-For the accepted active-publication policy, see [the daily-session specification](../notes/specs/OA203_ACTIVE_LOOKUP.md#activation-policy--november-8-2026); older candidate-state statements below do not supersede it.
+For the accepted active-publication policy, see [the daily-session specification](../docs/specs/OA203_ACTIVE_LOOKUP.md#activation-policy--november-8-2026); older candidate-state statements below do not supersede it.
 
 Seven read-only tools expose existing producer artifacts. Node 22+; no package
 install, provider token, R2 credentials, scanner invocation or trading imports.
@@ -101,8 +101,8 @@ Its Linux image checks pass; live client/grant gates remain pending. See
 | `result_detail` | Retained snapshot JSON row; exact squeeze run's manifest/results/normalized inputs; selected return contract from bounded sweep pages with producer calculation cells/flags. |
 
 The qualified return view's provisional thresholds and evidence rules are in
-[OA203_QUALIFIED_ASK_BID_V1.md](../notes/specs/OA203_QUALIFIED_ASK_BID_V1.md).
-The qualified view and SPY producers/live_market/website are now on `master`; the collector
+[OA203_QUALIFIED_ASK_BID_V1.md](../docs/specs/OA203_QUALIFIED_ASK_BID_V1.md).
+The qualified view and SPY market_data/live_market/website are now on `master`; the collector
 deployment succeeded. The draft SPY MCP work is based on `master` and has not
 been merged or deployed. Fixture coverage here exercises both capabilities
 together. A live SPY snapshot and client access to a deployed SPY MCP endpoint

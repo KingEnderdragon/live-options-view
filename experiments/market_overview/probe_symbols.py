@@ -32,7 +32,7 @@ from pathlib import Path
 import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-import producers.live_market as collector  # noqa: E402
+import market_data.live_market as collector  # noqa: E402
 
 # Fixed candidates. Several spellings per concept on purpose: the report says
 # which spelling (if any) the feed actually serves.

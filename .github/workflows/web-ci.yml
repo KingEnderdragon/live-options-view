@@ -7,7 +7,7 @@ name: Web CI
 on:
   pull_request:
     paths:
-      - "worker/**"
+      - "backend/**"
       - "site/**"
       - "tests/**"
       - "wrangler.toml"
@@ -17,7 +17,7 @@ on:
   push:
     branches: [master]
     paths:
-      - "worker/**"
+      - "backend/**"
       - "site/**"
       - "tests/**"
       - "wrangler.toml"
@@ -78,11 +78,11 @@ jobs:
           node -e "
             const fs = require('fs');
             const { execFileSync } = require('child_process');
-            if (fs.existsSync('worker')) {
-              for (const file of fs.readdirSync('worker', { recursive: true }).filter(f => f.endsWith('.js'))) {
-                console.log('Checking worker/' + file);
+            if (fs.existsSync('backend')) {
+              for (const file of fs.readdirSync('backend', { recursive: true }).filter(f => f.endsWith('.js'))) {
+                console.log('Checking backend/' + file);
                 execFileSync(process.execPath, ['--check', '--input-type=module'], {
-                  input: fs.readFileSync('worker/' + file), stdio: ['pipe', 'inherit', 'inherit']
+                  input: fs.readFileSync('backend/' + file), stdio: ['pipe', 'inherit', 'inherit']
                 });
               }
             }

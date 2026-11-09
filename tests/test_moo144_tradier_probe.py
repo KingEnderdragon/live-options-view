@@ -31,7 +31,7 @@ except ModuleNotFoundError:
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS))
-import producers.tradier.probe as probe
+import market_data.tradier.probe as probe
 
 
 ET = ZoneInfo("America/New_York")
@@ -314,7 +314,7 @@ class ProbeTests(unittest.TestCase):
             env.pop("TRADIER_TOKEN", None)
             env["PYTHONPATH"] = tmp
             result = subprocess.run(
-                [sys.executable, str(ROOT / "producers/tradier/probe.py")],
+                [sys.executable, str(ROOT / "market_data/tradier/probe.py")],
                 env=env,
                 text=True,
                 capture_output=True,

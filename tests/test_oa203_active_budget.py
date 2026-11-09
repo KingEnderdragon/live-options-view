@@ -2,7 +2,7 @@ import sys
 import unittest
 from pathlib import Path
 from datetime import date, datetime, timedelta, timezone
-import producers.options_scanner.active_budget as b
+import market_data.options_scanner.active_budget as b
 
 NOW = datetime(2026, 12, 10, 16, tzinfo=timezone.utc)
 DAY = NOW.date()

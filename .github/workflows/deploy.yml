@@ -5,7 +5,7 @@ on:
     branches: [master]
     paths:
       - "site/**"
-      - "worker/**"
+      - "backend/**"
       - "wrangler.toml"
       - "scripts/stamp-build.mjs"
       - "tests/build_stamp.test.mjs"

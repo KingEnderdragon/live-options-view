@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import producers.live_market as collector  # noqa: E402
+import market_data.live_market as collector  # noqa: E402
 
 TODAY = date(2026, 10, 6)
 EXP = TODAY.isoformat()
