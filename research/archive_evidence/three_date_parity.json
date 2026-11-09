@@ -1,0 +1,343 @@
+{
+  "origin": "https://pub-4d5c916b8cb74ffb8c0abd7dfadb02cf.r2.dev",
+  "assumption_set": "parity_v2_prior_close",
+  "dates": {
+    "2025-12-29": {
+      "status": "ok",
+      "stored_underlying_price": 622.4203,
+      "atm_strike": 622.0,
+      "implied_spot": {
+        "Mid": 620.89,
+        "bid_ask_midpoint": 620.89,
+        "Last": 620.9
+      },
+      "offset_vs_stored": {
+        "Mid": -1.5303,
+        "bid_ask_midpoint": -1.5303,
+        "Last": -1.5203
+      },
+      "offset_spread_across_nearby_strikes": 0.075,
+      "nearby_strikes_checked": 6,
+      "assumption": "S = C - P + K at zero rate and zero time-to-expiry, same expiry, no dividends",
+      "prior_session_matched_value": {
+        "value": 622.4203,
+        "candidates": []
+      },
+      "same_day_reference": {
+        "value": 622.4203,
+        "candidates": []
+      },
+      "implied_vs_prior_bars": {
+        "value": 620.89,
+        "candidates": []
+      },
+      "chain_etag": "2036dd37592af9549a06f7f81ab7022f",
+      "chain_last_modified": "Fri, 26 Jun 2026 05:02:42 GMT",
+      "chain_bytes": null,
+      "chain_write_date": "2026-06-26",
+      "prior_session": "2025-12-26",
+      "chain_written_before_same_day_open": false,
+      "implied_offset_ambiguous": false
+    },
+    "2026-09-16": {
+      "status": "ok",
+      "stored_underlying_price": 704.54,
+      "atm_strike": 705.0,
+      "implied_spot": {
+        "Mid": 705.545,
+        "bid_ask_midpoint": 705.545,
+        "Last": 705.55
+      },
+      "offset_vs_stored": {
+        "Mid": 1.005,
+        "bid_ask_midpoint": 1.005,
+        "Last": 1.01
+      },
+      "offset_spread_across_nearby_strikes": 0.025,
+      "nearby_strikes_checked": 6,
+      "assumption": "S = C - P + K at zero rate and zero time-to-expiry, same expiry, no dividends",
+      "prior_session_matched_value": {
+        "value": 704.5399780273438,
+        "bar_count": 78,
+        "last_bar": {
+          "bar_datetime": "2026-09-15 15:55:00-04:00",
+          "bar_close": 704.59,
+          "difference": 0.05
+        },
+        "within_0.05": {
+          "count": 3,
+          "first": "2026-09-15 12:10:00-04:00",
+          "last": "2026-09-15 14:50:00-04:00"
+        },
+        "within_0.1": {
+          "count": 8,
+          "first": "2026-09-15 10:50:00-04:00",
+          "last": "2026-09-15 15:55:00-04:00"
+        },
+        "within_0.25": {
+          "count": 20,
+          "first": "2026-09-15 10:50:00-04:00",
+          "last": "2026-09-15 15:55:00-04:00"
+        },
+        "closest": {
+          "bar_datetime": "2026-09-15 12:10:00-04:00",
+          "bar_close": 704.53,
+          "difference": -0.0099
+        }
+      },
+      "prior_close_difference": 0.05,
+      "same_day_reference": {
+        "value": 704.5399780273438,
+        "bar_count": 78,
+        "last_bar": {
+          "bar_datetime": "2026-09-16 15:55:00-04:00",
+          "bar_close": 704.75,
+          "difference": 0.21
+        },
+        "within_0.05": {
+          "count": 0,
+          "first": null,
+          "last": null
+        },
+        "within_0.1": {
+          "count": 0,
+          "first": null,
+          "last": null
+        },
+        "within_0.25": {
+          "count": 2,
+          "first": "2026-09-16 15:50:00-04:00",
+          "last": "2026-09-16 15:55:00-04:00"
+        },
+        "closest": {
+          "bar_datetime": "2026-09-16 15:50:00-04:00",
+          "bar_close": 704.4,
+          "difference": -0.14
+        }
+      },
+      "implied_vs_prior_bars": {
+        "value": 705.545,
+        "bar_count": 78,
+        "last_bar": {
+          "bar_datetime": "2026-09-15 15:55:00-04:00",
+          "bar_close": 704.59,
+          "difference": -0.955
+        },
+        "within_0.05": {
+          "count": 7,
+          "first": "2026-09-15 10:40:00-04:00",
+          "last": "2026-09-15 12:30:00-04:00"
+        },
+        "within_0.1": {
+          "count": 9,
+          "first": "2026-09-15 10:40:00-04:00",
+          "last": "2026-09-15 12:35:00-04:00"
+        },
+        "within_0.25": {
+          "count": 21,
+          "first": "2026-09-15 10:35:00-04:00",
+          "last": "2026-09-15 14:25:00-04:00"
+        },
+        "closest": {
+          "bar_datetime": "2026-09-15 11:00:00-04:00",
+          "bar_close": 705.54,
+          "difference": -0.005
+        }
+      },
+      "chain_etag": "f20df8a99b56ace6db12abbcdd01f78a",
+      "chain_last_modified": "Wed, 16 Sep 2026 12:01:00 GMT",
+      "chain_bytes": null,
+      "chain_write_date": "2026-09-16",
+      "prior_session": "2026-09-15",
+      "chain_written_before_same_day_open": true,
+      "implied_offset_ambiguous": true
+    },
+    "2026-09-18": {
+      "status": "ok",
+      "stored_underlying_price": 716.92,
+      "atm_strike": 717.0,
+      "implied_spot": {
+        "Mid": 716.545,
+        "bid_ask_midpoint": 716.545,
+        "Last": 716.57
+      },
+      "offset_vs_stored": {
+        "Mid": -0.375,
+        "bid_ask_midpoint": -0.375,
+        "Last": -0.35
+      },
+      "offset_spread_across_nearby_strikes": 0.02,
+      "nearby_strikes_checked": 6,
+      "assumption": "S = C - P + K at zero rate and zero time-to-expiry, same expiry, no dividends",
+      "prior_session_matched_value": {
+        "value": 716.9199829101562,
+        "bar_count": 78,
+        "last_bar": {
+          "bar_datetime": "2026-09-17 15:55:00-04:00",
+          "bar_close": 716.87,
+          "difference": -0.05
+        },
+        "within_0.05": {
+          "count": 1,
+          "first": "2026-09-17 15:55:00-04:00",
+          "last": "2026-09-17 15:55:00-04:00"
+        },
+        "within_0.1": {
+          "count": 3,
+          "first": "2026-09-17 13:00:00-04:00",
+          "last": "2026-09-17 15:55:00-04:00"
+        },
+        "within_0.25": {
+          "count": 17,
+          "first": "2026-09-17 11:55:00-04:00",
+          "last": "2026-09-17 15:55:00-04:00"
+        },
+        "closest": {
+          "bar_datetime": "2026-09-17 15:55:00-04:00",
+          "bar_close": 716.87,
+          "difference": -0.05
+        }
+      },
+      "prior_close_difference": -0.05,
+      "same_day_reference": {
+        "value": 716.9199829101562,
+        "bar_count": 78,
+        "last_bar": {
+          "bar_datetime": "2026-09-18 15:55:00-04:00",
+          "bar_close": 721.36,
+          "difference": 4.44
+        },
+        "within_0.05": {
+          "count": 2,
+          "first": "2026-09-18 11:30:00-04:00",
+          "last": "2026-09-18 13:05:00-04:00"
+        },
+        "within_0.1": {
+          "count": 5,
+          "first": "2026-09-18 10:35:00-04:00",
+          "last": "2026-09-18 13:05:00-04:00"
+        },
+        "within_0.25": {
+          "count": 18,
+          "first": "2026-09-18 10:00:00-04:00",
+          "last": "2026-09-18 13:30:00-04:00"
+        },
+        "closest": {
+          "bar_datetime": "2026-09-18 13:05:00-04:00",
+          "bar_close": 716.91,
+          "difference": -0.01
+        }
+      },
+      "implied_vs_prior_bars": {
+        "value": 716.545,
+        "bar_count": 78,
+        "last_bar": {
+          "bar_datetime": "2026-09-17 15:55:00-04:00",
+          "bar_close": 716.87,
+          "difference": 0.325
+        },
+        "within_0.05": {
+          "count": 8,
+          "first": "2026-09-17 11:40:00-04:00",
+          "last": "2026-09-17 15:25:00-04:00"
+        },
+        "within_0.1": {
+          "count": 16,
+          "first": "2026-09-17 10:30:00-04:00",
+          "last": "2026-09-17 15:25:00-04:00"
+        },
+        "within_0.25": {
+          "count": 32,
+          "first": "2026-09-17 10:30:00-04:00",
+          "last": "2026-09-17 15:25:00-04:00"
+        },
+        "closest": {
+          "bar_datetime": "2026-09-17 14:15:00-04:00",
+          "bar_close": 716.55,
+          "difference": 0.005
+        }
+      },
+      "chain_etag": "ff07b943b9bdbad6ac2e6a28ec6d3c22",
+      "chain_last_modified": "Fri, 18 Sep 2026 12:02:35 GMT",
+      "chain_bytes": null,
+      "chain_write_date": "2026-09-18",
+      "prior_session": "2026-09-17",
+      "chain_written_before_same_day_open": true,
+      "implied_offset_ambiguous": true
+    }
+  },
+  "artifacts": {
+    "manifest.json": {
+      "key": "manifest.json",
+      "status": 200,
+      "cached": true
+    },
+    "raw/qqq_chain_20251229.csv": {
+      "key": "raw/qqq_chain_20251229.csv",
+      "status": 200,
+      "cached": true,
+      "etag": "2036dd37592af9549a06f7f81ab7022f",
+      "last_modified": "Fri, 26 Jun 2026 05:02:42 GMT"
+    },
+    "prices/qqq_intraday_20251226.csv": {
+      "key": "prices/qqq_intraday_20251226.csv",
+      "status": 404,
+      "bytes": 0
+    },
+    "prices/qqq_intraday_20251229.csv": {
+      "key": "prices/qqq_intraday_20251229.csv",
+      "status": 404,
+      "bytes": 0
+    },
+    "raw/qqq_chain_20260916.csv": {
+      "key": "raw/qqq_chain_20260916.csv",
+      "status": 200,
+      "cached": true,
+      "etag": "f20df8a99b56ace6db12abbcdd01f78a",
+      "last_modified": "Wed, 16 Sep 2026 12:01:00 GMT"
+    },
+    "prices/qqq_intraday_20260915.csv": {
+      "key": "prices/qqq_intraday_20260915.csv",
+      "status": 200,
+      "cached": true
+    },
+    "prices/qqq_intraday_20260916.csv": {
+      "key": "prices/qqq_intraday_20260916.csv",
+      "status": 200,
+      "cached": true
+    },
+    "raw/qqq_chain_20260918.csv": {
+      "key": "raw/qqq_chain_20260918.csv",
+      "status": 200,
+      "cached": true,
+      "etag": "ff07b943b9bdbad6ac2e6a28ec6d3c22",
+      "last_modified": "Fri, 18 Sep 2026 12:02:35 GMT"
+    },
+    "prices/qqq_intraday_20260917.csv": {
+      "key": "prices/qqq_intraday_20260917.csv",
+      "status": 200,
+      "cached": true
+    },
+    "prices/qqq_intraday_20260918.csv": {
+      "key": "prices/qqq_intraday_20260918.csv",
+      "status": 200,
+      "cached": true
+    }
+  },
+  "manifest": {
+    "date_count": 176,
+    "first": "2025-12-29",
+    "last": "2026-09-18",
+    "requested_dates_present": {
+      "2025-12-29": true,
+      "2026-09-16": true,
+      "2026-09-18": true
+    },
+    "gap_note": "listed dates are the producer's index, not a promise that every object exists"
+  },
+  "listing_attempt": {
+    "key": "?list-type=2&max-keys=1",
+    "status": 404,
+    "bytes": 0
+  }
+}

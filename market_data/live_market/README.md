@@ -36,6 +36,19 @@ Crassus is a separate deployable with its own dependencies and strategy state.
   readings in the same time bucket; insufficient history is an explicit state.
 - Snapshot time, provider observation time and retrieval time are distinct.
   Partial-session and stale-data metadata affect how a reading should be used.
+- Every archived `snapshot_*.csv` gets a durable sidecar
+  `snapshot_*.provenance.json` (`snapshot_provenance.v1`) recording
+  `constructed_at`, `archive_uploaded_at`, `latest_published_at`,
+  `publication.status` (`published`, or `archived_unpublished` with a reason),
+  the CSV object key/row/column counts, and the selected underlier's
+  `price_basis`, `collector_received_at`, `provider_observed_at` (null when
+  unknown), `freshness`, and contributing bid/ask/last times — including why a
+  midpoint was rejected. The CSV keeps its existing columns; readers that only
+  know the named values are unchanged, and a missing sidecar means unknown
+  provenance. A midpoint is stamped with the *older* contributing side's
+  receipt and only when both sides carry one, so a fresh ask cannot rejuvenate
+  an older bid or an old last trade. Historical CSVs written before the
+  sidecar have no recoverable per-price provenance and are not backfilled.
 - Live bid/ask requests use the in-memory quote server through the Worker's
   `/api/live-quotes` route. That transport does not write an R2 object. Stored
   snapshots support other readings and recovery; they are not the live quote feed.

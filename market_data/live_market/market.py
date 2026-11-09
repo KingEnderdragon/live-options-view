@@ -7,10 +7,13 @@ collector.market_signals) and the spot resolver. It reads the session
 state, the quote helpers, and the session clock, and nothing else.
 """
 
+from __future__ import annotations
+
 import io
 import json
+from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 
 import pandas as pd
 
@@ -31,7 +34,7 @@ from .config import (
     log,
 )
 from .feed import DXLinkFeed
-from .quotes import _fresh_spy_spot, _observed_spy_price, _spy_subscription_coverage
+from .quotes import _fresh_spy_spot, _observed_spy_price_with_basis, _spy_subscription_coverage
 from .state import (
     Counters,
     QQQ_SESSION,
@@ -45,7 +48,8 @@ from .state import (
 
 def _compute_underlying_market(s3, qqq: dict, underlying: float | None, spot_ts_str: str | None,
                                 ts_et: datetime, ts_utc: datetime, today: date,
-                                us: "UnderlyingSession | None" = None) -> dict:
+                                us: "UnderlyingSession | None" = None,
+                                selection: UnderlyingSelection | None = None) -> dict:
     """VWAP/RVOL for the `underlying_market` block of `intraday/latest.json`.
 
     Approximation, not tick-accurate VWAP: weights the snapshot's own spot
@@ -91,7 +95,7 @@ def _compute_underlying_market(s3, qqq: dict, underlying: float | None, spot_ts_
 
     momentum = _compute_and_log_momentum(s3, underlying, spot_observed_at, ts_utc, today, us)
 
-    return {
+    block = {
         "symbol": us.symbol,
         "spot": underlying,
         "spot_ts": spot_ts_str,
@@ -117,6 +121,9 @@ def _compute_underlying_market(s3, qqq: dict, underlying: float | None, spot_ts_
         "source": "dxlink",
         "freshness": freshness,
     }
+    if selection is not None:
+        block["provenance"] = {**selection.as_provenance(), "freshness": freshness}
+    return block
 
 
 def _compute_and_log_momentum(
@@ -163,28 +170,205 @@ def _compute_and_log_momentum(
     }
 
 
+@dataclass(frozen=True)
+class UnderlyingSelection:
+    """The underlying value actually selected, with the provenance it earned.
+
+    Every field describes the *selected value*, not the snapshot or the
+    publication: `receipt_ts` is the collector receipt of the input that
+    produced `price`, and `provider_observed_at` is the provider's own event
+    time only when the provider supplied one for that same input. Unknown
+    stays `None`; nothing here is inferred from the other clock (#146).
+    """
+
+    price: float | None = None
+    receipt_ts: str | None = None
+    basis: str | None = None
+    provider_observed_at: str | None = None
+    session: str | None = None
+    selection_rule: str | None = None
+    unavailable_reason: str | None = None
+    contributing: dict[str, Any] = field(default_factory=dict)
+
+    def as_provenance(self) -> dict[str, Any]:
+        return {
+            "schema_version": "underlying_price.v1",
+            "price": self.price,
+            "price_basis": self.basis,
+            "selection_rule": self.selection_rule,
+            "collector_received_at": self.receipt_ts,
+            "provider_observed_at": self.provider_observed_at,
+            "session": self.session,
+            "unavailable_reason": self.unavailable_reason,
+            "contributing": dict(self.contributing),
+        }
+
+
+def _read_time(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _older_observed(*pairs: tuple[str | None, str | None]) -> str | None:
+    """Provider event time for a two-sided midpoint: only when both sides
+    carry one, and then the older side -- a fresh half-quote must not make an
+    old half look observed."""
+    if not all(ts for _, ts in pairs):
+        return None
+    parsed = [(_read_time(ts), ts) for _, ts in pairs]
+    if any(dt is None for dt, _ in parsed):
+        return None
+    return min(parsed, key=lambda item: item[0])[1]
+
+
+def _quote_contributing(qqq: dict) -> dict[str, Any]:
+    return {
+        "bid_ts": qqq.get("bid_ts"),
+        "ask_ts": qqq.get("ask_ts"),
+        "last_ts": qqq.get("last_ts"),
+        "bid_observed_at": qqq.get("bid_observed_at"),
+        "ask_observed_at": qqq.get("ask_observed_at"),
+        "last_observed_at": qqq.get("last_observed_at"),
+    }
+
+
+def _select_underlying_quote(
+    qqq: dict, last_spot_price: float | None, last_spot_ts: str | None,
+) -> UnderlyingSelection:
+    """Select one spot value and bind its provenance to that same value.
+
+    Order and contract: a two-sided bid/ask midpoint wins, but only when both
+    sides and both receipts exist; it is stamped with the *older* contributing
+    receipt (the contract SPY and the price strip already use). A fresh ask
+    must not rejuvenate an older bid or an old last trade. If a midpoint is
+    impossible, the last trade is next (its own receipt and provider event
+    time), then the carried-forward spot (a remembered value with its own
+    receipt, or none). A remembered spot is never stamped with a feed time,
+    and a value that came from a fallback is never presented as live.
+    """
+    bid, ask = qqq.get("bid"), qqq.get("ask")
+    last = qqq.get("last")
+    bid_ts, ask_ts, last_ts = qqq.get("bid_ts"), qqq.get("ask_ts"), qqq.get("last_ts")
+    contributing = _quote_contributing(qqq)
+    contributing["midpoint_rejected"] = None
+
+    if bid is not None and ask is not None:
+        times = {"bid": _read_time(bid_ts), "ask": _read_time(ask_ts)}
+        if bid_ts and ask_ts and all(times.values()):
+            older_side = min(times, key=lambda side: times[side])
+            return UnderlyingSelection(
+                price=round((bid + ask) / 2, 2),
+                receipt_ts=bid_ts if older_side == "bid" else ask_ts,
+                basis="bid_ask_midpoint",
+                provider_observed_at=_older_observed(
+                    ("bid", qqq.get("bid_observed_at")), ("ask", qqq.get("ask_observed_at"))),
+                session=None,
+                selection_rule="both_sides_required_older_receipt",
+                contributing=contributing,
+            )
+        # Both sides exist but the contributing-leg contract cannot be met:
+        # keep the computable midpoint, stamp no receipt, and say why. The
+        # value remains usable; freshness will classify as stale, never live.
+        contributing["midpoint_rejected"] = (
+            "unparseable_side_receipt" if bid_ts and ask_ts else "missing_side_receipt")
+        return UnderlyingSelection(
+            price=round((bid + ask) / 2, 2),
+            receipt_ts=None,
+            basis="bid_ask_midpoint_unstamped",
+            provider_observed_at=_older_observed(
+                ("bid", qqq.get("bid_observed_at")), ("ask", qqq.get("ask_observed_at"))),
+            session=None,
+            selection_rule="midpoint_without_contributing_receipt",
+            contributing=contributing,
+        )
+
+    if last is not None:
+        return UnderlyingSelection(
+            price=last,
+            receipt_ts=last_ts,
+            basis="last_trade",
+            provider_observed_at=qqq.get("last_observed_at"),
+            session=qqq.get("last_session"),
+            selection_rule="last_trade",
+            contributing=contributing,
+        )
+
+    if last_spot_price is not None:
+        return UnderlyingSelection(
+            price=round(last_spot_price, 2),
+            receipt_ts=last_spot_ts,
+            basis="remembered_spot",
+            provider_observed_at=None,
+            selection_rule="carried_forward_spot",
+            contributing=contributing,
+        )
+
+    return UnderlyingSelection(
+        selection_rule=None,
+        unavailable_reason="no_usable_spot",
+        contributing=contributing,
+    )
+
+
 def _resolve_underlying_spot(
     qqq: dict, last_spot_price: float | None, last_spot_ts: str | None,
 ) -> tuple[float | None, str | None]:
-    """Resolve the current spot price and its paired observation timestamp
-    together, branch for branch, so the two always describe the same
-    observation. Previously `underlying` could fall through to the
-    yfinance-backed `last_spot` fallback while its timestamp was derived
-    independently from `qqq`'s DXLink state -- pairing a feed-derived
-    timestamp with a value that didn't actually come from the feed.
-    `last_spot_ts` is `None` whenever `last_spot_price` came from yfinance
-    (see `push_prices()`), which has no trustworthy provider event
-    timestamp -- that correctly makes this fallback classify as "stale",
-    never "live".
+    """Compatibility wrapper: the selected price and its paired receipt.
+
+    The full provenance record is `_select_underlying_quote`, which is what
+    `take_snapshot` and `weekly.py` use; this stays for callers (and older
+    tests) that only need the pair.
     """
-    bid, ask = qqq.get("bid"), qqq.get("ask")
-    if bid and ask:
-        return round((bid + ask) / 2, 2), max([v for v in (qqq.get("bid_ts"), qqq.get("ask_ts")) if v], default=None)
-    if qqq.get("last"):
-        return qqq.get("last"), qqq.get("last_ts")
-    if last_spot_price is not None:
-        return round(last_spot_price, 2), last_spot_ts
-    return None, None
+    selection = _select_underlying_quote(qqq, last_spot_price, last_spot_ts)
+    return selection.price, selection.receipt_ts
+
+
+def _snapshot_provenance_record(
+    *, symbol: str, csv_key: str, constructed_at: datetime, csv_uploaded_at: datetime,
+    selection: UnderlyingSelection, freshness: str, row_count: int, column_count: int,
+    publication_status: str, publication_reason: str | None,
+    latest_published_at: datetime | None = None,
+) -> dict[str, Any]:
+    """The durable `snapshot_provenance.v1` record for one archived snapshot.
+
+    Written beside the CSV, keyed by the exact archive key, because the CSV
+    itself cannot carry the per-value source/basis/times that the live
+    selected-price structure holds (and historical CSVs were written before
+    those fields existed). Absent fields mean unknown, never inferred: a CSV
+    without this record stays readable and its provenance stays unknown.
+    """
+    return {
+        "schema_version": "snapshot_provenance.v1",
+        "snapshot_key": csv_key,
+        "symbol": symbol,
+        "constructed_at": constructed_at.isoformat(),
+        "archive_uploaded_at": csv_uploaded_at.isoformat(),
+        "latest_published_at": latest_published_at.isoformat() if latest_published_at else None,
+        "publication": {"status": publication_status, "reason": publication_reason},
+        "underlying": {**selection.as_provenance(), "freshness": freshness},
+        "csv": {"object_key": csv_key, "row_count": row_count, "column_count": column_count},
+    }
+
+
+def _put_snapshot_provenance(s3, record: dict[str, Any]) -> None:
+    key = record["snapshot_key"][:-4] + ".provenance.json"
+    try:
+        s3.put_object(
+            Bucket=R2_BUCKET, Key=key,
+            Body=json.dumps(record, default=str, allow_nan=False).encode(),
+            ContentType="application/json",
+            CacheControl="no-cache, max-age=0",
+        )
+        log.info(f"-> {key}")
+    except Exception as e:
+        # The CSV and latest.json already exist; losing the sidecar loses
+        # provenance for this snapshot, not the snapshot itself. Record the
+        # gap rather than failing a collection cycle.
+        log.warning(f"provenance sidecar upload failed (non-fatal): {e}")
 
 
 def take_snapshot(s3, feed: DXLinkFeed, strikes: list[dict],
@@ -198,14 +382,37 @@ def take_snapshot(s3, feed: DXLinkFeed, strikes: list[dict],
 
     quote = state.get(us.symbol, {})
     if us.symbol == "SPY":
-        underlying, spot_ts_str = _observed_spy_price(quote)
-        if underlying is None:
-            underlying, spot_ts_str = us.last_spot
+        spy_price, spy_ts, spy_basis = _observed_spy_price_with_basis(quote)
+        if spy_price is not None:
+            selection = UnderlyingSelection(
+                price=spy_price,
+                receipt_ts=spy_ts,
+                basis=spy_basis,
+                provider_observed_at=_older_observed(
+                    ("bid", quote.get("bid_observed_at")), ("ask", quote.get("ask_observed_at")))
+                if spy_basis == "bid_ask_midpoint" else None,
+                selection_rule="spy_quote_required_older_receipt",
+                contributing=_quote_contributing(quote),
+            )
+        elif us.last_spot[0] is not None:
+            selection = UnderlyingSelection(
+                price=round(us.last_spot[0], 2), receipt_ts=us.last_spot[1],
+                basis="remembered_spot", selection_rule="carried_forward_spot",
+                contributing=_quote_contributing(quote),
+            )
+        else:
+            selection = UnderlyingSelection(
+                unavailable_reason="no_usable_spy_spot",
+                contributing=_quote_contributing(quote),
+            )
     else:
-        underlying, spot_ts_str = _resolve_underlying_spot(quote, us.last_spot[0], us.last_spot[1])
+        selection = _select_underlying_quote(quote, us.last_spot[0], us.last_spot[1])
+
+    underlying, spot_ts_str = selection.price, selection.receipt_ts
     atm = round(underlying) if underlying else None
 
-    underlying_market = _compute_underlying_market(s3, quote, underlying, spot_ts_str, ts_et, ts_utc, today, us)
+    underlying_market = _compute_underlying_market(
+        s3, quote, underlying, spot_ts_str, ts_et, ts_utc, today, us, selection)
 
     rows = []
     for s in strikes:
@@ -271,12 +478,21 @@ def take_snapshot(s3, feed: DXLinkFeed, strikes: list[dict],
             Body=csv_buf.getvalue().encode(),
             ContentType="text/csv",
         )
+        csv_uploaded_at = datetime.now(timezone.utc)
         counters.inc_csv()
         log.info(f"-> {csv_key}  ({len(rows)} rows,  underlying={underlying},  bids={bid_count})")
     except Exception as e:
         log.error(f"CSV upload failed: {e}")
         counters.inc_failure()
         raise
+
+    provenance = _snapshot_provenance_record(
+        symbol=us.symbol, csv_key=csv_key, constructed_at=ts_utc,
+        csv_uploaded_at=csv_uploaded_at, selection=selection,
+        freshness=underlying_market["freshness"], row_count=len(rows),
+        column_count=len(df.columns), publication_status="pending",
+        publication_reason=None,
+    )
 
     if not us.first_snapshot_written:
         first_key = f"{us.day_prefix(date_str)}first.csv"
@@ -293,6 +509,8 @@ def take_snapshot(s3, feed: DXLinkFeed, strikes: list[dict],
 
     if bid_count == 0:
         log.warning(f"{us.latest_key} NOT updated -- no option data (DXLink feed down)")
+        provenance["publication"] = {"status": "archived_unpublished", "reason": "no_option_quotes"}
+        _put_snapshot_provenance(s3, provenance)
         return
 
     payload = {
@@ -320,11 +538,17 @@ def take_snapshot(s3, feed: DXLinkFeed, strikes: list[dict],
         )
         counters.inc_snapshot(ts_utc.isoformat())
         tracker.record()
+        provenance["latest_published_at"] = datetime.now(timezone.utc).isoformat()
+        provenance["publication"] = {"status": "published", "reason": None}
         log.info(f"-> {us.latest_key} updated")
     except Exception as e:
+        provenance["publication"] = {"status": "archived_unpublished", "reason": "latest_write_failed"}
+        _put_snapshot_provenance(s3, provenance)
         log.error(f"latest.json upload failed: {e}")
         counters.inc_failure()
         raise
+
+    _put_snapshot_provenance(s3, provenance)
 
 
 
@@ -332,5 +556,7 @@ __all__ = [
     "_compute_underlying_market",
     "_compute_and_log_momentum",
     "_resolve_underlying_spot",
+    "_select_underlying_quote",
+    "UnderlyingSelection",
     "take_snapshot",
 ]
