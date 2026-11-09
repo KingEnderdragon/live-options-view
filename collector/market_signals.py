@@ -29,7 +29,7 @@ The time-series momentum computed here (`compute_time_series_momentum`) is a
 deliberate re-implementation of the same trailing-return math already in
 `crassus/crassus/momentum.py`'s `compute_momentum`, not an import of it --
 collector.py and the crassus trading bot are separate deployables with
-separate dependency sets (see DESIGN.md), and this repo doesn't otherwise
+separate dependency sets (see collector/README.md), and this repo doesn't otherwise
 import across that boundary. This is a **display/observability signal**,
 published for the UI and a public R2 log, not a change to what any
 `momentum_qqq` account actually trades on -- each account still runs its own

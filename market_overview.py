@@ -35,7 +35,7 @@ What this module decides:
   missing/stale counts, and exclude watchlist additions unless asked.
 
 Nothing here selects providers or symbols; see
-CROSS_MARKET_OVERVIEW.md for the coverage matrix and the
+notes/specs/CROSS_MARKET_OVERVIEW.md for the coverage matrix and the
 open provider decisions.
 """
 

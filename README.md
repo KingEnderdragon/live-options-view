@@ -9,11 +9,11 @@ Open [the website](https://options.moopertonic.net), then use the [system map](A
 | Question | Start here | What it owns |
 |---|---|---|
 | Where is the page? | [site/index.html](site/index.html), [site/js](site/js) | Page shell and browser features; the source directory is not a public URL prefix |
-| Where do prices and chain snapshots come from? | [collector.py](collector.py) → [collector/runner.py](collector/runner.py), [collector/market.py](collector/market.py) | tastytrade/DXLink acquisition, snapshot-derived readings and optional EIA forecasts |
-| What serves data and accounts? | [worker.js](worker.js), [wrangler.toml](wrangler.toml) | Static assets, allowlisted archive access, live-quote proxy, paper-trading API and scheduled settlement |
+| Where do prices and chain snapshots come from? | [collector.py](collector.py) → [collector guide](collector/README.md) | tastytrade/DXLink acquisition, snapshot-derived readings and optional EIA forecasts |
+| What serves data and accounts? | [Worker guide](worker/README.md), [wrangler.toml](wrangler.toml) | Static assets, allowlisted archive access, live-quote proxy, paper-trading API and scheduled settlement |
 | What decides paper trades? | [crassus/README.md](crassus/README.md) | Strategy runner; consumes market snapshots and calls the Worker account API |
 | What produces Big Banana rankings? | [scripts/oa203_return_scanner.py](scripts/oa203_return_scanner.py), [scanner contract](site/plans/2026-09-options-return-scanner.md) | Tradier chain sampling, stored sweeps and retrospective return products |
-| What stores Tradier time-and-sales? | [tradier_cron_launcher.py](tradier_cron_launcher.py), [TRADIER_DEPLOYMENT.md](TRADIER_DEPLOYMENT.md) | Separate daily archive collector; it does not feed the displayed chain |
+| What stores Tradier time-and-sales? | [tradier_cron_launcher.py](tradier_cron_launcher.py), [collectors/tradier/OPERATIONS.md](collectors/tradier/OPERATIONS.md) | Separate daily archive collector; it does not feed the displayed chain |
 | How does an assistant read it? | [market_mcp/README.md](market_mcp/README.md) | Bounded read-only tools over producer artifacts, not an alternate ranking engine |
 | What is offline research? | [synthetic_days](synthetic_days/README.md), [MOO-171 audit](moo171_snapshot_analysis/README.md), [news_pin_bot](news_pin_bot/README.md) | Separate simulation, audit and news tooling; not implied to be deployed |
 

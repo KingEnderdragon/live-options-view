@@ -38,7 +38,7 @@ this audit establishes only that recorded OI did not change within the
 observed regular-session contract histories. It does NOT independently
 verify freshness, settlement origin, or that an unknown OI value was never
 serialized as zero upstream of this analysis; it is consistent with (not
-independent proof of) DESIGN.md's known-limitations statement that OI is
+independent proof of) [historical DESIGN.md](https://github.com/OwenTanzer/live-options-view/blob/646e61e4c3c0df71006519eaded1d8c53c8d55a7/DESIGN.md)'s known-limitations statement that OI is
 prior-day-settled data for the entire session. Separately,
 at least one contract's Mid quote was unchanged for 378
 consecutive regular-hours snapshots on the session with the longest such run

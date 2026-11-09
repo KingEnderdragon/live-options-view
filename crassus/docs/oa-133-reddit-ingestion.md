@@ -7,7 +7,7 @@ Issue: https://linear.app/objecta/issue/OA-133/repair-reddit-sentiment-ingestion
 Fresh, clean clone of `OwenTanzer/live-options-view`, default branch `master`,
 base `fbbc3456da8025b6b1021f3d7282b2d6cae570e3`. Dedicated branch
 `fix/oa-133-reddit-failure-window`. No AGENTS.md, CLAUDE.md or `.agents/skills`
-files are present in this checkout. Read DESIGN.md, crassus/README.md, the
+files are present in this checkout. Read [historical DESIGN.md](https://github.com/OwenTanzer/live-options-view/blob/646e61e4c3c0df71006519eaded1d8c53c8d55a7/DESIGN.md), crassus/README.md, the
 Crassus CI workflow, ingestion/strategy/runner/supervisor and related fixtures.
 OA-133 description and its sole August 13 routing comment were read; related
 Reddit PRs/commits were inspected before editing. PR #72 (optional local-model
