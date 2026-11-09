@@ -28,7 +28,10 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-from ..daily_bars import DailyBar, DailyBarError, fetch_yahoo_daily_bars, get_daily_bars
+from ..daily_bars import (
+    DailyBar, DailyBarError, completed_bars, expected_completed_session,
+    fetch_yahoo_daily_bars, get_daily_bars, history_gap,
+)
 from ..strategy import Decision, StrategyContext, register
 
 STRATEGY_ID = "spy_sma200_double_or_out"
@@ -244,15 +247,49 @@ def decide(ctx: StrategyContext, *, fetcher=None, state_dir: Path | None = None)
 
     from ..daily_bars import completed_bars
     completed = completed_bars(bars, ctx.now_et)
-    if len(completed) < DEFAULT_WINDOW + 1:
+    expected = expected_completed_session(ctx.now_et)
+    eligible = [bar for bar in completed if bar.date <= expected]
+    if not eligible or eligible[-1].date != expected:
+        latest_text = eligible[-1].date.isoformat() if eligible else "none"
+        reason = (f"Daily history is stale: latest bar {latest_text}, expected completed "
+                  f"session {expected}. No trade.")
+        if state is not None and state.pending:
+            state.pending = None
+            state.last_reason = reason
+            state.save(path)
+        return no(reason, meta={"strategy_state": _public_state(
+            state or SmaState(activated_on=ctx.now_et.date().isoformat()),
+            None, "stale_daily_history", symbol=symbol, position=position)})
+    if len(eligible) < DEFAULT_WINDOW + 1:
         return no(
-            f"Insufficient completed daily bars ({len(completed)}); need {DEFAULT_WINDOW + 1}.",
+            f"Insufficient completed daily bars ({len(eligible)}); need {DEFAULT_WINDOW + 1}.",
             meta={"strategy_state": _public_state(
                 state or SmaState(activated_on=ctx.now_et.date().isoformat()),
                 None, "insufficient_history", symbol=symbol, position=position)},
         )
-
+    window = eligible[-DEFAULT_WINDOW - 1:]
+    gap = history_gap(window)
+    if gap:
+        reason = f"Daily history gap ({gap}); no trade."
+        if state is not None and state.pending:
+            state.pending = None
+            state.last_reason = reason
+            state.save(path)
+        return no(reason, meta={"strategy_state": _public_state(
+            state or SmaState(activated_on=ctx.now_et.date().isoformat()),
+            None, "gap_in_daily_history", symbol=symbol, position=position)})
+    completed = eligible
     latest = completed[-1]
+
+    # A pending signal is only executable while its bar is the latest completed
+    # session. If a newer session exists, the old target is stale; cancel it
+    # and evaluate the new bar rather than trading a missed day.
+    if state is not None and state.pending and state.pending.get("bar_date") != expected.isoformat():
+        stale_bar = state.pending.get("bar_date")
+        state.pending = None
+        state.last_reason = f"Outdated pending signal {stale_bar} canceled; awaiting the latest session."
+        state.save(path)
+
     if state is None:
         # Fresh account: mark today's latest completed bar as the baseline and
         # wait for the next crossover. It must not backfill a historical cross.

@@ -14,6 +14,7 @@ a fixed bar fixture without touching a provider.
 from __future__ import annotations
 
 import json
+import math
 import os
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -22,6 +23,8 @@ from typing import Any, Iterable
 from zoneinfo import ZoneInfo
 
 import requests
+
+from . import exchange_calendar
 
 ET = ZoneInfo("America/New_York")
 DEFAULT_RANGE = "20y"
@@ -74,10 +77,16 @@ def parse_yahoo_chart(payload: dict[str, Any]) -> list[DailyBar]:
         raise DailyBarError("Yahoo chart payload has no usable result") from exc
 
     by_date: dict[date, DailyBar] = {}
+    adjusted_series = bool(adj)
     for index, timestamp in enumerate(timestamps):
         raw = raw_closes[index] if index < len(raw_closes) else None
         raw_open = raw_opens[index] if index < len(raw_opens) else None
         adjusted = adj[index] if index < len(adj) else None
+        if adjusted_series and adjusted is None:
+            # Mixing an adjusted series with a raw-close fallback fabricates
+            # levels and can manufacture a crossover. Reject the whole series;
+            # a partial adjusted series is not a usable signal source.
+            raise DailyBarError("incomplete adjusted close series")
         value = adjusted if adjusted is not None else raw
         if value is None:
             continue
@@ -87,9 +96,13 @@ def parse_yahoo_chart(payload: dict[str, Any]) -> list[DailyBar]:
             open_numeric = float(raw_open) if raw_open is not None else None
         except (TypeError, ValueError):
             continue
-        if numeric <= 0:
+        if not math.isfinite(numeric) or numeric <= 0:
             continue
-        source = "yahoo_chart_adjclose" if adjusted is not None else "yahoo_chart_raw_close"
+        if raw_numeric is not None and (not math.isfinite(raw_numeric) or raw_numeric <= 0):
+            raw_numeric = None
+        if open_numeric is not None and (not math.isfinite(open_numeric) or open_numeric <= 0):
+            open_numeric = None
+        source = "yahoo_chart_adjclose" if adjusted_series else "yahoo_chart_raw_close"
         adjustment = numeric / raw_numeric if raw_numeric and raw_numeric > 0 else None
         adjusted_open = (open_numeric * adjustment) if open_numeric is not None and adjustment else open_numeric
         day = _date_et(timestamp)
@@ -207,9 +220,51 @@ def latest_completed_date(bars: Iterable[DailyBar], now_et: datetime) -> date | 
     return completed[-1].date if completed else None
 
 
-def trading_days_between(start: date, end: date) -> int:
-    """Calendar days; used only for financing accrual, never for bar selection."""
-    return max(0, (end - start).days)
+def is_trading_day(day: date) -> bool:
+    return day.weekday() < 5 and not exchange_calendar.is_holiday(day)
+
+
+def previous_trading_day(day: date) -> date:
+    """Most recent regular NYSE session strictly before ``day``."""
+    cursor = day - timedelta(days=1)
+    while not is_trading_day(cursor):
+        cursor -= timedelta(days=1)
+    return cursor
+
+
+def expected_completed_session(now_et: datetime) -> date:
+    """The latest session whose daily bar must exist for a live signal.
+
+    The strategy deliberately uses the previous regular session, never the
+    current day's bar (which can be partial or revised). This also makes the
+    expected date explicit for weekends and holidays.
+    """
+    if now_et.tzinfo is None:
+        raise ValueError("now_et must be timezone-aware")
+    return previous_trading_day(now_et.astimezone(ET).date())
+
+
+def history_gap(bars: list[DailyBar]) -> str | None:
+    """Return a concrete gap reason when the last bars are not consecutive sessions.
+
+    A fresh HTTP/cache response is not evidence that the bar dates advanced.
+    Missing sessions in the SMA window would silently change the average, so
+    the strategy rejects them rather than treating the gap as a flat close.
+    """
+    if not bars:
+        return "empty history"
+    for bar in bars:
+        if not is_trading_day(bar.date):
+            return f"{bar.date} is not an NYSE trading day"
+    for previous, current in zip(bars, bars[1:]):
+        if current.date <= previous.date:
+            return f"non-increasing bar dates {previous.date} -> {current.date}"
+        cursor = previous.date + timedelta(days=1)
+        while cursor < current.date:
+            if is_trading_day(cursor):
+                return f"missing session {cursor} between {previous.date} and {current.date}"
+            cursor += timedelta(days=1)
+    return None
 
 
 def next_session_hint(now_et: datetime) -> datetime:
