@@ -1,5 +1,0 @@
-r2_cache/
-out/option_rows.parquet
-out/measures.parquet
-__pycache__/
-.pytest_cache/
