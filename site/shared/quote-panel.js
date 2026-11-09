@@ -167,13 +167,27 @@ function quoteSessionMode(snapshot) {
   if (laneMode && QUOTE_MODE_LABELS[laneMode]) {
     return { mode: laneMode, label: QUOTE_MODE_LABELS[laneMode], source: 'producer' };
   }
-  const sessions = new Set(rows.map(row => row.session).filter(Boolean));
-  let mode = 'unknown';
-  if (['premarket', 'regular', 'afterhours'].some(s => sessions.has(s))) mode = 'equities';
-  else if (['overnight', 'maintenance'].some(s => sessions.has(s))) mode = 'futures';
-  else if (sessions.has('continuous')) mode = 'crypto';
-  else if (sessions.has('daily') || sessions.has('closed') || sessions.has('holiday')) mode = 'none';
-  else mode = clockFallbackMode(nowMs);
+  // Without a producer lane, a row's `session` is the last trade/observation
+  // session, not proof that the market is open now. Only fresh rows may name
+  // the active group; otherwise the panel says unknown instead of claiming
+  // extended-hours coverage from a days-old Friday row on a Sunday night.
+  const freshSessions = new Set(rows.filter(row => row.state === 'live')
+    .map(row => row.session).filter(Boolean));
+  let mode = null;
+  if (['premarket', 'regular', 'afterhours'].some(s => freshSessions.has(s))) mode = 'equities';
+  else if (['overnight', 'maintenance'].some(s => freshSessions.has(s))) mode = 'futures';
+  else if (freshSessions.has('continuous')) mode = 'crypto';
+  if (!mode) {
+    const fallback = clockFallbackMode(nowMs);
+    const group = QUOTE_MOVER_GROUPS[fallback];
+    const fallbackHasFreshRows = Boolean(group) && rows.some(row =>
+      group.classes.includes(row.asset_class) && row.state === 'live');
+    if (!fallbackHasFreshRows) {
+      return { mode: 'unknown', label: QUOTE_MODE_LABELS.unknown,
+        source: 'no_fresh_session_evidence' };
+    }
+    mode = fallback;
+  }
   return { mode, label: QUOTE_MODE_LABELS[mode], source: 'rows_or_clock' };
 }
 
