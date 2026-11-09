@@ -51,9 +51,10 @@ from crassus.client import Book  # noqa: E402
 from crassus.config import Account  # noqa: E402
 from crassus.market import MarketSnapshot  # noqa: E402
 from crassus.runner import Runner  # noqa: E402
+from harness_process import assert_alive, start_harness  # noqa: E402
 
 ET = ZoneInfo("America/New_York")
-BASE = "http://127.0.0.1:8901"
+BASE = ""
 KEY = "lifecycle-integration-key"
 ALIAS = "Lifecycle"
 USERNAME = "lifecycle_integration"
@@ -112,23 +113,14 @@ def roster() -> dict:
 
 
 def main() -> int:
+    global BASE
     node = shutil.which("node")
     if not node:
         raise RuntimeError("node is not available")
-    harness = subprocess.Popen(
-        [node, str(ROOT / "crassus/scripts/lifecycle_worker_harness.mjs")],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+    harness, info, BASE = start_harness(
+        node, ROOT / "crassus/scripts/lifecycle_worker_harness.mjs",
     )
     try:
-        for _ in range(80):
-            try:
-                urllib.request.urlopen(BASE + "/api/live-quotes?symbols=QQQ261109C00711000", timeout=0.2).read()
-                break
-            except Exception:
-                time.sleep(0.1)
-        else:
-            raise RuntimeError("local Worker harness did not start")
-
         account = Account(
             alias=ALIAS, username=USERNAME, password="integration-password",
             strategy_id="smoke_atm_roundtrip_phelps",
@@ -142,11 +134,13 @@ def main() -> int:
                         ledger_dir=ledger_dir, state_dir=state_dir, bot_registration_key=KEY)
         runner.startup()
 
+        assert_alive(harness)
         # Entry at 711.
         runner._run_account(account, snapshot(711.5), "open")
         state = runner.sessions[ALIAS].me()
         check("registered and entered 711", positions(state) == {"QQQ261109C00711000": 1}, json.dumps(state.trades[-1:]))
 
+        assert_alive(harness)
         # ATM moves to 712 while 711 is held: Phelps must defer, not stack.
         clock.now_et = lambda: start + timedelta(minutes=1)
         runner._run_account(account, snapshot(712.5), "open")
@@ -154,6 +148,7 @@ def main() -> int:
         check("ATM change does not stack 712 while 711 is held",
               positions(state) == {"QQQ261109C00711000": 1}, json.dumps(positions(state)))
 
+        assert_alive(harness)
         # Recreate the Runner: a fresh login and the same durable ledger/state
         # still defer the intended 711 exit; no duplicate fill appears.
         restarted = Runner([account], base_url=BASE, snapshot_url=BASE + "/intraday/latest.json",
@@ -165,6 +160,7 @@ def main() -> int:
               positions(state) == {"QQQ261109C00711000": 1} and len(state.trades) == 1,
               json.dumps(positions(state)))
 
+        assert_alive(harness)
         # Past the Phelps window: the held 711 sell is released.
         clock.now_et = lambda: start + timedelta(minutes=7)
         restarted._run_account(account, snapshot(712.5), "open")
@@ -175,12 +171,14 @@ def main() -> int:
               [("QQQ261109C00711000", "buy"), ("QQQ261109C00711000", "sell")],
               json.dumps([(t.get("sym"), t.get("side")) for t in state.trades]))
 
+        assert_alive(harness)
         # Now flat, the new ATM 712 can be entered.
         restarted._run_account(account, snapshot(712.5), "open")
         state = restarted.sessions[ALIAS].me()
         check("enters 712 only after 711 is flat",
               positions(state) == {"QQQ261109C00712000": 1}, json.dumps(positions(state)))
 
+        assert_alive(harness)
         # Settlement next session: 712 is OTM at spot 400, so the book flattens.
         settle = restarted.sessions[ALIAS]._request(
             "POST", "/api/settle",
@@ -198,6 +196,7 @@ def main() -> int:
         else:
             check("negative control: wrong balance fails", False)
 
+        assert_alive(harness)
         # Roster freshness from multiple clients; balances/positions are live.
         before = stats()
         cards = []

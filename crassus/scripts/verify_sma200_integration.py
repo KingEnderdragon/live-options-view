@@ -46,9 +46,10 @@ from crassus.config import Account  # noqa: E402
 from crassus.daily_bars import DailyBar, is_trading_day, save_cached_bars  # noqa: E402
 from crassus.runner import Runner  # noqa: E402
 from crassus.strategies.sma200 import STRATEGY_ID  # noqa: E402
+from harness_process import assert_alive, start_harness  # noqa: E402
 
 ET = ZoneInfo("America/New_York")
-BASE = "http://127.0.0.1:8899"
+BASE = ""
 KEY = "sma-integration-key"
 FAIL = 0
 
@@ -103,23 +104,14 @@ def records(ledger_dir: Path) -> list[dict]:
 
 
 def main() -> int:
+    global BASE
     node = shutil.which("node")
     if not node:
         raise RuntimeError("node is not available for the local Worker harness")
-    harness = subprocess.Popen(
-        [node, str(ROOT / "crassus/scripts/sma200_worker_harness.mjs")],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+    harness, info, BASE = start_harness(
+        node, ROOT / "crassus/scripts/sma200_worker_harness.mjs",
     )
     try:
-        for _ in range(80):
-            try:
-                urllib.request.urlopen(BASE + "/api/live-quotes?symbols=SPY", timeout=0.2).read()
-                break
-            except Exception:
-                time.sleep(0.1)
-        else:
-            raise RuntimeError("local Worker harness did not start")
-
         account = Account(
             alias="SMA integration", username="sma_integration",
             password="integration-password", strategy_id=STRATEGY_ID,
@@ -139,6 +131,7 @@ def main() -> int:
         runner = Runner([account], base_url=BASE, snapshot_url=BASE + "/intraday/latest.json",
                         ledger_dir=ledger_dir, state_dir=state_dir, bot_registration_key=KEY)
         runner.startup()
+        assert_alive(harness)
         runner._run_account(account, None, "open")
         state = runner.sessions[account.alias].me()
         check("fresh account waits without a trade", len(state.trades) == 0, str(len(state.trades)))
@@ -158,6 +151,7 @@ def main() -> int:
         restarted = Runner([account], base_url=BASE, snapshot_url=BASE + "/intraday/latest.json",
                            ledger_dir=ledger_dir, state_dir=state_dir, bot_registration_key=KEY)
         restarted.startup()
+        assert_alive(harness)
         restarted._run_account(account, None, "open")
         after_restart = restarted.sessions[account.alias].me()
         check("restart cannot duplicate the fill", len(after_restart.trades) == 1,
@@ -177,6 +171,7 @@ def main() -> int:
         check("restart after exit does not duplicate the sell", len(final.trades) == 2,
               str(len(final.trades)))
 
+        assert_alive(harness)
         reconcile = urllib.request.Request(
             BASE + "/api/bot-index/reconcile", method="POST",
             headers={"X-Bot-Registration-Key": KEY},

@@ -1,12 +1,14 @@
 // Local real-Worker HTTP harness for the isolated #41/#86/#102 lifecycle.
 // Real backend/index.js over Node HTTP with in-memory KV/R2 and a deterministic
-// QQQ option quote origin. No deployed service, account or external provider.
+// QQQ option quote origin. Binds both listeners to OS-assigned loopback ports
+// and announces a nonce identity so the parent cannot attach to a stranger.
 import http from 'node:http';
+import { randomUUID } from 'node:crypto';
 import worker, { updateBotIndex } from '../../backend/index.js';
 
-const WORKER_PORT = 8901;
-const QUOTE_PORT = 8900;
 const BOT_KEY = 'lifecycle-integration-key';
+const HOST = '127.0.0.1';
+const nonce = randomUUID();
 
 const users = new Map();
 const sessions = new Map();
@@ -50,12 +52,11 @@ const r2 = {
 const env = {
   USERS: kv(users), SESSIONS: kv(sessions), PAPER_TRADES: r2,
   BOT_REGISTRATION_KEY: BOT_KEY,
-  LIVE_QUOTE_ORIGIN: `http://127.0.0.1:${QUOTE_PORT}`,
+  LIVE_QUOTE_ORIGIN: null,
   LIVE_QUOTE_KEY: 'local-quote-key',
   BOT_INDEX_READS: 'r2',
   ASSETS: { async fetch() { return new Response('not found', { status: 404 }); } },
 };
-await updateBotIndex(env, [], { ready: true });
 
 function readBody(req) {
   return new Promise((resolve, reject) => {
@@ -67,7 +68,7 @@ function readBody(req) {
 }
 
 const quoteServer = http.createServer((req, res) => {
-  const url = new URL(req.url, `http://127.0.0.1:${QUOTE_PORT}`);
+  const url = new URL(req.url, `http://${HOST}`);
   const symbols = (url.searchParams.get('symbols') || '').split(',').filter(Boolean);
   const now = new Date().toISOString();
   const quotes = symbols.map(symbol => {
@@ -84,13 +85,21 @@ const quoteServer = http.createServer((req, res) => {
 
 const workerServer = http.createServer(async (req, res) => {
   try {
+    if (req.url === '/__control/identity') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        pid: process.pid, nonce, host: HOST,
+        worker_port: workerPort, quote_port: quotePort,
+      }));
+      return;
+    }
     if (req.url === '/__control/stats') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(counts));
       return;
     }
     const body = await readBody(req);
-    const request = new Request(`http://127.0.0.1:${WORKER_PORT}${req.url}`, {
+    const request = new Request(`http://${HOST}:${workerPort}${req.url}`, {
       method: req.method,
       headers: req.headers,
       body: body.length ? body : undefined,
@@ -104,9 +113,21 @@ const workerServer = http.createServer(async (req, res) => {
   }
 });
 
-await new Promise(resolve => quoteServer.listen(QUOTE_PORT, '127.0.0.1', resolve));
-await new Promise(resolve => workerServer.listen(WORKER_PORT, '127.0.0.1', resolve));
-console.log(JSON.stringify({ ready: true, worker: WORKER_PORT, quotes: QUOTE_PORT }));
+let quotePort;
+let workerPort;
+await new Promise(resolve => quoteServer.listen(0, HOST, resolve));
+quotePort = quoteServer.address().port;
+env.LIVE_QUOTE_ORIGIN = `http://${HOST}:${quotePort}`;
+await updateBotIndex(env, [], { ready: true });
+await new Promise(resolve => workerServer.listen(0, HOST, resolve));
+workerPort = workerServer.address().port;
+if (!quotePort || !workerPort || quotePort === workerPort) {
+  throw new Error(`invalid OS-assigned loopback ports: ${quotePort}/${workerPort}`);
+}
+console.log(JSON.stringify({
+  ready: true, pid: process.pid, nonce, host: HOST,
+  worker_port: workerPort, quote_port: quotePort,
+}));
 
 const shutdown = () => { workerServer.close(); quoteServer.close(); };
 process.on('SIGTERM', shutdown);
