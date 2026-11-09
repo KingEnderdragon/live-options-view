@@ -9,6 +9,7 @@ on:
     paths:
       - "collector.py"
       - "collector/**"
+      - "runtime/python/**"
       - "collectors/**"
       - "scanners/**"
       - "market_overview/**"
@@ -50,6 +51,7 @@ on:
     paths:
       - "collector.py"
       - "collector/**"
+      - "runtime/python/**"
       - "collectors/**"
       - "scanners/**"
       - "market_overview/**"
