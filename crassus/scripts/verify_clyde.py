@@ -211,6 +211,45 @@ def test_dry_run_validation_and_mutual_exclusion(tmp: Path) -> None:
           rc == 2 and path.read_bytes() == before)
 
 
+def test_typed_invalid_leaves_file_unchanged(tmp: Path) -> None:
+    # Malformed configuration is refused even when the bad entry is
+    # UNSELECTED: the file is replaced as a unit, so a typed-invalid
+    # username/strategy_id anywhere blocks both apply and dry-run.
+    cases = [
+        ("username", 123),
+        ("strategy_id", ["invalid"]),
+        ("alias", 42),
+        ("strategy_id", ""),
+        ("username", None),
+    ]
+    for field, value in cases:
+        for dry_run in (False, True):
+            path = write_fixture(tmp)
+            data = json.loads(path.read_text(encoding="utf-8"))
+            data["accounts"][1][field] = value
+            path.write_text(json.dumps(data), encoding="utf-8")
+            before = path.read_bytes()
+            argv = ["assign", "--strategy", "momentum_qqq", "--account", "Alice",
+                    "--accounts", str(path)]
+            if dry_run:
+                argv.append("--dry-run")
+            rc = clyde.main(argv)
+            check(f"typed-invalid {field}={value!r} "
+                  f"{'dry-run' if dry_run else 'apply'} refused (exit 2, unchanged)",
+                  rc == 2 and path.read_bytes() == before)
+    # Duplicate identities are ambiguous and refused (alias and username).
+    for dup_field in ("alias", "username"):
+        path = write_fixture(tmp)
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["accounts"][1][dup_field] = data["accounts"][0][dup_field]
+        path.write_text(json.dumps(data), encoding="utf-8")
+        before = path.read_bytes()
+        rc = clyde.main(["assign", "--strategy", "momentum_qqq",
+                         "--account", "Alice", "--accounts", str(path)])
+        check(f"duplicate {dup_field} refused (exit 2, unchanged)",
+              rc == 2 and path.read_bytes() == before)
+
+
 def test_preservation_and_atomicity(tmp: Path) -> None:
     path = write_fixture(tmp)
     before = read(path)
@@ -367,6 +406,7 @@ def main() -> int:
         test_selection_and_assign(tmp)
         test_refusals_leave_file_unchanged(tmp)
         test_malformed_leaves_file_unchanged(tmp)
+        test_typed_invalid_leaves_file_unchanged(tmp)
         test_dry_run_validation_and_mutual_exclusion(tmp)
         test_preservation_and_atomicity(tmp)
         test_recovery(tmp)

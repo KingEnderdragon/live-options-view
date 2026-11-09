@@ -165,24 +165,38 @@ def load_accounts_file(path: Path) -> dict:
 
 
 def validate_accounts(data: dict) -> list[str]:
-    """Return a list of structural problems (empty when the file is usable)."""
+    """Return a list of structural problems (empty when the file is usable).
+
+    Every account's alias, username, and strategy_id must be a nonempty
+    string, and identities (alias and username) must be unique: the whole
+    configuration is refused when any entry is malformed, even an
+    unselected one, because the file is replaced as a unit.
+    """
     problems: list[str] = []
     accounts = data.get("accounts")
     if not isinstance(accounts, list):
         return ["'accounts' is not a list"]
     seen_aliases: set[str] = set()
+    seen_usernames: set[str] = set()
     for i, entry in enumerate(accounts):
         if not isinstance(entry, dict):
             problems.append(f"accounts[{i}] is not an object")
             continue
         for key in ("alias", "username", "strategy_id"):
-            if not entry.get(key):
-                problems.append(f"accounts[{i}] missing {key!r}")
+            value = entry.get(key)
+            if not isinstance(value, str) or not value.strip():
+                problems.append(
+                    f"accounts[{i}] {key!r} must be a nonempty string")
         alias = entry.get("alias")
-        if alias:
+        if isinstance(alias, str) and alias.strip():
             if alias in seen_aliases:
                 problems.append(f"duplicate alias {alias!r}")
             seen_aliases.add(alias)
+        username = entry.get("username")
+        if isinstance(username, str) and username.strip():
+            if username in seen_usernames:
+                problems.append(f"duplicate username {username!r}")
+            seen_usernames.add(username)
     return problems
 
 

@@ -65,7 +65,13 @@ python scripts/clyde.py assign --strategy momentum_qqq --all
 Only the selected accounts' `strategy_id` fields change. Aliases, ordering,
 `params`, credentials (`password` / `password_env`), and all unrelated data
 are preserved as values, in their original order (serialization may
-reformat whitespace). A backup is written before replacement by default
+reformat whitespace).
+
+Configuration is validated before selection or any write: every account's
+`alias`, `username`, and `strategy_id` must be a nonempty string, and
+aliases and usernames must be unique. A malformed entry anywhere — even an
+unselected account — refuses the whole operation (exit 2, file unchanged),
+for both apply and dry-run, because the file is replaced as a unit. A backup is written before replacement by default
 (`<accounts>.json.bak`, or `--backup FILE`); `--no-backup` skips it.
 
 Recover from a backup (the backup is validated before replacement):
