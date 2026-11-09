@@ -1,0 +1,9 @@
+# Changes to this deployment contract also run the Collector suite.
+# Keep its CI path filters aligned with Railway collector watch paths.
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "runtime/python/Dockerfile"
+
+[deploy]
+startCommand = "python -m collector"
+restartPolicyType = "never"

@@ -9,6 +9,8 @@ on:
     paths:
       - "collector.py"
       - "collector/**"
+      - "runtime/python/**"
+      - "tests/producer_packaging.py"
       - "collectors/**"
       - "scanners/**"
       - "market_overview/**"
@@ -50,6 +52,8 @@ on:
     paths:
       - "collector.py"
       - "collector/**"
+      - "runtime/python/**"
+      - "tests/producer_packaging.py"
       - "collectors/**"
       - "scanners/**"
       - "market_overview/**"
@@ -128,3 +132,7 @@ jobs:
         run: python tests/verify_eia_steo_calibration.py
       - name: Run weekly collection suite
         run: python tests/verify_weekly_collection.py
+      - name: Verify actual producer image entry points (offline)
+        run: |
+          docker build -f runtime/python/Dockerfile -t producer-check .
+          docker run --rm producer-check python tests/producer_packaging.py
