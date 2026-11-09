@@ -91,14 +91,65 @@ class ReplayIntegrity(unittest.TestCase):
         good = [{"sweep": 1, "file": "sweep_0001.jsonl.gz", "chains": {}, "truncated": False,
                  "started_ms": 100, "ended_ms": 1000}]
         summary = {"assessment": {"status": "complete"}}
-        replay.validate_manifest(good, summary, "2026-10-05")
-        for bad in ([dict(good[0], sweep=2)], [dict(good[0], truncated=True)],
+        self.assertFalse(replay.validate_manifest(good, summary, "2026-10-05"))
+        for bad in ([dict(good[0], sweep=2)],
                     [dict(good[0], started_ms=None)], [dict(good[0], ended_ms=99)],
                     good + [dict(good[0], sweep=2, file="sweep_0002.jsonl.gz", started_ms=999)]):
             with self.assertRaises(RuntimeError):
                 replay.validate_manifest(bad, summary, "2026-10-05")
         with self.assertRaises(RuntimeError):
             replay.validate_manifest(good, {"assessment": {"status": "partial"}}, "2026-10-05")
+        # A truncated NON-final sweep is still a real mid-session gap.
+        two = [dict(good[0], truncated=True),
+               dict(good[0], sweep=2, file="sweep_0002.jsonl.gz", started_ms=1000, ended_ms=2000)]
+        with self.assertRaises(RuntimeError):
+            replay.validate_manifest(two, summary, "2026-10-05")
+        # A truncated FINAL sweep is the normal end-of-day partial sweep
+        # (market close cuts it short); it is accepted and its rows are
+        # excluded from window evidence.
+        self.assertTrue(replay.validate_manifest(
+            [dict(good[0]), dict(good[0], sweep=2, file="sweep_0002.jsonl.gz",
+                                  truncated=True, started_ms=1000, ended_ms=2000)],
+            summary, "2026-10-05"))
+
+    def test_truncated_final_sweep_rows_excluded(self):
+        # Two sweeps; the final one is truncated. Its rows must not enter
+        # window evidence, and the exclusion must be recorded.
+        day = "2026-10-16"
+        base = ms(day, 9, 30)
+        at = lambda offset: base + offset
+        prefix = f"oa203/scanner/{day}/"
+        manifest = [
+            {"sweep": 1, "file": "sweep_0001.jsonl.gz", "truncated": False, "rows": 1,
+             "started_ms": at(0), "ended_ms": at(1000),
+             "chains": {"SPY": {"status": "ok", "rows": 1, "fetched_ms": at(0)}},
+             "additional_chains": {}},
+            {"sweep": 2, "file": "sweep_0002.jsonl.gz", "truncated": True, "rows": 1,
+             "started_ms": at(1000), "ended_ms": at(2000),
+             "chains": {"SPY": {"status": "ok", "rows": 1, "fetched_ms": at(1000)}},
+             "additional_chains": {}},
+        ]
+        row1 = {"underlying": "SPY", "symbol": "SPY261016C00100000", "expiration": day,
+                "sweep": 1, "t": at(0)}
+        row2 = {**row1, "sweep": 2, "t": at(1000)}
+        artifacts = {
+            prefix + "summary.json": json.dumps({"trade_date": day, "final": True,
+                                                   "session_open_ms": base, "session_close_ms": at(2000),
+                                                   "assessment": {"status": "complete"}}).encode(),
+            prefix + "universe.json": json.dumps({"trade_date": day, "selected": [{
+                "underlying": "SPY", "expiration": day}]}).encode(),
+            prefix + "sweeps/manifest.jsonl": "".join(json.dumps(m) + "\n" for m in manifest).encode(),
+            prefix + "sweeps/sweep_0001.jsonl.gz": gzip.compress((json.dumps(row1) + "\n").encode()),
+            prefix + "sweeps/sweep_0002.jsonl.gz": gzip.compress((json.dumps(row2) + "\n").encode()),
+        }
+        symbols, sampled = defaultdict(list), defaultdict(set)
+        with mock.patch.object(replay, "fetch", side_effect=lambda key: artifacts[key]):
+            meta = replay.load_session(day, {"SPY"}, symbols, sampled)
+        # Only the first (complete) sweep's row is kept.
+        self.assertEqual(len(symbols["SPY261016C00100000"]), 1)
+        self.assertEqual(symbols["SPY261016C00100000"][0]["sweep"], 1)
+        self.assertEqual(meta["excluded_final_sweep"]["sweep"], 2)
+        self.assertEqual(meta["excluded_final_sweep"]["reason"], "truncated_final_sweep_excluded")
 
     def test_calendar_rejects_missing_session_and_wrong_bounds(self):
         self.assertIn((2026, 41), replay.validate_calendar(SESSIONS))

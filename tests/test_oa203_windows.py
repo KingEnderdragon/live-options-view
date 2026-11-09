@@ -164,6 +164,34 @@ class Weekly(unittest.TestCase):
         later = info(expiration="2026-10-16", symbol="ABC261016C00100000")
         self.assertEqual(self.run_kind("weekly_cheapest", info=later)["flags"], [])
 
+    def test_d8_friday_to_monday_same_contract_continuity(self):
+        # D8: one additional expiry for SPY/QQQ only. The Oct 23 contract
+        # sampled as the additional chain on Friday Oct 16 is the SAME
+        # contract sampled as the nearest chain on Monday Oct 19, so a
+        # Friday->Monday overnight window can follow it. Within the
+        # approved two-chain limit: nearest + one additional, nothing more.
+        fri = sess("2026-10-16")
+        mon = sess("2026-10-19")
+        win = w.overnight_windows([fri, mon])[0]
+        self.assertEqual(win.window_id, "overnight-2026-10-16_2026-10-19")
+        contract = info(expiration="2026-10-23", symbol="SPY261023C00100000",
+                        underlying="SPY", root="SPY")
+        path = [ob("2026-10-16", 15, 55, 2.0, 2.1), ob("2026-10-19", 9, 35, 2.4, 2.5)]
+        row = w.evaluate(win, contract, path, ["2026-10-16", "2026-10-19"])
+        self.assertEqual(row["exec"]["status"], "eligible")
+        self.assertEqual(row["exec"]["entry_session"], "2026-10-16")
+        self.assertEqual(row["exec"]["exit_session"], "2026-10-19")
+        # If the Oct 23 chain had NOT been sampled on Monday (no second
+        # chain retained), the hold cannot be fabricated.
+        row = w.evaluate(win, contract, path, ["2026-10-16"])
+        self.assertEqual(row["exec"]["status"], "excluded")
+        self.assertIn("missing_session:2026-10-19", row["exec"]["reasons"])
+        # A contract expiring on the Friday itself cannot cross the weekend.
+        expiring = info(expiration="2026-10-16", symbol="SPY261016C00100000",
+                        underlying="SPY", root="SPY")
+        row = w.evaluate(win, expiring, path, ["2026-10-16", "2026-10-19"])
+        self.assertIn("expires_before_exit", row["exec"]["reasons"])
+
     def test_close_endpoint_tolerance_and_no_interpolation(self):
         path = [o for o in week_path() if o.t != ms("2026-10-09", 15, 55)]  # last Fri obs is 10:00
         r = self.run_kind("weekly_cheapest", path=path)

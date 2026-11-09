@@ -69,8 +69,20 @@ def validate_manifest(manifest: list[dict], summary: dict, day: str,
     files = [m.get("file") for m in manifest]
     if len(set(files)) != len(files) or any(f != f"sweep_{i:04d}.jsonl.gz" for i, f in enumerate(files, 1)):
         raise RuntimeError(f"{day}: invalid or repeated sweep file")
-    if any(m.get("truncated") or not isinstance(m.get("chains"), dict) for m in manifest):
-        raise RuntimeError(f"{day}: truncated or damaged sweep")
+    # A truncated FINAL sweep is the normal end-of-day partial sweep: the
+    # scanner stops at market close, so the last sweep only fetches a
+    # fraction of the chains before the session ends. The archive's own
+    # assessment still marks such a day "complete" (complete_sweeps counts
+    # only the full sweeps). A truncated NON-final sweep is a real mid-
+    # session gap and is still rejected. The final sweep's rows are
+    # excluded from window evidence in load_session; they are never used
+    # as endpoints, so no coverage is invented.
+    for m in manifest[:-1]:
+        if m.get("truncated") or not isinstance(m.get("chains"), dict):
+            raise RuntimeError(f"{day}: truncated or damaged sweep {m.get('sweep')}")
+    if manifest and not isinstance(manifest[-1].get("chains"), dict):
+        raise RuntimeError(f"{day}: damaged final sweep")
+    final_truncated = bool(manifest and manifest[-1].get("truncated"))
     previous_end = None
     for entry in manifest:
         start, end = entry.get("started_ms"), entry.get("ended_ms")
@@ -83,6 +95,10 @@ def validate_manifest(manifest: list[dict], summary: dict, day: str,
             fetched = st.get("fetched_ms")
             if type(fetched) is not int or not start <= fetched <= end:
                 raise RuntimeError(f"{day}: missing or invalid chain fetch time in sweep {entry['sweep']}")
+        # A truncated final sweep is incomplete by construction; do not
+        # demand its additional chains (they were never fetched).
+        if final_truncated and entry is manifest[-1]:
+            continue
         for name, expiries in (selected or {}).items():
             extra = expiries.get("additional")
             if extra:
@@ -90,6 +106,7 @@ def validate_manifest(manifest: list[dict], summary: dict, day: str,
                 if not st or st.get("status") != "ok" or st.get("expiration") != extra or \
                         type(st.get("rows")) is not int or st["rows"] <= 0:
                     raise RuntimeError(f"{day}: incomplete additional chain {name} {extra} in sweep {entry['sweep']}")
+    return final_truncated
 
 
 def validate_contract_identity(symbol: str, row: dict) -> None:
@@ -121,9 +138,18 @@ def load_session(day: str, underlyings: set[str], rows_by_symbol: dict, sampled:
     selected = {u["underlying"]: {"nearest": u["expiration"], "additional": u.get("additional_expiration")}
                 for u in universe.get("selected", [])}
     manifest = [json.loads(line) for line in fetch(prefix + "sweeps/manifest.jsonl").decode().splitlines() if line.strip()]
-    validate_manifest(manifest, summary, day, selected)
+    final_truncated = validate_manifest(manifest, summary, day, selected)
     kept = 0
+    excluded_final_sweep = None
     for entry in manifest:
+        # A truncated final sweep is excluded from window evidence: its
+        # rows are a partial end-of-day fetch, not a complete sweep. The
+        # exclusion is recorded in the returned metadata and the report.
+        if final_truncated and entry is manifest[-1]:
+            excluded_final_sweep = {"sweep": entry["sweep"], "rows": entry.get("rows"),
+                                    "chains": len(entry.get("chains", {})),
+                                    "reason": "truncated_final_sweep_excluded"}
+            continue
         counts: dict[tuple[str, str], int] = defaultdict(int)
         in_session_counts: dict[tuple[str, str], int] = defaultdict(int)
         raw_count = 0
@@ -174,6 +200,7 @@ def load_session(day: str, underlyings: set[str], rows_by_symbol: dict, sampled:
     return {"day": day, "session": w.Session(day, summary["session_open_ms"], summary["session_close_ms"]),
             "sweeps": len(manifest), "rows_kept": kept, "final": bool(summary.get("final")),
             "assessment": summary["assessment"]["status"],
+            "excluded_final_sweep": excluded_final_sweep,
             "universe_selection_version": universe.get("selection_version"),
             "universe_selected_at": universe.get("selected_at"),
             "occ_sha256": universe.get("occ_sha256")}
