@@ -12,6 +12,7 @@ on:
       - "tests/**"
       - "wrangler.toml"
       - "scripts/stamp-build.mjs"
+      - "scripts/generate-quote-instruments.mjs"
       - ".github/workflows/deploy.yml"
       - ".github/workflows/web-ci.yml"
   push:
@@ -22,6 +23,7 @@ on:
       - "tests/**"
       - "wrangler.toml"
       - "scripts/stamp-build.mjs"
+      - "scripts/generate-quote-instruments.mjs"
       - ".github/workflows/deploy.yml"
       - ".github/workflows/web-ci.yml"
 
@@ -47,6 +49,12 @@ jobs:
         run: node tests/bots_panel.test.js
       - name: live quote service
         run: node tests/live_quote_service.test.js
+      - name: adaptive quote instruments projection
+        run: node tests/quote_instruments.test.js
+      - name: adaptive quote cards model
+        run: node tests/quote_panel.test.js
+      - name: adaptive quote cards DOM and refresh controller
+        run: node tests/quote_panel_dom.test.js
       - name: order logic
         run: node tests/order_logic.test.js
       - name: vwap/rvol display

@@ -48,7 +48,7 @@ function runBoot({ cachedSession = null, submitAuthImpl = null } = {}) {
     renderSelectedChain: 0, hideMarginCallScreen: 0, showTab: [], loadHistoryDate: [],
     setStatus: [], loadRanges: 0, fetchLatest: 0, fetchPrices: 0, fetchSpyHealth: 0,
     refreshSessionFromServer: 0, renderQuoteHealth: 0, renderTransportHealth: [],
-    startCountdown: 0, fetchSteoCalibration: 0, fetchSqueezeLatest: 0,
+    startCountdown: 0, fetchSteoCalibration: 0, fetchSqueezeLatest: 0, startQuotePanelRefresh: 0,
     updatePriceStrip: [], intervals: [], fetches: [], localStorageRemoves: [],
   };
   const pollers = [];
@@ -76,6 +76,7 @@ function runBoot({ cachedSession = null, submitAuthImpl = null } = {}) {
     SHARE_QUOTE_MAX_AGE_MS: 90_000,
     LiveQuotePoller,
     initPriceStrip: () => { calls.initPriceStrip++; },
+    startQuotePanelRefresh: () => { calls.startQuotePanelRefresh++; },
     renderChainTitle: symbol => { calls.renderChainTitle.push(symbol); },
     selectUnderlying: value => { calls.selectUnderlying.push(value); },
     readSessionDisplayCache: () => cachedSession,
@@ -134,8 +135,9 @@ function runBoot({ cachedSession = null, submitAuthImpl = null } = {}) {
   assert.equal(boot.calls.startCountdown, 1, 'boot must start the 60s refresh cycle');
   assert.equal(boot.calls.fetchSteoCalibration, 1, 'boot must fetch STEO once at startup');
   assert.equal(boot.calls.fetchSqueezeLatest, 1, 'boot must fetch the squeeze panel once at startup');
-  assert.deepEqual(boot.calls.intervals.map(i => i.ms), [60_000, 15_000, 60_000, 300_000, 60_000],
-    'boot must arm fetchPrices / fetchSpyHealth / STEO / squeeze / ranges-retry intervals');
+  assert.equal(boot.calls.startQuotePanelRefresh, 1, 'boot must start the single panel refresh controller');
+  assert.deepEqual(boot.calls.intervals.map(i => i.ms), [15_000, 60_000, 300_000, 60_000],
+    'boot must arm fetchSpyHealth / STEO / squeeze / ranges-retry intervals; the panel owns prices');
   assert.deepEqual(boot.calls.updatePriceStrip, [{ QQQ: 600.1 }], 'boot must paint the price strip once from the snapshot');
 
   // The ticker subscribe callback repaints the strip and re-renders paper

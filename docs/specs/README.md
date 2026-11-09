@@ -9,5 +9,6 @@ These specifications are repository documentation, not served assets. Return to 
 | [Active Big Banana lookup](OA203_ACTIVE_LOOKUP.md) | Cutoff-pinned daily-session products, bounds and November 8 activation policy | Earlier candidate proposals in its history are superseded where the policy says so |
 | [Multi-session windows](OA203_MULTI_SESSION_WINDOWS.md) | Contract continuity and weekly/overnight definitions | Daily active lookup is not evidence of deployed multi-session windows |
 | [Cross-market overview](CROSS_MARKET_OVERVIEW.md) | Current MCP strip consumer and broader proposed coverage | The proposed stock universe is not current subscriptions |
+| [Adaptive quote panel](ADAPTIVE_QUOTE_PANEL.md) | Core/pins/movers behaviour, device-local pin scope, one refresh controller and release path | Real extended-session observation depends on the deployed #178 lane |
 
 The original root filenames remain small compatibility pointers; the full text has one maintained home here. Public plans stay under `site/plans/` with unchanged public paths, rather than being silently unpublished or duplicated into this directory.

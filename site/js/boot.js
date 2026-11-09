@@ -87,8 +87,10 @@
   // OI heatmap: 60s refresh cycle
   startCountdown();
 
-  // prices.json remains a fallback and retains its existing producer cadence.
-  setInterval(fetchPrices, 60_000);
+  // prices.json is owned by the quote panel's one refresh controller (#179):
+  // it refreshes on a bounded visible/hidden cadence, immediately on foreground
+  // return, and backs off after failures without dropping last values.
+  if (typeof startQuotePanelRefresh === 'function') startQuotePanelRefresh();
   setInterval(fetchSpyHealth, 15_000);
 
   // eia_steo.json updates server-side every few hours at most (see

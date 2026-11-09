@@ -16,6 +16,13 @@ const tickerState = new TickerStateStore(TICKER_CLASSES, { staleAfterMs: SHARE_Q
 let tickerPoller = null;
 let prevPrices = {};
 
+// #179: one shared quote store, one panel and one refresh controller. The
+// legacy tile lists stay for the compact compatibility tests; the real page
+// renders the core/pins/movers panel from the same store.
+let quoteStoreRef = null;
+let quotePanelRef = null;
+let quotePanelController = null;
+
 function fmtPrice(v, sym) {
   if (v == null) return '—';
   if (sym === 'JPY/USD') return v > 0 ? '¥' + (1 / v).toFixed(2) : '—';
@@ -53,10 +60,39 @@ function buildTickerEl(sym, isSmall) {
 }
 
 function initPriceStrip() {
+  // The accepted panel (#179): core markets, personal pins and session-aware
+  // movers, all fed from the one prices.json store below.
+  if (typeof initQuotePanel === 'function') {
+    quoteStoreRef = new QuoteStore();
+    quotePanelRef = initQuotePanel({
+      documentRef: document,
+      store: quoteStoreRef,
+      pins: new QuotePins({ storage: safeStorage() }),
+    });
+    tickerState.subscribe(() => {
+      const snapshot = tickerState.snapshot();
+      const quotes = Object.entries(snapshot).map(([symbol, quote]) => ({ ...quote, symbol }));
+      if (quoteStoreRef.mergeTickers(quotes)) quotePanelRef.render(quoteStoreRef.snapshot());
+    });
+  }
+  // Legacy containers are optional: an older page can still build its tiles.
   const main = document.getElementById('px-main');
-  const sec  = document.getElementById('px-secondary');
-  MAIN_TICKERS.forEach(s  => main.appendChild(buildTickerEl(s, false)));
-  SMALL_TICKERS.forEach(s => sec.appendChild(buildTickerEl(s, true)));
+  const sec = document.getElementById('px-secondary');
+  if (main) MAIN_TICKERS.forEach(s => main.appendChild(buildTickerEl(s, false)));
+  if (sec) SMALL_TICKERS.forEach(s => sec.appendChild(buildTickerEl(s, true)));
+}
+
+function startQuotePanelRefresh() {
+  if (!quotePanelRef || typeof QuotePanelController !== 'function') return null;
+  quotePanelController = new QuotePanelController({
+    refresh: fetchPrices,
+    store: quoteStoreRef,
+    panel: quotePanelRef,
+    documentRef: document,
+    windowRef: typeof window !== 'undefined' ? window : null,
+  });
+  quotePanelController.start({ immediate: false });
+  return quotePanelController;
 }
 
 function updatePriceStrip(pricesData) {
@@ -125,7 +161,7 @@ function updateQqqMomentumLine(underlyingMarket) {
 async function fetchPrices() {
   try {
     const resp = await fetch(`${BROWSER_DATA}/intraday/prices.json?_=${Date.now()}`);
-    if (!resp.ok) return;
+    if (!resp.ok) return null;
     const data = await resp.json();
     const { SPY: spy, ...legacyPrices } = data.prices || {};
     tickerState.publishFallback(legacyPrices, data.timestamp || new Date().toISOString());
@@ -136,7 +172,13 @@ async function fetchPrices() {
       tickerState.publish([{ ...spy, symbol: 'SPY' }], { observedAt: spy.quote_ts });
     }
     updatePriceStrip(tickerState.snapshot());
+    if (quoteStoreRef) {
+      quoteStoreRef.mergePayload(data);
+      if (quotePanelRef) quotePanelRef.render(quoteStoreRef.snapshot());
+    }
+    return data;
   } catch (e) {
     console.warn('prices.json fetch failed:', e);
+    return null;
   }
 }
