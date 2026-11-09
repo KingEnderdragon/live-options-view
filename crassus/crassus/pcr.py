@@ -188,5 +188,14 @@ class PCRHistoryTracker:
         cutoff = observed_at - self._retain
         self._points = [p for p in self._points if p.observed_at >= cutoff]
 
+    def clear(self) -> None:
+        """Drop every retained reading.
+
+        The explicit lifecycle boundary for an independent replay; see
+        `crassus/replay.py`. Not called by `observe()` and not a reset rule
+        of its own.
+        """
+        self._points = []
+
     def snapshot(self) -> list[PCRPoint]:
         return list(self._points)

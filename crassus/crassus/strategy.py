@@ -84,6 +84,10 @@ class StrategyContext:
     session_phase: str
     quotes: Callable[[list[str]], dict[str, Any]]  # on-demand live quotes
     params: dict[str, Any] = field(default_factory=dict)
+    # Stable per-account identity for strategies whose process-wide state must
+    # be keyed by account (`oi_skew_qqq`). None for hand-built or backtest
+    # contexts, where one implicit account is assumed.
+    account_alias: str | None = None
 
 
 class Strategy(Protocol):

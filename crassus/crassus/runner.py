@@ -448,6 +448,7 @@ class Runner:
             session_phase=phase,
             quotes=quotes_for_decision,
             params=account.params,
+            account_alias=alias,
         )
 
         try:

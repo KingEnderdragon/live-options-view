@@ -97,6 +97,7 @@ from ..momentum import (
     PriceHistoryTracker,
     compute_momentum,
 )
+from ..replay import register_state_resetter
 from ..strategy import Decision, StrategyContext, register
 
 STRATEGY_ID = "momentum_qqq"
@@ -131,6 +132,27 @@ _tracker = PriceHistoryTracker(retain_minutes=DEFAULT_RETAIN_MINUTES)
 # or is stalled -- isn't re-appended to the tracker as if it were new
 # information under a new timestamp.
 _last_recorded_snapshot: tuple[str, str] | None = None
+
+# Calendar date of the newest recorded observation. A snapshot dated earlier
+# than this cannot belong to the run that recorded it; it begins a new replay
+# epoch (see `_begin_epoch_if_replay` semantics in put_call_ratio.py, shared
+# by the same rule here).
+_last_observed_at: datetime | None = None
+
+
+def _reset_state() -> None:
+    """Forget the trailing window and the duplicate-snapshot guard.
+
+    The explicit lifecycle boundary for an independent replay; see
+    `crassus/replay.py`. Live operation never calls this.
+    """
+    global _last_recorded_snapshot, _last_observed_at
+    _tracker.clear()
+    _last_recorded_snapshot = None
+    _last_observed_at = None
+
+
+register_state_resetter(STRATEGY_ID, _reset_state)
 
 
 def _snapshot_observed_at(timestamp: str) -> datetime | None:
@@ -444,7 +466,7 @@ def _close(
 
 
 def _decide(ctx: StrategyContext) -> Decision:
-    global _last_recorded_snapshot
+    global _last_recorded_snapshot, _last_observed_at
 
     if ctx.session_phase != "open":
         return _decide_core(ctx, None)
@@ -468,10 +490,17 @@ def _decide(ctx: StrategyContext) -> Decision:
             ),
         )
 
+    # A snapshot dated before the newest recorded reading starts a new replay
+    # epoch; see `crassus/replay.py`. The explicit reset remains the boundary
+    # for an identical same-day replay.
+    if _last_observed_at is not None and observed_at.date() < _last_observed_at.date():
+        _reset_state()
+
     snapshot_key = (ctx.snapshot.timestamp, ctx.snapshot.sha256)
     if snapshot_key != _last_recorded_snapshot:
         _tracker.observe(observed_at, ctx.snapshot.underlying_price)
         _last_recorded_snapshot = snapshot_key
+        _last_observed_at = observed_at
 
     signal = compute_momentum(
         _tracker.snapshot(),
