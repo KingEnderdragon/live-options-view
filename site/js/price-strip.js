@@ -23,14 +23,16 @@ let quoteStoreRef = null;
 let quotePanelRef = null;
 let quotePanelController = null;
 
-function fmtPrice(v, sym) {
+function fmtPrice(v, sym, source) {
   if (v == null) return '—';
   if (sym === 'JPY/USD') return v > 0 ? '¥' + (1 / v).toFixed(2) : '—';
   if (sym === 'BTC/USD') return v > 1000 ? v.toLocaleString('en-US', {maximumFractionDigits: 0}) : v.toFixed(2);
   if (sym === 'VIX') return v.toFixed(2);
-  // yfinance ^TNX reports the yield directly (4.485); DXLink $TNX.X, if it
-  // ever returns data, is yield × 10 — normalize before display
-  if (sym === '10Y') return (v > 20 ? v / 10 : v).toFixed(3) + '%';
+  // 10Y's raw scale is declared per source in market_data/overview/universe.json
+  // (`scale`): Cboe TNX arrives x10 over DXLink and already in percent from
+  // Yahoo. Normalizing by the source, not by magnitude, means a source switch
+  // cannot be mistaken for a 10x yield move.
+  if (sym === '10Y') return (source === 'dxlink' ? v / 10 : v).toFixed(3) + '%';
   return v.toFixed(2);
 }
 
@@ -110,7 +112,7 @@ function updatePriceStrip(pricesData) {
     }
     prevPrices[sym] = px;
 
-    pxEl.textContent = fmtPrice(px, sym);
+    pxEl.textContent = fmtPrice(px, sym, d.source);
 
     const chg = d.chg_pct;
     if (chg != null) {

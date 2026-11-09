@@ -114,16 +114,18 @@
       "instrument_type": "volatility_index",
       "unit": "index_points",
       "profile": "V",
-      "dxlink_symbol": "$VIX.X",
+      "dxlink_symbol": null,
       "yahoo_symbol": "^VIX",
       "compact": true,
       "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "S&P 500 expected volatility context",
-      "source_readiness": "DX $VIX.X; Yahoo ^VIX; profile V; existing Yahoo undated fill",
+      "source_readiness": "Daily-only Yahoo ^VIX; undated daily bar, never live; no DXLink subscription",
       "status": "enabled",
-      "sector": null
+      "sector": null,
+      "provider_policy": "daily_only",
+      "provider_policy_reason": "Guessed $VIX.X produced no data on the US-equity feed (#16 startup logs); ^VIX daily is the designated source. No DXLink subscription is requested."
     },
     {
       "label": "OVX",
@@ -154,16 +156,18 @@
       "instrument_type": "cash_index",
       "unit": "index_points",
       "profile": "I",
-      "dxlink_symbol": "$KOSPI.X",
+      "dxlink_symbol": null,
       "yahoo_symbol": "^KS11",
       "compact": true,
       "enabled": true,
       "timezone": "Asia/Seoul",
       "calendar": "XKRX",
       "rationale": "KRW basis; Korea and semiconductor-linked Asia session",
-      "source_readiness": "DX $KOSPI.X (unproved); Yahoo ^KS11; profile I; existing Yahoo undated fill",
+      "source_readiness": "Daily-only Yahoo ^KS11; undated daily bar, never live; no DXLink subscription",
       "status": "enabled",
-      "sector": null
+      "sector": null,
+      "provider_policy": "daily_only",
+      "provider_policy_reason": "Guessed $KOSPI.X produced no data on the US-equity feed (#16 startup logs); ^KS11 daily is the designated source. No DXLink subscription is requested."
     },
     {
       "label": "10Y",
@@ -174,21 +178,23 @@
       "instrument_type": "yield_index",
       "unit": "percent",
       "profile": "Y",
-      "dxlink_symbol": "$TNX.X",
+      "dxlink_symbol": null,
       "yahoo_symbol": "^TNX",
       "compact": true,
       "enabled": true,
       "timezone": "America/New_York",
       "calendar": "XNYS",
       "rationale": "change bps; Existing 10Y strip identity; long-rate anchor",
-      "source_readiness": "DX $TNX.X /10; Yahoo ^TNX /1 (current code); profile Y; existing Yahoo undated fill",
+      "source_readiness": "Daily-only Yahoo ^TNX (already percent); undated daily bar, never live; no DXLink subscription",
       "status": "enabled",
       "sector": null,
       "change_unit": "bps",
       "scale": {
         "dxlink": 10,
         "yfinance": 1
-      }
+      },
+      "provider_policy": "daily_only",
+      "provider_policy_reason": "Guessed $TNX.X produced no data (#16). ^TNX daily is the designated source and is already in percent; the Cboe x10 scale applies only to a future DXLink row. No DXLink subscription is requested."
     },
     {
       "label": "JPY/USD",
@@ -2031,5 +2037,6 @@
       "status": "enabled",
       "sector": null
     }
-  ]
+  ],
+  "provider_policy": "Streaming where an entitled DXLink symbol is verified; otherwise daily-only Yahoo coverage. VIX, 10Y and KOSPI are designated daily-only by this registry."
 }
