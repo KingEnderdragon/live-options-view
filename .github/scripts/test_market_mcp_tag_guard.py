@@ -108,6 +108,16 @@ class TagGuardTests(unittest.TestCase):
         with self.assertRaisesRegex(GuardError, "invalid GitHub run identity"):
             release_tag("100;evil", "1")
 
+    def test_reviewed_source_sha_is_tagged_and_validated(self):
+        source = "4d3daafa907e31222448ed35202be4c964002aa1"
+        self.assertEqual(release_tag("100", "1", source),
+                         f"{source}-run-100-1")
+        with self.assertRaisesRegex(GuardError, "invalid source SHA"):
+            release_tag("100", "1", "not-a-sha")
+        with self.assertRaisesRegex(GuardError, "unexpected release tag"):
+            check_tag_absent("13637eb7047304763ce456d78174ca7b31bde800-run-100-1",
+                             opener=Registry([]), source_sha=source)
+
 
 if __name__ == "__main__":
     unittest.main()

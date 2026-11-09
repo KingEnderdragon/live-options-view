@@ -1,4 +1,4 @@
-"""Fail-closed GHCR tag check for the one-time, run-tagged market MCP release."""
+"""Fail-closed GHCR tag check for a reviewed, run-tagged market MCP release."""
 
 import json
 import os
@@ -10,7 +10,8 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 
-SOURCE_SHA = "13637eb7047304763ce456d78174ca7b31bde800"
+DEFAULT_SOURCE_SHA = "13637eb7047304763ce456d78174ca7b31bde800"
+SOURCE_SHA = DEFAULT_SOURCE_SHA  # backward-compatible import surface
 PACKAGE = "owentanzer/market-mcp-read-only"
 ACCEPT = ", ".join(
     (
@@ -26,17 +27,27 @@ class GuardError(RuntimeError):
     pass
 
 
-def release_tag(run_id: str, run_attempt: str) -> str:
+def _valid_source_sha(source_sha: str) -> bool:
+    return bool(re.fullmatch(r"[0-9a-f]{40}", source_sha or ""))
+
+
+def release_tag(run_id: str, run_attempt: str,
+                source_sha: str = DEFAULT_SOURCE_SHA) -> str:
+    if not _valid_source_sha(source_sha):
+        raise GuardError("invalid source SHA")
     if not re.fullmatch(r"[1-9][0-9]*", run_id) or not re.fullmatch(
         r"[1-9][0-9]*", run_attempt
     ):
         raise GuardError("invalid GitHub run identity")
-    return f"{SOURCE_SHA}-run-{run_id}-{run_attempt}"
+    return f"{source_sha}-run-{run_id}-{run_attempt}"
 
 
-def check_tag_absent(tag: str, opener=urlopen, sleeper=time.sleep) -> None:
+def check_tag_absent(tag: str, opener=urlopen, sleeper=time.sleep,
+                     source_sha: str = DEFAULT_SOURCE_SHA) -> None:
     """Only an explicit manifest 404 allows publication; every other failure blocks."""
-    if not re.fullmatch(rf"{SOURCE_SHA}-run-[1-9][0-9]*-[1-9][0-9]*", tag):
+    if not _valid_source_sha(source_sha):
+        raise GuardError("invalid source SHA")
+    if not re.fullmatch(rf"{source_sha}-run-[1-9][0-9]*-[1-9][0-9]*", tag):
         raise GuardError("unexpected release tag")
 
     token_url = "https://ghcr.io/token?" + urlencode(
@@ -84,10 +95,12 @@ def check_tag_absent(tag: str, opener=urlopen, sleeper=time.sleep) -> None:
 
 def main() -> int:
     try:
-        expected = release_tag(os.environ["GITHUB_RUN_ID"], os.environ["GITHUB_RUN_ATTEMPT"])
+        source_sha = os.environ.get("SOURCE_SHA", DEFAULT_SOURCE_SHA)
+        expected = release_tag(os.environ["GITHUB_RUN_ID"],
+                               os.environ["GITHUB_RUN_ATTEMPT"], source_sha)
         if os.environ["RELEASE_TAG"] != expected:
             raise GuardError("release tag does not match this run attempt")
-        check_tag_absent(expected)
+        check_tag_absent(expected, source_sha=source_sha)
     except (GuardError, KeyError) as exc:
         print(f"GHCR publication blocked: {exc}", file=sys.stderr)
         return 1

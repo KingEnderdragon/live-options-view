@@ -24,20 +24,21 @@ it hardcodes `SOURCE_SHA: 13637eb7047304763ce456d78174ca7b31bde800`, checks out
 that historical commit, and publishes a `13637eb...` release tag. That image
 predates the `market_session` / `change_basis` / `rolling_reference` additions.
 
-## 1. Produce a consumer-only accepted source
+## 1. Review the consumer-only accepted source
 
-From a clean checkout of current master:
+The prepared extraction is PR #190 at
+`4d3daafa907e31222448ed35202be4c964002aa1`. Verify its exactness before merge:
 
 ```sh
-git fetch origin
-git switch -c release/mcp-consumer-20261109 origin/master
-git checkout 8816046445fb11be06746d99b2ee3694747b6851 -- \
-  market_mcp/overview.js market_mcp/overview-v2.test.js
+git fetch origin pull/190/head:review/consumer-only
+git switch review/consumer-only
+test "$(git rev-parse HEAD)" = 4d3daafa907e31222448ed35202be4c964002aa1
 git diff --stat origin/master
 ```
 
-The diff must contain only those two `market_mcp/` files. In particular it must
-not contain `market_data/live_market/price_lane.py`, `price_sessions.py`,
+The diff must contain only `market_mcp/overview.js` and
+`market_mcp/overview-v2.test.js`. In particular it must not contain
+`market_data/live_market/price_lane.py`, `price_sessions.py`,
 `price_history.py`, `prices.py`, `runner.py`, `config.py` or
 `overview_sources.py`; their presence means the extraction pulled the producer
 in. Run and record:
@@ -50,38 +51,53 @@ node market_mcp/production-smoke.js --out market-mcp-production-smoke.json
 node --max-old-space-size=256 market_mcp/load.js --out market-mcp-production-load.json
 ```
 
-Open a pull request for this consumer-only commit, review it, and merge it. Record
-the resulting master SHA as `CONSUMER_SHA`. This merge may rebuild the collector
-if Railway autodeploys master, but it contains no collector-path change, so the
-old producer remains the running code.
+Review and merge it. The reviewed consumer commit, not the merge SHA, is the
+accepted source. This merge may rebuild the collector if Railway autodeploys
+master, but it contains no collector-path change, so the old producer remains
+the running code.
 
 ## 2. Publish the additive image from that exact SHA
 
-Use a clean detached checkout of `CONSUMER_SHA`; confirm the tree is clean and
-the source is an ancestor of `origin/master` before building.
+Use the reviewed publisher workflow, not `publish-market-mcp-pr133.yml`. The
+new workflow is deliberately separate and pins the accepted consumer source
+`4d3daafa907e31222448ed35202be4c964002aa1`:
 
-```sh
-git fetch origin
-git switch --detach "$CONSUMER_SHA"
-test -z "$(git status --porcelain)"
-git merge-base --is-ancestor "$CONSUMER_SHA" origin/master
-node --test market_mcp/*.test.js
-
-IMAGE=ghcr.io/owentanzer/market-mcp-read-only
-TAG="${CONSUMER_SHA}-consumer-$(date -u +%Y%m%dT%H%M%SZ)"
-docker build -f market_mcp/Dockerfile \
-  --label "org.opencontainers.image.revision=$CONSUMER_SHA" \
-  --label "org.opencontainers.image.source=https://github.com/OwenTanzer/live-options-view" \
-  -t "$IMAGE:$TAG" .
-test "$(docker image inspect "$IMAGE:$TAG" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" = "$CONSUMER_SHA"
-bash market_mcp/verify-image.sh "$IMAGE:$TAG"
-docker login ghcr.io                     # release credential, not a repo secret
-docker push "$IMAGE:$TAG"
-docker buildx imagetools inspect "$IMAGE:$TAG"
+```text
+.github/workflows/publish-market-mcp-reviewed.yml
 ```
 
-Deploy by digest (`$IMAGE@sha256:...`), never by the mutable run tag. Record the
-digest, the source SHA, the test outputs and the image verification output.
+Merge the consumer extraction first so its reviewed commit is an ancestor of
+master, then merge this publisher change so the workflow exists on the default
+branch. Use a merge commit for the consumer PR: a squash or rebase merge creates
+a new commit, so the pinned reviewed SHA would no longer be an ancestor. If a
+squash/rebase merge is chosen, update `ACCEPTED_SOURCE_SHA`, the input default and
+`RELEASE_TAG` in this workflow to the resulting commit in a reviewed publisher
+change, and re-run the source guard before dispatch.
+
+After both are merged to master, dispatch with the pinned input:
+
+```sh
+gh workflow run publish-market-mcp-reviewed.yml --ref master \
+  -f source_sha=4d3daafa907e31222448ed35202be4c964002aa1
+```
+
+The workflow refuses to run unless all of these hold:
+
+- the input equals `ACCEPTED_SOURCE_SHA` (the pinned consumer commit);
+- `HEAD` is that exact SHA and the checkout is clean;
+- the SHA is an ancestor of the fetched `master`;
+- the commit's own diff against its first parent is exactly
+  `market_mcp/overview.js` and `market_mcp/overview-v2.test.js`;
+- the existing fixture, production-smoke and load checks pass;
+- the image's revision label equals the source SHA;
+- `market_mcp/verify-image.sh` passes offline; and
+- the existing GHCR tag guard sees an explicit manifest 404 for this run's
+  unique tag before publishing.
+
+It publishes `ghcr.io/owentanzer/market-mcp-read-only:<sha>-run-<run_id>-<attempt>`
+and prints the immutable digest. Deploy by digest, never by the tag. Record the
+digest, source SHA, test outputs and image verification output. Do not fall back
+to a manual build-and-push that skips these guards.
 
 ## 3. Deploy and verify the consumer before touching the producer
 
