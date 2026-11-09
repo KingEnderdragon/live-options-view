@@ -205,3 +205,20 @@ test('official Treasury daily yields are normalized in percent with basis-point 
   const out=await one(setup({UST2Y:r}),'UST2Y');
   assert.equal(out.price,4.51);assert.equal(out.change.bps,5);assert.equal(out.freshness.live,false);
 });
+
+test('#178 crypto rolling 24h change is bounded, same-instrument and never zero-filled',async()=>{
+  const rolling=overrides=>({instrument_id:'crypto.btcusd',value:80000,source:'rolling_history',source_symbol:'BTC/USD:CXTALP',price_basis:'rolling_24h',observed_at:'2026-10-01T16:10:00Z',observation_granularity:'event',observation_timezone:'UTC',session:'continuous',adjustment_basis:'unadjusted',sample_clock:'provider_event_clock',...overrides});
+  const base=()=>event('BTC/USD',{price:88000,market_session:'continuous',rolling_reference:rolling({})});
+  const ok=await one(setup({'BTC/USD':base()}),'BTC/USD');
+  assert.equal(ok.market_session,'continuous');assert.equal(ok.change_24h.status,'ok');
+  assert.equal(ok.change_24h.percent,10);assert.equal(ok.change_24h.absolute,8000);assert.equal(ok.change_24h.reference_basis,'rolling_24h');
+  assert.equal(await one(setup({'BTC/USD':event('BTC/USD',{price:88000})}),'BTC/USD').then(r=>r.change_24h.status),'unavailable');
+  const stale=base();stale.rolling_reference.observed_at='2026-09-30T16:10:00Z';
+  assert.equal((await one(setup({'BTC/USD':stale}),'BTC/USD')).change_24h.reasons[0],'rolling_reference_outside_24h_window');
+  const mismatch=base();mismatch.rolling_reference.instrument_id='crypto.ethusd';
+  assert.equal((await one(setup({'BTC/USD':mismatch}),'BTC/USD')).change_24h.status,'unavailable');
+  const zero=base();zero.rolling_reference.value=0;
+  const out=await setup({'BTC/USD':zero}).consumer.call('market_overview');assert.equal(out.status,'failed');
+  const missing=base();missing.rolling_reference=null;
+  assert.equal((await one(setup({'BTC/USD':missing}),'BTC/USD')).change_24h.status,'unavailable');
+});
