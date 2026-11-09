@@ -15,4 +15,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . ./
 
 # Each service manifest selects its own entry point.
-CMD ["python", "-m", "collector"]
+CMD ["python", "-m", "producers.live_market"]

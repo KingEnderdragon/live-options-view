@@ -5,17 +5,17 @@ name: synthetic_days validation
 # R2 bucket, not synthesized, so no R2 credentials are exposed to or needed
 # by CI even though the "real" comparison data genuinely is real. Refreshing
 # the fixture (re-running tests/make_fixtures.py) does need R2 credentials
-# locally (see synthetic_days/README.md); CI itself never touches R2.
+# locally (see research/synthetic_days/README.md); CI itself never touches R2.
 
 on:
   push:
     branches: [master]
     paths:
-      - "synthetic_days/**"
+      - "research/synthetic_days/**"
       - ".github/workflows/synthetic-days-ci.yml"
   pull_request:
     paths:
-      - "synthetic_days/**"
+      - "research/synthetic_days/**"
       - ".github/workflows/synthetic-days-ci.yml"
 
 jobs:
@@ -23,7 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: synthetic_days
+        working-directory: research/synthetic_days
     env:
       SYNTHETIC_DAYS_CACHE: ./tests/fixtures/r2_cache
     steps:

@@ -2,10 +2,10 @@ import json
 import sys
 import unittest
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from capture_diagnostics import exception_details
-from moo144_tradier_collector import BoundedStats
+from producers.diagnostics import exception_details
+from producers.tradier import BoundedStats
 
 
 class DiagnosticsTests(unittest.TestCase):

@@ -9,19 +9,30 @@ Open [the website](https://options.moopertonic.net), then use the [system map](A
 | Question | Start here | What it owns |
 |---|---|---|
 | Where is the page? | [site/index.html](site/index.html), [site/js](site/js) | Page shell and browser features; the source directory is not a public URL prefix |
-| Where do prices and chain snapshots come from? | [collector/](collector) → [collector guide](collector/README.md) | tastytrade/DXLink acquisition, snapshot-derived readings and optional EIA forecasts |
+| Where do prices and chain snapshots come from? | [producers/live_market/](producers/live_market) → [collector guide](producers/live_market/README.md) | tastytrade/DXLink acquisition, snapshot-derived readings and optional EIA forecasts |
 | What serves data and accounts? | [Worker guide](worker/README.md), [wrangler.toml](wrangler.toml) | Static assets, allowlisted archive access, live-quote proxy, paper-trading API and scheduled settlement |
 | What decides paper trades? | [crassus/README.md](crassus/README.md) | Strategy runner; consumes market snapshots and calls the Worker account API |
-| What produces Big Banana rankings? | [scripts/oa203_return_scanner.py](scripts/oa203_return_scanner.py), [scanner contract](site/plans/2026-09-options-return-scanner.md) | Tradier chain sampling, stored sweeps and retrospective return products |
-| What stores Tradier time-and-sales? | [launcher](collectors/tradier/launcher.py), [collectors/tradier/OPERATIONS.md](collectors/tradier/OPERATIONS.md) | Separate daily archive collector; it does not feed the displayed chain |
+| What produces Big Banana rankings? | [producers/options_scanner/__main__.py](producers/options_scanner/__main__.py), [scanner contract](site/plans/2026-09-options-return-scanner.md) | Tradier chain sampling, stored sweeps and retrospective return products |
+| What stores Tradier time-and-sales? | [launcher](producers/tradier/launcher.py), [producers/tradier/OPERATIONS.md](producers/tradier/OPERATIONS.md) | Separate daily archive collector; it does not feed the displayed chain |
 | How does an assistant read it? | [market_mcp/README.md](market_mcp/README.md) | Bounded read-only tools over producer artifacts, not an alternate ranking engine |
-| What is offline research? | [synthetic_days](synthetic_days/README.md), [MOO-171 audit](moo171_snapshot_analysis/README.md), [news_pin_bot](news_pin_bot/README.md) | Separate simulation, audit and news tooling; not implied to be deployed |
+| What is offline research? | [synthetic_days](research/synthetic_days/README.md), [MOO-171 audit](research/snapshot_analysis/README.md), [news_pin_bot](experiments/news_pin_bot/README.md) | Separate simulation, audit and news tooling; not implied to be deployed |
 
 Each service owns its implementation and operating guide. The three market-data producers share [Python image packaging](runtime/python/README.md); their launch paths and schedules are documented with each component. [wrangler.toml](wrangler.toml) stays at root so both Cloudflare deployment routes discover the same configuration.
 
+## Folder boundaries
+
+- [producers/](producers/README.md): live acquisition, daily archives and option scans.
+- [site/](site), [worker/](worker/README.md), [crassus/](crassus/README.md) and [market_mcp/](market_mcp/README.md): distinct browser, account/API, strategy and assistant-reader components.
+- [research/](research/README.md): empirical studies, frozen analyses and simulation tools.
+- [experiments/](experiments/README.md): prototypes not integrated into the operating system.
+- [notes/](notes/README.md), [runtime/](runtime/python/README.md), [scripts/](scripts), [tests/](tests) and [.github/](.github): documentation, shared packaging, repository-wide tools, cross-component tests and automation.
+
+A new feature belongs under its owning component. Create a top-level folder only
+for a durable system boundary or a repository-wide responsibility.
+
 ## Where does a displayed value come from?
 
-For Live VWAP, [collector/market.py](collector/market.py) accumulates snapshot-weighted price × volume changes with [collector/market_signals.py](collector/market_signals.py), publishes `underlying_market` in `intraday/latest.json` (QQQ) or `intraday/spy/latest.json`, and the browser's [fetch cycle](site/js/data-fetch-cycle.js) passes it to [formatVwapRvol](site/shared/format.js). It is an approximation, not trade-by-trade VWAP. The snapshot carries partial-session metadata; the browser labels insufficient RVOL history, stale input and session-closed states, but does not itself surface every partial-session flag. The MCP consumer preserves that additional caveat.
+For Live VWAP, [producers/live_market/market.py](producers/live_market/market.py) accumulates snapshot-weighted price × volume changes with [producers/live_market/market_signals.py](producers/live_market/market_signals.py), publishes `underlying_market` in `intraday/latest.json` (QQQ) or `intraday/spy/latest.json`, and the browser's [fetch cycle](site/js/data-fetch-cycle.js) passes it to [formatVwapRvol](site/shared/format.js). It is an approximation, not trade-by-trade VWAP. The snapshot carries partial-session metadata; the browser labels insufficient RVOL history, stale input and session-closed states, but does not itself surface every partial-session flag. The MCP consumer preserves that additional caveat.
 
 Do not confuse that snapshot path with live bid/ask: visible contracts and open positions are refreshed through `/api/live-quotes` from the collector's in-memory feed, without an R2 write. The browser uses a same-origin `/browser-data/` archive proxy only on the configured `live-options-view.otmooper12.workers.dev` origin; on other origins, including the custom domain above, its archive base is the fixed public R2 origin. [The map](ARCHITECTURE.md#browser-and-data-boundaries) records that distinction.
 

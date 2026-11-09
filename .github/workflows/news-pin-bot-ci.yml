@@ -4,11 +4,11 @@ on:
   push:
     branches: [master]
     paths:
-      - "news_pin_bot/**"
+      - "experiments/news_pin_bot/**"
       - ".github/workflows/news-pin-bot-ci.yml"
   pull_request:
     paths:
-      - "news_pin_bot/**"
+      - "experiments/news_pin_bot/**"
       - ".github/workflows/news-pin-bot-ci.yml"
 
 jobs:
@@ -20,10 +20,10 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install dependencies
-        working-directory: news_pin_bot
+        working-directory: experiments/news_pin_bot
         run: pip install -r requirements.txt
       - name: Byte-compile and import every module
-        working-directory: news_pin_bot
+        working-directory: experiments/news_pin_bot
         run: |
           python -m py_compile $(find . -name "*.py" -not -path "./scripts/*")
           python -c "
@@ -37,14 +37,14 @@ jobs:
               importlib.import_module(mod)
           "
       - name: Run pin-engine reaction-window/recovery suite
-        working-directory: news_pin_bot
+        working-directory: experiments/news_pin_bot
         run: python scripts/verify_pin_engine.py
       - name: Run anomaly-scanner return-based z-score/cooldown suite
-        working-directory: news_pin_bot
+        working-directory: experiments/news_pin_bot
         run: python scripts/verify_anomaly.py
       - name: Run delayed-score, restart-data-loss and signed-alert regressions
-        working-directory: news_pin_bot
+        working-directory: experiments/news_pin_bot
         run: python scripts/verify_pin_regressions.py
       - name: Run dedup/UTC-timestamp/delivery-confirmation suite
-        working-directory: news_pin_bot
+        working-directory: experiments/news_pin_bot
         run: python scripts/verify_dedup_and_delivery.py

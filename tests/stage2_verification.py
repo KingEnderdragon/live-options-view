@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import collector
+import producers.live_market as collector
 
 
 class FakeBody:
@@ -98,9 +98,9 @@ def test_startup_classification():
     now = datetime(2026, 6, 23, 10, 0, tzinfo=timezone.utc)
     cases = [
         (None, "clean_start"),
-        ({"collector": {"past_stop": True}, "updated_at": (now - timedelta(minutes=5)).isoformat()}, "clean_start"),
-        ({"collector": {"past_stop": False}, "updated_at": (now - timedelta(minutes=5)).isoformat()}, "recovery_after_crash"),
-        ({"collector": {"past_stop": False}, "updated_at": (now - timedelta(minutes=180)).isoformat()}, "recovery_after_gap"),
+        ({"producers.live_market": {"past_stop": True}, "updated_at": (now - timedelta(minutes=5)).isoformat()}, "clean_start"),
+        ({"producers.live_market": {"past_stop": False}, "updated_at": (now - timedelta(minutes=5)).isoformat()}, "recovery_after_crash"),
+        ({"producers.live_market": {"past_stop": False}, "updated_at": (now - timedelta(minutes=180)).isoformat()}, "recovery_after_gap"),
     ]
     for prior, expected in cases:
         assert_equal(collector._classify_startup(FakeS3(prior), now), expected, f"classification {expected}")
@@ -294,7 +294,7 @@ def test_health_schema_and_counters():
         datetime(2026, 6, 23).date(),
     )
     health = s3.json_objects("intraday/health.json")[-1]
-    for key in ("run_id", "trade_date", "process_start_time", "updated_at", "classification", "collector", "feed", "uploads", "cadence", "symbols"):
+    for key in ("run_id", "trade_date", "process_start_time", "updated_at", "classification", "producers.live_market", "feed", "uploads", "cadence", "symbols"):
         assert_true(key in health, f"health key {key}")
     assert_equal(health["run_id"], "run-test", "health run id")
     assert_equal(health["uploads"]["prices_success_count"], 1, "health price counter")

@@ -10,13 +10,12 @@ from collections import Counter
 from datetime import date
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import oa203_return_scanner as scanner  # noqa: E402
-from scanners.oa203 import active as scanner_active  # noqa: E402
-from scanners.oa203 import runtime as scanner_runtime  # noqa: E402
-from oa203_returns import (  # noqa: E402
+import producers.options_scanner as scanner  # noqa: E402
+from producers.options_scanner import active as scanner_active  # noqa: E402
+from producers.options_scanner import runtime as scanner_runtime  # noqa: E402
+from producers.options_scanner.returns import (  # noqa: E402
     ContractInfo,
     Observation,
     QualifiedPolicy,
@@ -1433,7 +1432,7 @@ class InterruptedWrites(unittest.TestCase):
 
 
 class PackageLayoutTests(unittest.TestCase):
-    """The scanner's home is ``scanners/oa203/``; the deployed path is a shim.
+    """The scanner's home is ``producers/options_scanner/``; the deployed path is a shim.
 
     Pins the seams a future move could break silently: the entry module must
     keep exposing the package surface, the stop flag must keep one owner, and
@@ -1441,7 +1440,7 @@ class PackageLayoutTests(unittest.TestCase):
     """
 
     def test_entry_module_reexports_the_package(self):
-        package = importlib.import_module("scanners.oa203")
+        package = importlib.import_module("producers.options_scanner")
         for name in package.__all__:
             self.assertIs(getattr(scanner, name), getattr(package, name), name)
 
@@ -1453,7 +1452,7 @@ class PackageLayoutTests(unittest.TestCase):
     def test_deployed_script_runs_the_cli(self):
         repo = Path(__file__).resolve().parents[1]
         completed = subprocess.run(
-            [sys.executable, str(repo / "scripts" / "oa203_return_scanner.py"), "--help"],
+            [sys.executable, "-m", "producers.options_scanner", "--help"],
             capture_output=True, text=True, cwd=str(repo), timeout=120,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
@@ -1463,7 +1462,7 @@ class PackageLayoutTests(unittest.TestCase):
         # The five jobs the survey found in one file, plus their inputs.
         for name in ("sweep", "archive", "outputs", "active", "backfill",
                      "assessment", "session", "readout"):
-            module = importlib.import_module(f"scanners.oa203.{name}")
+            module = importlib.import_module(f"producers.options_scanner.{name}")
             self.assertTrue(module.__doc__, name)
 
 

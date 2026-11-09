@@ -38,10 +38,10 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS.parent))
 sys.path.insert(0, str(SCRIPTS))
-import moo144_tradier_collector as collector  # noqa: E402
-from collectors.tradier import config as collector_config  # noqa: E402
-from collectors.tradier import lease as collector_lease  # noqa: E402
-from collectors.tradier import run as collector_run  # noqa: E402
+import producers.tradier as collector  # noqa: E402
+from producers.tradier import config as collector_config  # noqa: E402
+from producers.tradier import lease as collector_lease  # noqa: E402
+from producers.tradier import run as collector_run  # noqa: E402
 
 
 ET = ZoneInfo("America/New_York")
@@ -2406,7 +2406,7 @@ class SharedStreamMainTests(unittest.TestCase):
 
 
 class PackageLayoutTests(unittest.TestCase):
-    """The lane's home is ``collectors/tradier/``; the deployed path is a shim.
+    """The lane's home is ``producers/tradier/``; the deployed path is a shim.
 
     These pin the two seams a future move could break silently: the legacy
     entry module must keep exposing the package surface, and the process stop
@@ -2414,7 +2414,7 @@ class PackageLayoutTests(unittest.TestCase):
     """
 
     def test_deployed_entry_module_reexports_the_package(self):
-        package = importlib.import_module("collectors.tradier")
+        package = importlib.import_module("producers.tradier")
         for name in package.__all__:
             self.assertIs(getattr(collector, name), getattr(package, name), name)
 
@@ -2427,7 +2427,7 @@ class PackageLayoutTests(unittest.TestCase):
     def test_deployed_entry_script_runs_main_and_fails_loudly_without_a_token(self):
         env = {key: value for key, value in os.environ.items() if key != "TRADIER_TOKEN"}
         completed = subprocess.run(
-            [sys.executable, str(SCRIPTS / "moo144_tradier_collector.py")],
+            [sys.executable, "-m", "producers.tradier"],
             capture_output=True, text=True, env=env, cwd=str(ROOT), timeout=120,
         )
         self.assertNotEqual(completed.returncode, 0)

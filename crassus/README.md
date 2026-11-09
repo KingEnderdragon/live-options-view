@@ -392,7 +392,7 @@ and never refreshes an expired cached snapshot after failure; it does not
 invent a post-age cutoff or call insufficient samples a healthy signal.
 Source-access restoration and a post-age policy require separate decisions
 within OA-133 before healthy-feed acceptance. See
-[OA-133 evidence and acceptance](../docs/oa-133-reddit-ingestion.md).
+[OA-133 evidence and acceptance](docs/oa-133-reddit-ingestion.md).
 
 ```bash
 .venv/bin/python scripts/verify_reddit_failure_window.py
