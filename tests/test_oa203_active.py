@@ -11,8 +11,8 @@ from datetime import date
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import producers.options_scanner as scanner  # noqa: E402
-from producers.options_scanner import active as scanner_active  # noqa: E402
+import market_data.options_scanner as scanner  # noqa: E402
+from market_data.options_scanner import active as scanner_active  # noqa: E402
 
 DAY = date(2026, 10, 2)
 OPEN = 1790947800000

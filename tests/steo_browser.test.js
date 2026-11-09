@@ -32,7 +32,7 @@ const cases = [
 (async()=>{
  const evidence=process.env.O2_EVIDENCE_DIR; assert.ok(evidence); fs.mkdirSync(evidence,{recursive:false});
  const baseline=process.env.O2_BASELINE==='1';
- const {default:worker}=await import('../worker/index.js');
+ const {default:worker}=await import('../backend/index.js');
  let mode; const calls=[], unexpected=[], sockets=[], warnings=[], errors=[],results=[];
  const originalFetch=global.fetch;
  global.fetch=async(url,options)=>{

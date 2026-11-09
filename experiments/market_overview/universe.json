@@ -2,7 +2,7 @@
   "schema_version": 1,
   "universe_version": "2026-10-12.candidate-1",
   "status": "candidate",
-  "status_note": "Research proposal from issue #132 (132 candidates, 12 per group). Listing identity, corporate actions, sector tags and provider availability are NOT yet verified; every member stays 'unverified' until the coverage matrix in notes/specs/CROSS_MARKET_OVERVIEW.md records a provider mapping for it. Not investment advice and not a claim of licensed or current index membership.",
+  "status_note": "Research proposal from issue #132 (132 candidates, 12 per group). Listing identity, corporate actions, sector tags and provider availability are NOT yet verified; every member stays 'unverified' until the coverage matrix in docs/specs/CROSS_MARKET_OVERVIEW.md records a provider mapping for it. Not investment advice and not a claim of licensed or current index membership.",
   "size_bounds": {"min": 100, "max": 200},
   "watchlist": {
     "additions_cap": 25,

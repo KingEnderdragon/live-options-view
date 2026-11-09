@@ -4,8 +4,8 @@ import unittest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from producers.diagnostics import exception_details
-from producers.tradier import BoundedStats
+from market_data.diagnostics import exception_details
+from market_data.tradier import BoundedStats
 
 
 class DiagnosticsTests(unittest.TestCase):

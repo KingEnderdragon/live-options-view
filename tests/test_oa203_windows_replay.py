@@ -9,7 +9,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import producers.options_scanner.windows_replay as replay  # noqa: E402
+import market_data.options_scanner.windows_replay as replay  # noqa: E402
 from test_oa203_windows import SESSIONS, ms, sess  # noqa: E402
 
 

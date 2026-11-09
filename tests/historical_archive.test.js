@@ -6,7 +6,7 @@ const APP = 'https://live-options-view.otmooper12.workers.dev';
 const chain = 'Expiration,Type,Strike,UnderlyingPrice,OpenInterest,Volume,DTE\n2026-10-27,call,500,500,200,20,0\n2026-10-27,put,500,500,100,10,0';
 const prices = 'datetime,open,high,low,close\n2026-10-27T13:30:00Z,500,502,499,501';
 (async () => {
-  const { default: worker } = await import('../worker/index.js');
+  const { default: worker } = await import('../backend/index.js');
   const originalFetch = global.fetch;
   let routes, calls;
   global.fetch = async url => {

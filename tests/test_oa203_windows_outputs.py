@@ -11,8 +11,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT / "tests"))
 
-import producers.options_scanner.windows as w  # noqa: E402
-import producers.options_scanner.windows_outputs as outputs  # noqa: E402
+import market_data.options_scanner.windows as w  # noqa: E402
+import market_data.options_scanner.windows_outputs as outputs  # noqa: E402
 from test_oa203_windows import SESSIONS, WEEK, info, ob, week_path  # noqa: E402
 
 FINAL = {d: {"final": True, "assessment": "complete"} for d in WEEK}

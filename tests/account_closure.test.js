@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict');
 
 (async () => {
-  const { default: worker, derivePasswordHash, randomSaltBase64, updateBotIndex } = await import('../worker/index.js');
+  const { default: worker, derivePasswordHash, randomSaltBase64, updateBotIndex } = await import('../backend/index.js');
   const users = new Map(), sessions = new Map(), objects = new Map();
   let revision = 0, failFinalization = false, quotes = 0;
   const kv = store => ({
