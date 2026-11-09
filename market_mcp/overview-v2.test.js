@@ -40,7 +40,7 @@ test('exact-100 registry, original aliases, disabled candidates and full denomin
 });
 
 test('100 published rows accepted but 101 rejected without changing artifact or transport budgets',async()=>{
-  const prices=Object.fromEntries(overview.universe.instruments.map(i=>[i.label,{price:null}]));
+  const prices=Object.fromEntries(overview.universe.instruments.map(i=>[i.label,{instrument_id:i.id,price:null}]));
   let s=setup(prices);assert.notEqual((await s.consumer.call('market_overview',{limit:50})).status,'failed');
   prices.EXTRA={price:1};s=setup(prices);const out=await s.consumer.call('market_overview');assert.equal(out.errors[0].code,'excessive_or_malformed_artifact');
   assert.equal(LIMITS.artifact_bytes,4*1024*1024);assert.equal(LIMITS.requests,12);assert.equal(LIMITS.timeout_ms,15000);assert.equal(LIMITS.output_bytes,256*1024);
@@ -133,6 +133,25 @@ test('a mathematically finite input that overflows an intermediate yields no num
   assert.doesNotThrow(()=>JSON.stringify(r));
 });
 
+test('a reference basis or session that contradicts the instrument cannot produce a move',async()=>{
+  for(const [override,reason] of [[{price_basis:'settlement'},'reference_basis_not_valid_for_instrument'],
+                                  [{price_basis:'previous_close',session:'extended'},'reference_session_basis_conflict']]){
+    const e=event('AAPL');e.reference={...e.reference,...override};
+    const r=await one(setup({AAPL:e}),'AAPL');
+    assert.equal(r.change.status,'unavailable',JSON.stringify(override));
+    assert.equal(r.change.absolute,null);
+    assert.ok(r.change.reasons.includes(reason),JSON.stringify(r.change.reasons));
+  }
+  const clean=await one(setup({AAPL:event()}),'AAPL');assert.equal(clean.change.status,'ok');
+});
+
+test('oversized provenance strings are rejected before they can bloat a response',async()=>{
+  for(const override of [{observation_time_reason:'x'.repeat(300)},{instrument_id:'A'.repeat(200)},{refresh_error:'y'.repeat(600)}]){
+    const out=await setup({AAPL:event('AAPL',override)}).consumer.call('market_overview');
+    assert.equal(out.status,'failed');assert.equal(out.errors[0].code,'incompatible_schema');
+  }
+});
+
 test('unverified calendars stay unknown; crypto can be continuous and equity holiday is closed',async()=>{  let r=await one(setup({KOSPI:event('KOSPI')}),'KOSPI');assert.equal(r.freshness.market_state,'unknown');assert.equal(r.freshness.live,false);
   r=await one(setup({'BTC/USD':event('BTC/USD')}),'BTC/USD');assert.equal(r.freshness.market_state,'continuous_market');assert.equal(r.freshness.live,true);
   const now=Date.parse('2026-11-26T16:10:00Z');r=await one(setup({AAPL:event('AAPL',{observed_at:'2026-11-26T16:09:50Z'})},{now}));assert.equal(r.freshness.market_state,'closed');assert.equal(r.freshness.live,false);
@@ -168,7 +187,7 @@ test('both percent orders page the full universe with deterministic missing-valu
 });
 
 test('v2 malformed provenance fails closed and unknown Summary precision remains partial',async()=>{
-  for(const override of [{reference:{source:'scraped'}},{reference:[]},{resolved_contract:'CLZ26'},{session:[]},{quote_ts:'2026-02-30T10:00:00Z'},{collector_received_at:'2026-10-02T16:09:54Z'}]){
+  for(const override of [{reference:{source:'scraped'}},{reference:[]},{resolved_contract:'CLZ26'},{session:[]},{quote_ts:'2026-02-30T10:00:00Z'},{collector_received_at:'2026-10-02T16:09:54Z'},{observation_time_reason:'x'.repeat(300)}]){
     const out=await setup({AAPL:event('AAPL',override)}).consumer.call('market_overview');assert.equal(out.status,'failed',JSON.stringify(override));assert.equal(out.errors[0].code,'incompatible_schema');
   }
   const e=event('AAPL',{adjustment_basis:'unknown'});e.reference={...e.reference,observed_at:null,observation_date:'2026-10-01',observation_timezone:null,observation_granularity:null,adjustment_basis:'unknown',session:null};

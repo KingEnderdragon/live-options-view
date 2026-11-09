@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import market_data.live_market as entry
 from market_data.live_market import prices as p
 from market_data.live_market.feed import DXLinkFeed
+from market_data import overview
 from market_data.overview import INSTRUMENTS, producer_maps
 
 UTC = timezone.utc
@@ -158,6 +159,25 @@ class ProducerObservations(unittest.TestCase):
         self.assertEqual(dx, p.PRICE_TICKERS)
         self.assertEqual(yahoo, p.YF_SYMBOL_MAP)
         self.assertEqual(dx["JPY/USD"], "/6J:XCME")
+
+
+class RegistryGate(unittest.TestCase):
+    def test_activation_is_pinned_to_the_reviewed_strip(self):
+        cfg = overview.load_universe()
+        self.assertEqual(overview.ACTIVATION_ALLOWLIST,
+                         {r["label"] for r in cfg["instruments"] if r["enabled"]})
+        widened = copy.deepcopy(cfg)
+        next(r for r in widened["instruments"] if r["label"] == "MSFT")["enabled"] = True
+        with self.assertRaises(ValueError):
+            overview._validate(widened)
+        missing = copy.deepcopy(cfg)
+        missing["instruments"] = missing["instruments"][:-1]
+        with self.assertRaises(ValueError):
+            overview._validate(missing)
+        spot_yen = copy.deepcopy(cfg)
+        next(r for r in spot_yen["instruments"] if r["label"] == "JPY/USD")["yahoo_symbol"] = "JPYUSD=X"
+        with self.assertRaises(ValueError):
+            overview._validate(spot_yen)
 
 
 class FeedObservations(unittest.TestCase):

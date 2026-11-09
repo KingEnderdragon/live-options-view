@@ -21,6 +21,30 @@ if (universe.schema_version !== 1 || universe.universe_version !== 'market-overv
 // One reviewed registry drives identity, ordering, source mappings and discovery.
 const INSTRUMENTS = Object.freeze(Object.fromEntries(universe.instruments.map(i => [i.label, Object.freeze(i)])));
 const USD_UNITS = new Set(['USD', 'USD_per_BTC']);
+// A comparison is only a previous-session move when the reference basis is
+// meaningful for that instrument family and its claimed session can carry that
+// basis. Settlement does not belong to a stock; an extended print is not a
+// previous regular close.
+const REFERENCE_BASES = Object.freeze({
+  E: ['previous_close','prev_day_close','daily_bar_close','daily_close','official_close'],
+  I: ['previous_close','prev_day_close','daily_bar_close','daily_close','official_close'],
+  V: ['previous_close','daily_bar_close','daily_close','official_close'],
+  Y: ['previous_close','prev_day_close','daily_close','official_close'],
+  Y2: ['previous_observation','official_close','daily_close'],
+  F: ['previous_observation','daily_bar_close','daily_close','previous_close'],
+  FU: ['settlement','previous_close'],
+  C: ['previous_close','prev_day_close','daily_bar_close','daily_close','utc_day_open'],
+});
+const BASIS_SESSIONS = Object.freeze({
+  previous_close: ['regular','daily'],
+  prev_day_close: ['regular','daily'],
+  official_close: ['regular','daily'],
+  daily_bar_close: ['daily','regular'],
+  daily_close: ['daily','regular'],
+  settlement: ['settlement','daily'],
+  previous_observation: ['daily','regular','settlement'],
+  utc_day_open: ['daily'],
+});
 const JPY_SPOT = Object.freeze({ id: 'fx.jpyusd', asset_class: 'fx', instrument_type: 'spot_fx', unit: 'USD_per_JPY', name: 'JPY/USD spot (Yahoo JPYUSD=X; not CME yen futures)' });
 const JPY_UNKNOWN = Object.freeze({ id: 'unknown.jpyusd', asset_class: 'fx', instrument_type: 'unknown', unit: 'USD_per_JPY', name: 'JPY/USD identity unavailable: source of carried value was not retained' });
 const DXLINK_SYMBOLS = Object.freeze(Object.fromEntries(universe.instruments.map(i => [i.label, i.dxlink_symbol])));
@@ -71,7 +95,14 @@ function validate(p) {
     check(r.source_symbol == null || !Object.hasOwn(INSTRUMENTS,label) || r.source_symbol === expected || resolved, `Source symbol mismatch for ${label}.`);
     if (p.schema_version === 2) {
       const expectedId = label === 'JPY/USD' && origin === 'yfinance' ? JPY_SPOT.id : INSTRUMENTS[label]?.id;
+      const bounded = (v, max = 200) => v == null || (typeof v === 'string' && v.length <= max);
       check(r.instrument_id == null || !expectedId || r.instrument_id === expectedId, `Instrument identity mismatch for ${label}.`);
+      check(Object.hasOwn(INSTRUMENTS,label) ? typeof r.instrument_id === 'string' && bounded(r.instrument_id, 80) : bounded(r.instrument_id, 80),
+        `Missing or oversized instrument identity for ${label}.`);
+      check(bounded(r.source_symbol, 80) && bounded(r.adjustment_basis, 80) && bounded(r.observation_time_reason, 200) &&
+        (r.refresh_error == null || (typeof r.refresh_error === 'string' ? r.refresh_error.length <= 500
+          : object(r.refresh_error) && JSON.stringify(r.refresh_error).length <= 500)),
+        `Oversized observation provenance for ${label}.`);
       check([undefined, null, 'regular', 'extended', 'daily'].includes(r.session) &&
         (r.reference == null || [undefined, null, 'regular', 'extended', 'daily'].includes(r.reference.session)),
         `Unknown session label for ${label}.`);
@@ -273,9 +304,14 @@ function enrich(out, r, p, now) {
     : ['E','V','Y'].includes(inst.profile) ? (sessionGap !== null ? sessionGap > 1 : dayGap > 5)
     : false;
   if (gapInvalid) reasons.push('reference_not_previous_session');
+  const allowedBases = REFERENCE_BASES[inst.profile] ?? null;
+  if (ref.price_basis != null && allowedBases) {
+    if (!allowedBases.includes(ref.price_basis)) reasons.push('reference_basis_not_valid_for_instrument');
+    else if (ref.session != null && !(BASIS_SESSIONS[ref.price_basis] ?? []).includes(ref.session)) reasons.push('reference_session_basis_conflict');
+  }
   const unavailable = reasons.length > 0;
   const partial = [];
-  if (!observed && !r.observation_date) partial.push('observation_time_unverified');
+  if (!r.instrument_id) partial.push('instrument_identity_unverified');  if (!observed && !r.observation_date) partial.push('observation_time_unverified');
   if (!referenceDate) partial.push('reference_time_unverified');
   if (!ref.instrument_id || !ref.source || !ref.source_symbol) partial.push('reference_identity_unverified');
   if ([r.adjustment_basis,ref.adjustment_basis].some(v => !v || ['unknown','unverified'].includes(v))) partial.push('adjustment_basis_unverified');
