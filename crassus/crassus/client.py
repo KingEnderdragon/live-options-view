@@ -382,6 +382,15 @@ class AccountSession:
         resp = self.login()
         if resp.status_code >= 400:
             reg = self.register()
+            if reg.status_code == 403 and "invalid bot registration key" in reg.text.lower():
+                raise ConfigError(
+                    f"Worker rejected BOT_REGISTRATION_KEY while registering "
+                    f"{self.account.alias!r} ({self.account.username}). The "
+                    f"Railway value does not match the Worker secret. Fix both "
+                    f"sides and restart; do not reuse the username as a human "
+                    f"account. Run `python scripts/preflight_accounts.py "
+                    f"--probe` for a non-mutating key check."
+                )
             if reg.status_code >= 400:
                 raise TransportError(
                     f"Could not log in or register {self.account.alias}: "
@@ -391,6 +400,14 @@ class AccountSession:
             # Registration already carried the current alias/strategy, so only
             # an existing account needs re-syncing.
             sync = self.sync_metadata()
+            if sync.status_code == 403 and "invalid bot registration key" in sync.text.lower():
+                raise ConfigError(
+                    f"Worker rejected BOT_REGISTRATION_KEY while syncing existing "
+                    f"bot {self.account.alias!r}. The Railway value and Worker "
+                    f"secret have drifted; rotate both and restart. Run "
+                    f"`python scripts/preflight_accounts.py --probe` "
+                    f"to distinguish a key mismatch from a missing account."
+                )
             if sync.status_code >= 400:
                 raise TransportError(
                     f"Could not sync bot metadata for {self.account.alias}: "
