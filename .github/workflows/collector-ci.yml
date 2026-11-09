@@ -7,7 +7,6 @@ on:
   push:
     branches: [master]
     paths:
-      - "collector.py"
       - "collector/**"
       - "runtime/python/**"
       - "tests/producer_packaging.py"
@@ -17,9 +16,6 @@ on:
       - "tests/test_market_overview.py"
       - "scripts/probe_cross_market_symbols.py"
       - "tests/test_probe_cross_market_symbols.py"
-      - "requirements.txt"
-      - "Dockerfile"
-      - "railway.toml"
       - "scripts/probe_tasty_oauth.py"
       - "scripts/moo144_tradier_probe.py"
       - "scripts/moo144_tradier_collector.py"
@@ -50,7 +46,6 @@ on:
       - ".github/workflows/collector-ci.yml"
   pull_request:
     paths:
-      - "collector.py"
       - "collector/**"
       - "runtime/python/**"
       - "tests/producer_packaging.py"
@@ -60,9 +55,6 @@ on:
       - "tests/test_market_overview.py"
       - "scripts/probe_cross_market_symbols.py"
       - "tests/test_probe_cross_market_symbols.py"
-      - "requirements.txt"
-      - "Dockerfile"
-      - "railway.toml"
       - "scripts/probe_tasty_oauth.py"
       - "scripts/moo144_tradier_probe.py"
       - "scripts/moo144_tradier_collector.py"
@@ -101,7 +93,7 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r runtime/python/requirements.txt
       - name: Run collector unit suite
         run: python tests/stage2_verification.py
       - name: Run OAuth and auth-circuit safety suite

@@ -1,7 +1,7 @@
 """MOO-169 Tradier collector -- deployed entry point.
 
 The implementation lives in ``collectors/tradier/``. This module stays at the
-path the Railway start command and ``tradier_cron_launcher.py`` name, and
+path the Railway start command and ``collectors/tradier/launcher.py`` name, and
 re-exports the package so existing importers keep working unchanged:
 
     python -u scripts/moo144_tradier_collector.py

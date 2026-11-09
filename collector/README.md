@@ -2,8 +2,11 @@
 
 The collector acquires tastytrade/DXLink market data and publishes the QQQ/SPY
 snapshots consumed by the website and Market MCP (Model Context Protocol).
-The deployed entry remains `python collector.py` from the repository root;
-[collector.py](../collector.py) delegates to [runner.py](runner.py).
+Run `python -m collector` from the repository root;
+[__main__.py](__main__.py) delegates to [runner.py](runner.py).
+Railway service `live-options-view` uses that command, the
+[shared Python image](../runtime/python/README.md), no cron and restart policy
+`NEVER`. Build/start/watch settings are service-managed.
 Crassus is a separate deployable with its own dependencies and strategy state.
 
 ## Follow the implementation

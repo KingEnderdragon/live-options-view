@@ -6,8 +6,11 @@ deployed command is:
 
     python -u scripts/oa203_return_scanner.py run
 
-`scripts/oa203_return_scanner.py` is the deployed path (named in
-`railway.oa203.toml`); the code lives in this package.
+The code lives in this package. Railway service `oa203-banana-scanner-AWsT`
+uses that command and the [shared Python image](../../runtime/python/README.md),
+with repository-root context, restart policy `NEVER` and cron `45 12 * * 1-5`
+UTC. Its empty watch list covers all source paths. Build/start/cron settings
+are service-managed; activation and readiness are separate runtime settings.
 
 ## Where a job lives
 
