@@ -6,9 +6,26 @@ union of all selected archived underlyings for Oct 5-7, 2026), concatenates
 all contract rows per window, globally re-ranks before any shortlist,
 retains losses/exclusions, and asserts no duplicate/missing contracts.
 
-Ranking matches windows.rank_window: eligible rows by qualified pct
-descending, ties broken by symbol ascending; excluded rows keep rank empty
-and their reasons. Every row is retained.
+Conflict semantics (fail closed):
+A contract (OCC symbol) that appears under more than one underlying with
+DIFFERING evidence — different reasons, status, values, sessions or
+timestamps — is a conflict, not a duplicate. Its identity/deliverable/path
+evidence is ambiguous, so it is EXCLUDED from the combined ranked output:
+it is not ranked, not eligible, and no canonical economic identity is
+asserted from root spelling. Its paths are NOT stitched. Both
+provenance/coverage records are preserved in `conflicts.csv` (one row per
+attribution), and the summary records the conflict count and the exclusion.
+A symbol whose rows are byte-identical in evidence is a pure duplicate and
+is deduped to one row. Nothing is silently chosen.
+
+Batch validation (fail closed):
+Before any combination, the script validates the exact planned batch
+membership (batch-01..batch-14 from replay-130-batches.json), the disjoint
+union of the planned 661 underlyings (no underlying in two batches, union
+exactly the planned set), and that every batch's source_lock.json has the
+same (key, sha256) set. A missing, unexpected or duplicate batch, a
+non-disjoint or incomplete union, or an inconsistent source lock FAILS the
+run (exit non-zero) instead of producing a partial result.
 
 Usage: python3 combine-full-universe.py [--batches-dir DIR] [--out DIR]
 """
@@ -17,7 +34,7 @@ import csv
 import hashlib
 import json
 import sys
-from collections import Counter
+from collections import Counter, defaultdict
 from pathlib import Path
 
 WINDOWS = [
@@ -29,6 +46,14 @@ WINDOWS = [
 ]
 COLUMNS = ["rank", "symbol", "underlying", "option_type", "strike", "expiration", "pct", "entry", "exit",
            "abs_change_per_contract", "entry_session", "exit_session", "entry_ms", "exit_ms", "flags", "status", "reasons"]
+# Evidence fields that must agree for two rows of the same symbol to be a
+# pure duplicate rather than a conflict. Attribution (underlying/batch)
+# may differ; evidence must not.
+EVIDENCE_FIELDS = ["status", "reasons", "pct", "entry", "exit", "abs_change_per_contract",
+                   "entry_session", "exit_session", "entry_ms", "exit_ms"]
+CONFLICT_COLUMNS = ["window", "symbol", "batch", "underlying", "option_type", "strike", "expiration",
+                    "status", "reasons", "pct", "entry", "exit", "entry_session", "exit_session",
+                    "entry_ms", "exit_ms", "flags"]
 
 
 def pct_of(row):
@@ -38,17 +63,65 @@ def pct_of(row):
         return None
 
 
+def fail(msg):
+    print(f"VALIDATION FAILED: {msg}", file=sys.stderr, flush=True)
+    return 1
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--batches-dir", type=Path, default=Path("replay-130-full"))
     ap.add_argument("--out", type=Path, default=Path("replay-130-full-combined"))
+    ap.add_argument("--planned-batches", type=Path, default=Path("replay-130-batches.json"))
+    ap.add_argument("--planned-union", type=Path, default=Path("replay-130-union.json"))
     a = ap.parse_args()
     a.out.mkdir(parents=True, exist_ok=True)
-    batch_dirs = sorted(d for d in a.batches_dir.iterdir() if d.is_dir() and d.name.startswith("batch-"))
-    if not batch_dirs:
-        print("no batch dirs found", file=sys.stderr)
-        return 1
-    print(f"batches: {len(batch_dirs)}", flush=True)
+
+    # --- Batch validation (fail closed) ---
+    planned = json.loads(a.planned_batches.read_text())
+    planned_union = set(json.loads(a.planned_union.read_text()))
+    expected_dirs = {f"batch-{i:02d}" for i in range(1, len(planned) + 1)}
+    present = {d.name for d in a.batches_dir.iterdir() if d.is_dir() and d.name.startswith("batch-")}
+    missing = expected_dirs - present
+    unexpected = present - expected_dirs
+    if missing:
+        return fail(f"missing batch dirs: {sorted(missing)}")
+    if unexpected:
+        return fail(f"unexpected batch dirs: {sorted(unexpected)}")
+    batch_dirs = sorted(a.batches_dir / n for n in sorted(expected_dirs))
+    print(f"batches: {len(batch_dirs)} (exact planned membership)", flush=True)
+
+    # Disjoint union of the planned 661 underlyings, and each batch's
+    # summary underlyings must match its planned batch.
+    seen_under = {}
+    for d, planned_batch in zip(batch_dirs, planned):
+        s = json.loads((d / "replay_summary.json").read_text())
+        actual = set(s["underlyings"])
+        if actual != set(planned_batch):
+            return fail(f"{d.name}: summary underlyings != planned batch "
+                        f"(extra {sorted(actual - set(planned_batch))}, "
+                        f"missing {sorted(set(planned_batch) - actual)})")
+        for u in actual:
+            if u in seen_under:
+                return fail(f"underlying {u} in both {seen_under[u]} and {d.name} (not disjoint)")
+            seen_under[u] = d.name
+    if set(seen_under) != planned_union:
+        return fail(f"union of batch underlyings != planned 661 "
+                    f"(extra {sorted(set(seen_under) - planned_union)[:5]}, "
+                    f"missing {sorted(planned_union - set(seen_under))[:5]})")
+    print(f"underlyings: {len(seen_under)} (disjoint union == planned 661)", flush=True)
+
+    # Source locks consistent across batches: identical (key, sha256) sets.
+    lock0 = None
+    for d in batch_dirs:
+        lock = json.loads((d / "source_lock.json").read_text())
+        sig = {(s["key"], s["sha256"]) for s in lock["sources"]}
+        if lock0 is None:
+            lock0 = sig
+        elif sig != lock0:
+            return fail(f"{d.name}: source lock differs from batch-01 "
+                        f"(keys/hashes not identical)")
+    print(f"source locks: identical across all {len(batch_dirs)} batches ({len(lock0)} blobs)", flush=True)
 
     # Per-batch contract counts (from each batch's summary) for the
     # no-missing assertion.
@@ -59,39 +132,58 @@ def main():
     print(f"expected total contracts (sum of batch summaries): {expected_total}", flush=True)
 
     report = {"batches": len(batch_dirs), "expected_total_contracts": expected_total,
-              "windows": {}, "files": {}}
+              "underlyings": len(seen_under), "source_blobs": len(lock0),
+              "windows": {}, "files": {}, "conflicts": {}}
+    all_conflicts = []
     for win in WINDOWS:
         rows = []
         for d in batch_dirs:
             f = d / f"{win}.csv"
             with open(f, newline="") as src:
-                rows.extend(csv.DictReader(src))
-        # Deduplicate by OCC symbol. The same symbol can be attributed to
-        # two underlyings in the source archive (a data-quality finding:
-        # PSKY and SKYD share 54 SKYD-rooted symbols — the same contract
-        # appears under both the PSKY chain and the SKYD chain). A contract
-        # must be ranked once. Keep the row whose underlying matches the
-        # symbol root (the canonical attribution); the other attribution
-        # is the source-data quirk. Record how many were deduped.
-        by_symbol = {}
-        deduped = 0
+                for r in csv.DictReader(src):
+                    r["_batch"] = d.name
+                    rows.append(r)
+        # Group by OCC symbol. A symbol appearing more than once with
+        # DIFFERING evidence is a conflict: exclude it from the combined
+        # output (fail closed) and preserve both records. A symbol whose
+        # rows are identical in evidence is a pure duplicate: keep one.
+        by_symbol = defaultdict(list)
         for r in rows:
-            sym = r["symbol"]
-            if sym in by_symbol:
-                deduped += 1
-                keep = by_symbol[sym]
-                # Prefer the row whose underlying matches the symbol root.
-                root = sym[:-15].strip()
-                if r["underlying"] == root and keep["underlying"] != root:
-                    by_symbol[sym] = r
-                # Otherwise keep the first (they are the same contract).
+            by_symbol[r["symbol"]].append(r)
+        kept = []
+        conflicts = []
+        pure_dupes = 0
+        for sym, group in by_symbol.items():
+            if len(group) == 1:
+                kept.append(group[0])
                 continue
-            by_symbol[sym] = r
-        rows = list(by_symbol.values())
-        assert len(rows) == expected_total - deduped, (
-            f"{win}: row count {len(rows)} != expected {expected_total} - {deduped} deduped")
-        if deduped:
-            print(f"{win}: deduped {deduped} symbols shared across underlyings (PSKY/SKYD)", flush=True)
+            first = {k: group[0].get(k, "") for k in EVIDENCE_FIELDS}
+            if all({k: r.get(k, "") for k in EVIDENCE_FIELDS} == first for r in group[1:]):
+                pure_dupes += 1
+                kept.append(group[0])
+                continue
+            # Conflict: differing evidence. Exclude from the ranked output;
+            # preserve every attribution in the conflict report. Do not
+            # assert canonical identity from root spelling; do not stitch.
+            conflicts.append((sym, group))
+        for sym, group in conflicts:
+            for r in group:
+                all_conflicts.append({"window": win, **{c: r.get(c, "") for c in CONFLICT_COLUMNS[1:]},
+                                      "batch": r["_batch"]})
+        # No-missing audit: every raw row is accounted for exactly once —
+        # either in the combined output, as a pure duplicate, or as a
+        # conflicting attribution in the conflict report.
+        accounted = len(kept) + pure_dupes + sum(len(g) for _, g in conflicts)
+        assert accounted == expected_total, (
+            f"{win}: accounted {accounted} != expected {expected_total}")
+        assert len(kept) + pure_dupes + len(conflicts) == len(by_symbol), (
+            f"{win}: symbol accounting mismatch")
+        if conflicts:
+            print(f"{win}: {len(conflicts)} conflicting symbols excluded (fail closed); "
+                  f"{sum(len(g) for _, g in conflicts)} rows preserved in conflict report", flush=True)
+        if pure_dupes:
+            print(f"{win}: {pure_dupes} pure duplicates deduped", flush=True)
+        rows = kept
         # Global re-rank (qualified basis): eligible by pct desc, symbol asc.
         elig = sorted((r for r in rows if r["status"] == "eligible"),
                       key=lambda r: (-pct_of(r), r["symbol"]))
@@ -118,16 +210,36 @@ def main():
         report["windows"][win] = {
             "contracts": len(rows), "eligible": n_elig,
             "excluded": len(rows) - n_elig,
-            "deduped_symbols": deduped,
+            "conflicting_symbols": len(conflicts),
+            "pure_duplicates": pure_dupes,
             "top_exclusion_reasons": dict(reasons.most_common(5)),
             "top": [{"rank": r["rank"], "symbol": r["symbol"], "pct": r["pct"],
                      "entry": r["entry"], "exit": r["exit"]} for r in elig[:5]],
         }
         print(f"{win}: {len(rows)} contracts, {n_elig} eligible, {len(rows)-n_elig} excluded", flush=True)
 
-    # Hashes for every combined output CSV. (The summary's own hash is not
-    # recorded inside itself; it is self-referential. Report the summary
-    # hash from the file on disk.)
+    # Conflict report: every conflicting attribution, preserved with its
+    # batch, underlying, status, reasons and values.
+    conflict_path = a.out / "conflicts.csv"
+    with open(conflict_path, "w", newline="") as f:
+        wr = csv.DictWriter(f, fieldnames=CONFLICT_COLUMNS, lineterminator="\n")
+        wr.writeheader()
+        for r in sorted(all_conflicts, key=lambda x: (x["window"], x["symbol"], x["batch"])):
+            wr.writerow({c: r.get(c, "") for c in CONFLICT_COLUMNS})
+    n_conflict_symbols = len({r["symbol"] for r in all_conflicts})
+    report["conflicts"] = {
+        "symbols": n_conflict_symbols, "rows": len(all_conflicts),
+        "report": "conflicts.csv",
+        "semantics": ("A symbol with differing evidence across attributions is excluded "
+                      "from the combined ranked output (fail closed). No canonical "
+                      "economic identity is asserted from root spelling; paths are not "
+                      "stitched. Both provenance/coverage records are preserved here."),
+    }
+    print(f"conflicts: {n_conflict_symbols} symbols, {len(all_conflicts)} rows -> conflicts.csv", flush=True)
+
+    # Hashes for every combined output CSV and the conflict report. (The
+    # summary's own hash is not recorded inside itself; it is
+    # self-referential. Report the summary hash from the file on disk.)
     for f in sorted(a.out.glob("*.csv")):
         h = hashlib.sha256(f.read_bytes()).hexdigest()
         report["files"][f.name] = {"sha256": h, "bytes": f.stat().st_size}

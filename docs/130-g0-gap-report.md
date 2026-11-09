@@ -87,9 +87,11 @@ mapping; this section is the summary.
 - [x] A documented replay produces inspectable rankings with exact evidence,
   coverage and calculation versions. (Matrix Box 6: full-universe replay
   Oct 5–7 — 14 batches covering the 661-underlying union, globally
-  re-ranked, 71,764 unique contracts/window; combined output in
+  re-ranked, 71,710 unique contracts/window; combined output in
   `replay-130-full-combined/` with sha256 hashes; PSKY/SKYD 54-symbol
-  dedup found and resolved. Prior top-50 sample superseded.)
+  conflict found: all 54 pairs differ in coverage evidence, so they are
+  excluded fail-closed and both records preserved in `conflicts.csv`.
+  Prior top-50 sample superseded.)
 - [x] Monthly evidence requirements and current historical limitations are
   documented. (Matrix Box 7: monthly evidence = retained raw chronological
   paths / expiry / deliverable / coverage for possible monthly-horizon

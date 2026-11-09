@@ -1,5 +1,6 @@
 import sys
 import unittest
+import csv
 import gzip
 import json
 from collections import defaultdict
@@ -221,6 +222,120 @@ class OutputSchema(unittest.TestCase):
         # A rank_window result carries a per-basis rank key.
         self.assertEqual(sorted(f"{b}_rank" for b in w.BASES),
                          ["exec_rank", "mid_rank", "qualified_rank"])
+
+    def test_conflicting_duplicates_fail_closed_with_both_records(self):
+        # A symbol attributed to two underlyings with DIFFERING evidence
+        # (e.g. different missing_session reasons) is a conflict, not a
+        # duplicate: it is excluded from the combined ranked output (fail
+        # closed), both provenance/coverage records are preserved in
+        # conflicts.csv, and no canonical identity is asserted from root
+        # spelling. A symbol whose rows are identical in evidence is a
+        # pure duplicate and is deduped to one row.
+        import subprocess
+        import tempfile
+        root = Path(__file__).resolve().parents[1]
+        cols = ["rank", "symbol", "underlying", "option_type", "strike", "expiration", "pct", "entry", "exit",
+                "abs_change_per_contract", "entry_session", "exit_session", "entry_ms", "exit_ms", "flags", "status", "reasons"]
+        win = "overnight-2026-10-05_2026-10-06"
+        # Two planned batches: batch-01 has PSKY, batch-02 has SKYD.
+        # The same SKYD-rooted symbol appears in both, with different
+        # missing_session reasons (conflicting coverage evidence).
+        def row(symbol, underlying, reasons):
+            return {"rank": "", "symbol": symbol, "underlying": underlying, "option_type": "put",
+                    "strike": "4.0", "expiration": "2026-10-09", "pct": "", "entry": "", "exit": "",
+                    "abs_change_per_contract": "", "entry_session": "", "exit_session": "",
+                    "entry_ms": "", "exit_ms": "", "flags": "", "status": "excluded", "reasons": reasons}
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            batches_dir = tmp / "batches"
+            (batches_dir / "batch-01").mkdir(parents=True)
+            (batches_dir / "batch-02").mkdir(parents=True)
+            planned = [["PSKY"], ["SKYD"]]
+            (tmp / "batches.json").write_text(json.dumps(planned))
+            (tmp / "union.json").write_text(json.dumps(["PSKY", "SKYD"]))
+            lock = {"sources": [{"key": "oa203/scanner/2026-10-05/summary.json", "sha256": "a" * 64, "bytes": 1}]}
+            for i, (under, reasons) in enumerate(
+                    [("PSKY", "missing_session:2026-10-07"), ("SKYD", "missing_session:2026-10-06")], 1):
+                d = batches_dir / f"batch-{i:02d}"
+                (d / "replay_summary.json").write_text(json.dumps(
+                    {"contracts": 1, "underlyings": [under]}))
+                (d / "source_lock.json").write_text(json.dumps(lock))
+                # The contract appears in every window (one row per window),
+                # as in a real replay.
+                for w in [win, "overnight-2026-10-06_2026-10-07", "sessions2-2026-10-05_2026-10-06",
+                          "sessions2-2026-10-06_2026-10-07", "sessions3-2026-10-05_2026-10-07"]:
+                    with open(d / f"{w}.csv", "w", newline="") as f:
+                        wr = csv.DictWriter(f, fieldnames=cols, lineterminator="\n")
+                        wr.writeheader()
+                        wr.writerow(row("SKYD261009P00004000", under, reasons))
+            out = tmp / "combined"
+            r = subprocess.run([sys.executable, str(root / "combine-full-universe.py"),
+                                "--batches-dir", str(batches_dir), "--out", str(out),
+                                "--planned-batches", str(tmp / "batches.json"),
+                                "--planned-union", str(tmp / "union.json")],
+                               capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            # The conflicting symbol is excluded from the combined CSV.
+            with open(out / f"{win}.csv", newline="") as f:
+                got = list(csv.DictReader(f))
+            self.assertEqual(got, [])
+            # Both records are preserved in the conflict report, in every
+            # window (2 rows per window x 5 windows).
+            with open(out / "conflicts.csv", newline="") as f:
+                conf = list(csv.DictReader(f))
+            self.assertEqual(len(conf), 10)
+            self.assertEqual({c["underlying"] for c in conf}, {"PSKY", "SKYD"})
+            self.assertEqual({c["reasons"] for c in conf},
+                             {"missing_session:2026-10-07", "missing_session:2026-10-06"})
+            summary = json.loads((out / "full_universe_summary.json").read_text())
+            self.assertEqual(summary["windows"][win]["conflicting_symbols"], 1)
+            self.assertEqual(summary["conflicts"]["symbols"], 1)
+            self.assertEqual(summary["conflicts"]["rows"], 10)
+
+    def test_missing_or_inconsistent_batch_fails(self):
+        # A missing batch, an unexpected batch, a non-disjoint union, or
+        # an inconsistent source lock FAILS the combine instead of
+        # producing a partial result.
+        import subprocess
+        import tempfile
+        root = Path(__file__).resolve().parents[1]
+        cols = ["rank", "symbol", "underlying", "option_type", "strike", "expiration", "pct", "entry", "exit",
+                "abs_change_per_contract", "entry_session", "exit_session", "entry_ms", "exit_ms", "flags", "status", "reasons"]
+        win = "overnight-2026-10-05_2026-10-06"
+        wins = [win, "overnight-2026-10-06_2026-10-07", "sessions2-2026-10-05_2026-10-06",
+                "sessions2-2026-10-06_2026-10-07", "sessions3-2026-10-05_2026-10-07"]
+        def make_batch(d, under, lock_sha="a" * 64):
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "replay_summary.json").write_text(json.dumps({"contracts": 0, "underlyings": [under]}))
+            (d / "source_lock.json").write_text(json.dumps(
+                {"sources": [{"key": "k", "sha256": lock_sha, "bytes": 1}]}))
+            for w in wins:
+                with open(d / f"{w}.csv", "w", newline="") as f:
+                    wr = csv.DictWriter(f, fieldnames=cols, lineterminator="\n")
+                    wr.writeheader()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            (tmp / "batches.json").write_text(json.dumps([["AA"], ["BB"]]))
+            (tmp / "union.json").write_text(json.dumps(["AA", "BB"]))
+            # Missing batch-02: only batch-01 present.
+            batches_dir = tmp / "batches"
+            make_batch(batches_dir / "batch-01", "AA")
+            r = subprocess.run([sys.executable, str(root / "combine-full-universe.py"),
+                                "--batches-dir", str(batches_dir), "--out", str(tmp / "out"),
+                                "--planned-batches", str(tmp / "batches.json"),
+                                "--planned-union", str(tmp / "union.json")],
+                               capture_output=True, text=True)
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn("missing batch", r.stderr)
+            # Inconsistent source lock: batch-02 has a different hash.
+            make_batch(batches_dir / "batch-02", "BB", lock_sha="b" * 64)
+            r = subprocess.run([sys.executable, str(root / "combine-full-universe.py"),
+                                "--batches-dir", str(batches_dir), "--out", str(tmp / "out"),
+                                "--planned-batches", str(tmp / "batches.json"),
+                                "--planned-union", str(tmp / "union.json")],
+                               capture_output=True, text=True)
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn("source lock differs", r.stderr)
 
     def test_cache_reuses_blob_and_verifies_hash(self):
         # A blob already in --cache-dir is reused (no network fetch) and

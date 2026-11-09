@@ -30,7 +30,7 @@ retrospective hindsight. The 30-minute quote-side freshness limit is unchanged.
 
 ## Acceptance checkboxes → exact tests (all passing)
 
-Suite: OA-203, **156 tests, OK** (local; MSI to be re-verified this round).
+Suite: OA-203, **161 tests, OK** (local and MSI; 1 skipped on MSI).
 Run: `~/workspace/.tools/182-venv/bin/python -m unittest
 tests.test_oa203_windows tests.test_oa203_windows_outputs
 tests.test_oa203_windows_replay tests.test_oa203_return_scanner
@@ -140,19 +140,20 @@ evidence, coverage and calculation versions
   is the union of all selected archived underlyings for Oct 5–7:
   **661 underlyings** (500 selected per day; the selection changes daily).
   Run as **14 bounded batches** of at most 50 underlyings
-  (`run-full-universe-batches.sh`), each a standard replay with
-  `--cache-dir` reusing the source blobs (no repeated downloads). All
-  contract rows were concatenated per window, **globally re-ranked before
-  any shortlist** (`combine-full-universe.py`, same ranking as
-  `windows.rank_window`: qualified pct descending, symbol ascending for
-  ties), losses and exclusions retained in every row.
-- **Results (71,764 unique contracts per window; 71,818 raw rows minus 54
-  deduplicated symbols, see below):**
-  - overnight Oct 5→6: 17,488 eligible / 54,276 excluded.
-  - overnight Oct 6→7: 18,208 eligible / 53,556 excluded.
-  - sessions_2 Oct 5→6: 17,683 eligible / 54,081 excluded.
-  - sessions_2 Oct 6→7: 17,880 eligible / 53,884 excluded.
-  - sessions_3 Oct 5→7: 16,077 eligible / 55,687 excluded.
+  (`run-full-universe-batches.py`, the committed cross-platform runner;
+  `run-full-universe-batches.sh` is the same runner for bash), each a
+  standard replay with `--cache-dir` reusing the source blobs (no
+  repeated downloads). All contract rows were concatenated per window,
+  **globally re-ranked before any shortlist** (`combine-full-universe.py`,
+  same ranking as `windows.rank_window`: qualified pct descending,
+  symbol ascending for ties), losses and exclusions retained in every row.
+- **Results (71,710 unique contracts per window; 71,818 raw rows, minus
+  54 conflicting symbols excluded fail-closed, see below):**
+  - overnight Oct 5→6: 17,488 eligible / 54,222 excluded.
+  - overnight Oct 6→7: 18,208 eligible / 53,502 excluded.
+  - sessions_2 Oct 5→6: 17,683 eligible / 54,027 excluded.
+  - sessions_2 Oct 6→7: 17,880 eligible / 53,830 excluded.
+  - sessions_3 Oct 5→7: 16,077 eligible / 55,633 excluded.
   - Weekly W41 correctly skipped (incomplete week). Dominant exclusions:
     `missing_session` (universe reselected daily) and
     `expires_before_exit`. Excluded final sweeps recorded per day
@@ -164,35 +165,60 @@ evidence, coverage and calculation versions
   - Policy: `oa203-windows-v1`,
     `D1-D5_D7_D8_approved; D6_D9_opening_tolerance_continuity_chej_engineering_reviewed_offline_only`.
   - Calendar: NYSE, pandas_market_calendars 5.6.0.
-- **No duplicate / no missing assertion.** The combine asserts each
-  window's row count equals the sum of the 14 batch summaries (71,818)
-  minus deduplicated symbols, and that no symbol repeats. It passed.
+- **No duplicate / no missing assertion (fail closed).** Before any
+  combination, `combine-full-universe.py` validates: the exact planned
+  batch membership (batch-01..batch-14, no missing, no unexpected);
+  the disjoint union of the planned 661 underlyings (no underlying in
+  two batches, union exactly the planned set); and that every batch's
+  `source_lock.json` has the same (key, sha256) set. A missing,
+  unexpected or duplicate batch, a non-disjoint or incomplete union, or
+  an inconsistent source lock FAILS the run (exit non-zero) instead of
+  producing a partial result. It then asserts each window's rows are
+  fully accounted for: combined rows + pure duplicates + conflicting
+  attributions == the sum of the 14 batch summaries (71,818).
   **Data-quality finding: 54 OCC symbols are attributed to two
   underlyings in the source archive — PSKY and SKYD share 54 SKYD-rooted
   symbols** (the same contract appears under both the PSKY chain and the
-  SKYD chain). This is the only duplicate pattern. Resolution: deduped
-  by symbol, keeping the row whose underlying matches the symbol root
-  (SKYD, the canonical attribution); the PSKY attribution is the
-  source-data quirk. The dedup count (54 per window) is recorded in the
-  summary. No contract is double-counted.
+  SKYD chain). This is the only duplicate pattern. **All 54 pairs differ
+  beyond attribution in every window** (verified: 54/54 differ in
+  `reasons` in each of the 5 windows; status and values agree, but the
+  coverage evidence differs — e.g. `SKYD261009P00004000` overnight
+  Oct 6→7: PSKY reason `missing_session:2026-10-07`, SKYD reason
+  `missing_session:2026-10-06`). **Conflict semantics (fail closed):**
+  a symbol whose attributions differ in evidence is EXCLUDED from the
+  combined ranked output — it is not ranked, not eligible, and no
+  canonical economic identity is asserted from root spelling; its paths
+  are NOT stitched. Both provenance/coverage records are preserved in
+  `conflicts.csv` (108 rows per window: 2 attributions × 54 symbols;
+  540 rows total). The 54 conflicting symbols are absent from all five
+  combined CSVs (verified: 0 rows for the example symbol in each).
+  Eligible counts are unchanged by the exclusion (all 54 were excluded
+  in both attributions). Regression tests:
+  `test_conflicting_duplicates_fail_closed_with_both_records` and
+  `test_missing_or_inconsistent_batch_fails`.
 - **Hashes (sha256, `replay-130-full-combined/`):**
-  - `full_universe_summary.json`: `20f1a531a9bea21121f9b3b18ef9ff03fc37f0021ccad29056afd35e7e572fef`
-  - `overnight-2026-10-05_2026-10-06.csv`: `a1548af38958c1b4d8fb8f3697095df4366348adeb60feb74db700698078d4d5`
-  - `overnight-2026-10-06_2026-10-07.csv`: `e676f5063fef6c43f3ec4ab48d6b4cb291bf3220814e98833311473465ae5f63`
-  - `sessions2-2026-10-05_2026-10-06.csv`: `5cd8644c8add06e2903dd1daf8c9e5454f4cd04e90dfe30d3e04b1de2affc257`
-  - `sessions2-2026-10-06_2026-10-07.csv`: `13553e78e4b32a74c8e84f28e35e4c76745a06fdd0930cd2fea166911e36a4b4`
-  - `sessions3-2026-10-05_2026-10-07.csv`: `712af8fc650ae39a3ca5fabefcd6355fd82f7c69671627adc119c3a0ba3aec32`
+  - `full_universe_summary.json`: `a98b82231d2291d8a41e247ee6ef7de69484893b4565f815cc5be91905db959f`
+  - `conflicts.csv`: `5cc0236837b9ea34f6db87704a1f64d63a07a89f694b23bb9f8d016ae5ab0807`
+  - `overnight-2026-10-05_2026-10-06.csv`: `0500e7d439044dfd710bc119657fb7e3bb662db9a22ce1a351f16b1afe24fa36`
+  - `overnight-2026-10-06_2026-10-07.csv`: `de08d1446bcb8eab870b31e08e2907f446cd46e4cbf8357d5fd5fa26c6f6ebdc`
+  - `sessions2-2026-10-05_2026-10-06.csv`: `8b07d0f8aa0d027327f1159a649f1925c66ec8226ca99a16c24138df7aa95e96`
+  - `sessions2-2026-10-06_2026-10-07.csv`: `08b5fc01b192210238e9b027062cd516e0425195700ea13e737bee9c97857996`
+  - `sessions3-2026-10-05_2026-10-07.csv`: `4f92b5e11f422448bb92a3450a8e4cf2cf2153a175ab06629e51d1fbf7d5fd43`
 - **Source lock:** each batch's `source_lock.json` records every fetched
-  blob with its SHA-256 (240 source blobs per batch: 77 sweeps × 3 days
-  + summary/universe/manifest per day). The cache (`replay-cache/`,
-  329MB) holds the same blobs; a cached blob whose hash disagrees with
-  the lock is rejected, not trusted (`test_cache_reuses_blob_and_verifies_hash`).
+  blob with its SHA-256 (237 source blobs per batch: 228 sweeps — 76 per
+  day, the truncated final sweep per day is not fetched — plus
+  summary/universe/manifest per day). The cache (`replay-cache/`,
+  329MB) holds 240 files (the same 237 plus the 3 truncated final
+  sweeps, which the replay skips); a cached blob whose hash disagrees
+  with the lock is rejected, not trusted
+  (`test_cache_reuses_blob_and_verifies_hash`).
 - **Artifacts (directly accessible, not a private /tmp path).** The
-  combined outputs and the summary are on the MSI worktree
-  (`live-options-view-130/replay-130-full-combined/`, committed summary +
-  hashes; the 40MB CSVs are on the MSI filesystem in the worktree).
-  The batch runner, combine script and batch lists are committed in the
-  worktree (`run-full-universe-batches.sh`, `combine-full-universe.py`,
+  combined outputs, the conflict report and the summary are on the MSI
+  worktree (`live-options-view-130/replay-130-full-combined/`, committed
+  summary + hashes; the 40MB CSVs are on the MSI filesystem in the
+  worktree). The batch runner, combine script and batch lists are
+  committed in the worktree (`run-full-universe-batches.py`,
+  `run-full-universe-batches.sh`, `combine-full-universe.py`,
   `replay-130-batches.json`, `replay-130-union.json`). The local copies
   are in the worktree (`replay-130-full/`, `replay-130-full-combined/`).
   Prior top-50 sample in `/tmp/replay-130-c` (5 windows over 15,536
@@ -204,8 +230,10 @@ evidence, coverage and calculation versions
   `test_manifest_cutoff_requires_complete_contiguous_sweeps`,
   `test_truncated_final_sweep_rows_excluded`,
   `test_calendar_rejects_missing_session_and_wrong_bounds`,
-  plus the new `OutputSchema` tests (ranked CSV schema, per-basis
-  summary, cache reuse + hash verification).
+  plus the `OutputSchema` tests (ranked CSV schema, per-basis
+  summary, cache reuse + hash verification, conflicting duplicates
+  fail-closed with both records preserved, missing/inconsistent batch
+  fails).
 - Each replay report records `policy` (version `oa203-windows-v1` and
   `decisions_status`), `window` (id, kind, sessions), `sources`
   (R2 prefix, manifest sha), and `excluded_final_sweep` rows/chains.
@@ -395,9 +423,9 @@ if every basis passes" was wrong and is corrected here.
   (14 batches, each with 5 CSVs + `replay_summary.json` +
   `source_lock.json`). Source cache: `replay-cache/` (329MB, 237 blobs).
   All three are gitignored (data, not source); the runner, combine
-  script and batch lists are committed (`run-full-universe-batches.sh`,
-  `combine-full-universe.py`, `replay-130-batches.json`,
-  `replay-130-union.json`).
+  script and batch lists are committed (`run-full-universe-batches.py`,
+  `run-full-universe-batches.sh`, `combine-full-universe.py`,
+  `replay-130-batches.json`, `replay-130-union.json`).
 - The `full_universe_summary.json` is committed in the MSI worktree so
   its hashes are inspectable without the 40MB CSVs.
 - Source lock / report / output hashes and the exact MSI replay commands
@@ -431,9 +459,10 @@ foreach ($d in $days) {
     Invoke-WebRequest -Uri "https://pub-4d5c916b8cb74ffb8c0abd7dfadb02cf.r2.dev/$k" -OutFile $dest -UseBasicParsing
   }
 }
-# Then run the batches (reads blobs from replay-cache/):
+# Then run the batches with the committed Python runner (cross-platform;
+# the .sh is the same runner for bash only):
 $env:PYTHONPATH = '.'
-.\run-full-universe-batches.sh
+C:\Python314\python.exe run-full-universe-batches.py
 # Then combine and globally re-rank:
 C:\Python314\python.exe combine-full-universe.py
 ```

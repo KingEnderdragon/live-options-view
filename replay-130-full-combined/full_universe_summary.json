@@ -1,14 +1,17 @@
 {
   "batches": 14,
   "expected_total_contracts": 71818,
+  "underlyings": 661,
+  "source_blobs": 237,
   "windows": {
     "overnight-2026-10-05_2026-10-06": {
-      "contracts": 71764,
+      "contracts": 71710,
       "eligible": 17488,
-      "excluded": 54276,
-      "deduped_symbols": 54,
+      "excluded": 54222,
+      "conflicting_symbols": 54,
+      "pure_duplicates": 0,
       "top_exclusion_reasons": {
-        "missing_session": 41372,
+        "missing_session": 41264,
         "close_endpoint_missing": 16803,
         "entry_bid_invalid": 12164,
         "expires_before_exit": 6264,
@@ -53,12 +56,13 @@
       ]
     },
     "overnight-2026-10-06_2026-10-07": {
-      "contracts": 71764,
+      "contracts": 71710,
       "eligible": 18208,
-      "excluded": 53556,
-      "deduped_symbols": 54,
+      "excluded": 53502,
+      "conflicting_symbols": 54,
+      "pure_duplicates": 0,
       "top_exclusion_reasons": {
-        "missing_session": 41742,
+        "missing_session": 41688,
         "close_endpoint_missing": 18639,
         "entry_bid_invalid": 13615,
         "expires_before_exit": 9994,
@@ -103,12 +107,13 @@
       ]
     },
     "sessions2-2026-10-05_2026-10-06": {
-      "contracts": 71764,
+      "contracts": 71710,
       "eligible": 17683,
-      "excluded": 54081,
-      "deduped_symbols": 54,
+      "excluded": 54027,
+      "conflicting_symbols": 54,
+      "pure_duplicates": 0,
       "top_exclusion_reasons": {
-        "missing_session": 41372,
+        "missing_session": 41264,
         "open_endpoint_missing": 19355,
         "entry_bid_invalid": 12425,
         "entry_spread": 7657,
@@ -153,12 +158,13 @@
       ]
     },
     "sessions2-2026-10-06_2026-10-07": {
-      "contracts": 71764,
+      "contracts": 71710,
       "eligible": 17880,
-      "excluded": 53884,
-      "deduped_symbols": 54,
+      "excluded": 53830,
+      "conflicting_symbols": 54,
+      "pure_duplicates": 0,
       "top_exclusion_reasons": {
-        "missing_session": 41742,
+        "missing_session": 41688,
         "open_endpoint_missing": 21225,
         "entry_bid_invalid": 13893,
         "expires_before_exit": 9994,
@@ -203,12 +209,13 @@
       ]
     },
     "sessions3-2026-10-05_2026-10-07": {
-      "contracts": 71764,
+      "contracts": 71710,
       "eligible": 16077,
-      "excluded": 55687,
-      "deduped_symbols": 54,
+      "excluded": 55633,
+      "conflicting_symbols": 54,
+      "pure_duplicates": 0,
       "top_exclusion_reasons": {
-        "missing_session": 62436,
+        "missing_session": 62328,
         "open_endpoint_missing": 17596,
         "entry_bid_invalid": 11374,
         "expires_before_exit": 9994,
@@ -254,25 +261,35 @@
     }
   },
   "files": {
+    "conflicts.csv": {
+      "sha256": "5cc0236837b9ea34f6db87704a1f64d63a07a89f694b23bb9f8d016ae5ab0807",
+      "bytes": 76203
+    },
     "overnight-2026-10-05_2026-10-06.csv": {
-      "sha256": "a1548af38958c1b4d8fb8f3697095df4366348adeb60feb74db700698078d4d5",
-      "bytes": 8072371
+      "sha256": "0500e7d439044dfd710bc119657fb7e3bb662db9a22ce1a351f16b1afe24fa36",
+      "bytes": 8065996
     },
     "overnight-2026-10-06_2026-10-07.csv": {
-      "sha256": "e676f5063fef6c43f3ec4ab48d6b4cb291bf3220814e98833311473465ae5f63",
-      "bytes": 8345342
+      "sha256": "de08d1446bcb8eab870b31e08e2907f446cd46e4cbf8357d5fd5fa26c6f6ebdc",
+      "bytes": 8340425
     },
     "sessions2-2026-10-05_2026-10-06.csv": {
-      "sha256": "5cd8644c8add06e2903dd1daf8c9e5454f4cd04e90dfe30d3e04b1de2affc257",
-      "bytes": 8058035
+      "sha256": "8b07d0f8aa0d027327f1159a649f1925c66ec8226ca99a16c24138df7aa95e96",
+      "bytes": 8051660
     },
     "sessions2-2026-10-06_2026-10-07.csv": {
-      "sha256": "13553e78e4b32a74c8e84f28e35e4c76745a06fdd0930cd2fea166911e36a4b4",
-      "bytes": 8310403
+      "sha256": "08b5fc01b192210238e9b027062cd516e0425195700ea13e737bee9c97857996",
+      "bytes": 8305486
     },
     "sessions3-2026-10-05_2026-10-07.csv": {
-      "sha256": "712af8fc650ae39a3ca5fabefcd6355fd82f7c69671627adc119c3a0ba3aec32",
-      "bytes": 8600280
+      "sha256": "4f92b5e11f422448bb92a3450a8e4cf2cf2153a175ab06629e51d1fbf7d5fd43",
+      "bytes": 8593905
     }
+  },
+  "conflicts": {
+    "symbols": 54,
+    "rows": 540,
+    "report": "conflicts.csv",
+    "semantics": "A symbol with differing evidence across attributions is excluded from the combined ranked output (fail closed). No canonical economic identity is asserted from root spelling; paths are not stitched. Both provenance/coverage records are preserved here."
   }
 }
