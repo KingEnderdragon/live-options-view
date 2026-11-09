@@ -1,135 +1,25 @@
-# Cross-market overview (#132): coverage matrix and first slice
+# Cross-market overview (#132): accepted 100 and observation provenance
 
-Issue: [#132](https://github.com/OwenTanzer/live-options-view/issues/132).
-Status: **first usable slice**. Per Owen's Oct 12 direction, the callable
-`market_overview` MCP tool reads the existing dashboard price strip
-(`intraday/prices.json`). Its unsupported assets stay as named gaps, and undated
-fills are never presented as live. The collector now adds source identity and
-selected-price basis to that same artifact and ties `quote_ts` to the selected
-price input. It does not change the strip's subscriptions or cadence. Older
-published strips lack that basis and cannot be asserted live. The broader
-curated-stock and cross-asset coverage is follow-on work. The 60-second overview artifact,
-expanded DXLink subscriptions and the watchlist proposal still need separate
-decisions. A one-off, read-only, market-hours coverage/entitlement probe is
-approved in principle, but its separate DXLink connection on the production
-grant may disrupt the collector. Do not run it or pause the collector without
-an operational decision; a route using data already received by the collector
-is being discussed.
+Issue: [#132](https://github.com/OwenTanzer/live-options-view/issues/132). The accepted selection is exactly 100 instruments. Owen authorized full enablement and release on November 9, 2026. The earlier 18-only activation gate is superseded. The original 18 remain the compact dashboard strip; the expanded universe is exposed by the overview tool.
 
-The universe file and `experiments/market_overview/__init__.py` rules below are groundwork for that
-follow-on. The first-slice tool does not use them or offer a watchlist.
+## Current implementation and decision boundary
 
-The tool labels the **query-time market window** and the **collector receipt
-window** for US equities/ETFs. Neither proves the provider's trade session.
-Arithmetic changes remain visible but partial because the provider observation
-time and previous-close session/adjustment basis are not published. A recent
-DXLink receipt is marked live only in the limited sense of feed receipt during
-a possible market window; provider observation freshness is unverified.
+[The shared registry](../../market_data/overview/universe.json) enables all 100 identities. Provider-designated active dated futures resolve at each session startup; crypto uses verified CXTALP mappings. Missing streaming rows use dated unadjusted Yahoo bars, and UST2Y uses the official Treasury daily constant-maturity series in percent. Four concurrent daily requests refresh only missing instruments, at most every five minutes, with completed late results retained. Futures without one valid active contract remain explicitly unavailable rather than subscribing to a guessed contract. Streaming Summary dates lack a verified zone/adjustment basis, so related changes remain partial. Daily data never claims intraday freshness.
 
-## What this slice adds
+The prior 132-stock universe is [archived](../HISTORY.md#archived-prototypes). Runtime math and the read-only diagnostic probe live in `market_data/overview/`. SPY retains its dedicated collection path. The ten-second publication cadence, bounded MCP pages and request limits are unchanged.
 
-| File | Purpose |
-| --- | --- |
-| [market_data/live_market/prices.py](../../market_data/live_market/prices.py) | Add source symbol, original source for carry-forwards, selected-price basis and a receipt time tied to the selected price in the existing `prices.json` payload. No new symbols or schedule. |
-| `market_mcp/overview.js`, `consumer.js`, `server.js` | Add the bounded, read-only `market_overview` tool over the existing strip, with source-dependent identities, units, per-row receipt age and named gaps. |
-| `experiments/market_overview/universe.json` | Versioned candidate universe: 132 stocks in 11 groups of 12 with a rationale for each group, a share-class alias table, a proposed watchlist cap, and a macro instrument registry with exact instrument types, units and candidate sources. |
-| `experiments/market_overview/__init__.py` | Pure functions for change arithmetic, scale normalization, FX inversion, identity/contract/adjustment checks, US equity session classification, freshness, universe validation, watchlist merging, sample breadth and top movers. |
-| `tests/test_market_overview.py` | Fixture tests for the arithmetic, session, breadth and watchlist checklist items in #132. They are wired into the Collector suite. |
+The existing `intraday/prices.json` gains schema version 2; the MCP continues to accept legacy strips conservatively. The compact strip's displayed values are deliberately unchanged: the daily-fallback tiles still show no percent change in `prices.json`, and the dated pair travels in the row's `reference` for the tool instead of silently turning a prior-session daily difference into a strip percentage. Every selected row distinguishes `observed_at` (provider event time, when supplied), `observation_date` plus timezone/granularity for a daily bar, `collector_received_at`/legacy `quote_ts` (receipt of the selected input), `acquired_at`, last success/attempt and refresh failure. A `reference` includes value, identity, source symbol, date or event time, session and adjustment basis. Retrieval never freshens an older observation. DXLink requests provider Quote/Trade event times, but Summary's `prevDayId` identifies a date without certifying its timezone, adjustment or comparable session: numeric changes remain partial. The published exchange calendar names trading days but carries no session-close metadata, so dates that are commonly shortened (the Friday after Thanksgiving and the sessions around July 3 and December 23–24) are reported as `unknown` rather than guessed open or closed; every other session uses the standard 09:30–16:00 bounds. A reference more than one exchange session behind the observation cannot produce a previous-close change. Yahoo history returns a dated raw daily bar with its preceding valid bar; it is never asserted to be an intraday or official close. A daily bar may still be forming. Absent source time remains unknown. Carry-forward keeps the original observation and reference and reports a newer failure. The former Yahoo JPY/USD spot fallback is excluded from the /6J futures row: the candidate spot USD/JPY is a separate disabled universe member.
 
-Only tests import `experiments/market_overview/__init__.py` today; it is follow-on groundwork, not
-the tool implementation.
+Future contracts require a dated streamer symbol, expiry, root/exchange and explicit selection/roll rule before acceptance. Continuous Yahoo `=F` prices, unresolved /6J roots, Treasury price proxies for yields and USO/SLV shares for barrel/ounce prices do not satisfy these slots. Cboe TNX DXLink raw ÷10 and Yahoo raw ÷1 retain their existing, still account-unverified scale behavior; FVX and TYX scale fields stay null until fixtures and source confirmation. A 4.00% to 4.05% normalized yield difference is +5 bps. An unavailable reference is null, not a zero move. Dollar units attach to dollar-denominated price differences only; USO/BNO are pool shares, GLD/SLV bullion-trust shares and DAX is the EUR gross-return index. Cash indices and ETF proxies remain different identities. Equity breadth, if enabled later, uses only the 36 comparable curated stocks with its complete eligible denominator, not the heterogeneous 100.
 
-## Verified coverage baseline
+## Verified source routes and limits
 
-The baseline comes from source on `master` at `450b5b7` plus the last
-public `intraday/prices.json`, with collector cycle timestamp
-`2026-10-09T20:14:55Z` (Friday close). That file is one observed artifact;
-the exact upload completion time is unavailable. It does not establish entitlement,
-symbology or live health.
+The November 9 bounded feed probe returned prices for 82 of 89 symbols: 72 US-listed securities, seven dated futures and three crypto pairs. All 17 Yahoo daily mappings returned dated bars, including international and volatility indices, Cboe yields and six spot-currency pairs. Treasury returned the official two-year daily series. These observations verify routes, not continuous availability or future entitlement.
 
-| Ticker strip label | Configured DXLink symbol | Observed source | Previous close | Collector receipt time |
-| --- | --- | --- | --- | --- |
-| QQQ, SPY, USO, SMH, IGV, META, GOOGL, AMZN, TSLA, MU, SPCX, AAPL | same as label | dxlink | yes | yes |
-| JPY/USD | `/6J:XCME` (yen futures, USD per JPY) | dxlink | yes | yes |
-| VIX | `$VIX.X` | yfinance fallback | **no** | **no** |
-| OVX | `$OVX.X` | yfinance fallback | **no** | **no** |
-| 10Y | `$TNX.X` | yfinance fallback (`^TNX`) | **no** | **no** |
-| KOSPI | `$KOSPI.X` | yfinance fallback (`^KS11`) | **no** | **no** |
-| BTC/USD | `BTC/USD:CXERX` | yfinance fallback (`BTC-USD`) | **no** | **no** |
+Futures use provider-designated active months, refreshed each collector session. A missing or ambiguous resolution yields an unavailable row, never an undated continuous contract. Summary reference dates lack zone/session/adjustment proof and remain partial. Crypto uses CXTALP venue symbols; daily and rolling-24-hour reference conventions are not conflated. Spot FX uses its listed orientation and dated same-source bars. Yahoo yield samples are already percent units; no additional division applies. Futures and crypto retain the collector's existing session schedule, not a 24/7 collection promise.
 
-What this shows:
+## Release and rollback
 
-- **US equities/ETFs over DXLink** work, with collector receipt times and previous
-  close. `quote_ts` is collector receipt time, not provider event time. These are
-  the natural candidate source for the 132-stock universe, but only 12
-  equity symbols are subscribed today.
-- **CME futures over DXLink** work for at least `/6J`, though the artifact lacks
-  resolved contract and expiry, so this tool withholds its change. Other symbols
-  such as `/CL`,
-  `/BZ`, `/SI`, `/6E`, `/6B`, `/6C`, `/6A`, `/6S` and Treasury futures may
-  work too. This is unverified.
-- **Cash indices, CBOE yield indices and BTC** return nothing over DXLink
-  with the configured symbols. We can't yet tell whether the symbology is
-  wrong or the entitlement is missing.
-- **The yfinance fallback** in [market_data/live_market/prices.py](../../market_data/live_market/prices.py) reads only a last price. It
-  carries no previous close and no trustworthy observation time, so every
-  fallback row today has `chg_pct: null`. That fallback can't produce a
-  change on its own. A daily-bar history call would be needed for a reference
-  value, and it still has no intraday observation time.
-- `MAX_LIVE_QUOTE_SYMBOLS = 100` caps the live-quote HTTP request size. It
-  isn't a provider subscription limit, and nothing here raises it.
+Release the v1/v2-compatible MCP image first, verify an authenticated read of the existing artifact, then merge/deploy the producer. The collector automatically deploys master; merging it is a production action. Keep deployment IDs, source revisions and immutable image digests in the quest Log. Once v2 is published, do not roll the consumer back alone.
 
-## Per-category mapping (proposed, unverified)
-
-| Category | Proposed primary | Fallback / gap | Notes |
-| --- | --- | --- | --- |
-| 132 stocks | DXLink Quote/Trade/Summary on the existing connection | none: unsupported symbols stay listed as unavailable | Needs a subscription-limit check. |
-| Benchmarks (SPX, NDX, DJI, RUT) | DXLink cash index if a probe finds working symbols | yfinance daily bars, labeled delayed / no observation time | ETF proxies SPY/QQQ/DIA/IWM keep separate identities. |
-| International (KOSPI, N225, STOXX50E, FTSE) | yfinance daily bars | n/a | Each has its own calendar. A closed market reads as `closed`. |
-| WTI / Brent | DXLink dated front-month `/CL`, `/BZ` | yfinance `CL=F`/`BZ=F` only with a documented roll | USO stays an ETF row. It never stands in for oil. |
-| Silver | DXLink dated `/SI` | yfinance `SI=F` with a documented roll | USD per troy ounce. |
-| BTC/USD | needs a working source with a 00:00 UTC reference | yfinance `BTC-USD` daily bar | No rolling 24h move is labeled as a daily change. |
-| Treasury 2Y/5Y/10Y/30Y | DXLink CBOE yield indices if they work (scale ÷10) | yfinance `^FVX`/`^TNX`/`^TYX` | No 2Y yield index has been found yet, so 2Y is a **named gap**. Moves are in bps. |
-| Major FX | spot source TBD | DXLink currency futures as a separately labeled series | JPY/CHF/CAD futures quote USD per unit, so both values get inverted. |
-
-## Rules pinned by the tests
-
-- Change = current − reference. Percent = 100 × change / reference. Missing
-  or nonfinite inputs make the row unavailable. A zero reference keeps the
-  absolute change but has no percent.
-- Yields: moves in bps = (current − reference) × 100. No percent of a yield.
-  4.00% → 4.05% = +5 bps, including after a ÷10 CBOE normalization.
-- FX inversion inverts both values before computing the change. The tests
-  prove this differs from negating the percent.
-- Mismatched instrument identity (USO vs WTI), dated futures contract, or
-  split-adjustment basis all make the row unavailable.
-- Extended-hours values name their session and compare against the previous
-  **regular** close. An extended-hours print is rejected as a reference close.
-- Freshness is tracked per instrument: a fresh Sunday BTC print leaves
-  Friday's equity close `closed`. A cached success keeps its age plus a
-  `newer_attempt_failed` warning.
-- Breadth keeps the full eligible denominator, with missing and stale counts,
-  and uses equal weighting. It excludes watchlist additions by default and
-  flags mixed sessions or reference bases. Top movers are ranked over the
-  full sample before paging.
-
-## Open decisions (owner approval needed before the producer slice)
-
-1. Add the ~132 equity symbols (plus macro futures) to the existing collector
-   DXLink connection, and publish a separate `intraday/overview.json` at a
-   slower cadence (proposed 60s). `prices.json` and its 10s cadence stay
-   unchanged.
-2. Decide whether and how to run a one-off, read-only, market-hours DXLink
-   coverage probe. The current script would open a second connection on the
-   production OAuth grant and could disrupt the collector. A safer route using
-   data already received by the collector is under discussion.
-3. For instruments with no DXLink source, choose between yfinance daily bars
-   (labeled delayed, no observation time) and leaving them as named gaps.
-4. Watchlist cap: 25 additions are proposed. Storage would be a versioned
-   config file changed through PRs, with no runtime write path in the first
-   version.
-
-## Not in this slice
-
-New subscriptions, new artifacts, new collection cadence, watchlist persistence,
-news, sentiment, causal explanations, alerts and any new paid service or credential.
+Verify two 50-row pages, no duplicate IDs, matching artifact digests, retained detail, original observation dates, provider event versus receipt times, and explicit missing/stale states. Fixture tests do not establish live acceptance. Full activation is authorized; no additional approval gate or artificial launch delay applies.

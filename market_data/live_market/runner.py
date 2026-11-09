@@ -76,6 +76,8 @@ def _run_session(token_manager: OAuthTokenManager, quote_registry: LiveQuoteRegi
     QQQ_SESSION.rvol_today = {}
 
     auth    = tasty_auth(token_manager)
+    from .overview_sources import resolve_futures
+    resolve_futures(auth["access_token"])
     tier    = classify_tier(today)
     log.info(f"session date={today}  tier={tier}")
 
@@ -145,7 +147,7 @@ def _run_session(token_manager: OAuthTokenManager, quote_registry: LiveQuoteRegi
     # Extra underlyings need their own spot/volume stream, but are not
     # added to PRICE_TICKERS (the price strip and its health counts).
     price_syms = list(dict.fromkeys(
-        list(PRICE_TICKERS.values()) + [us.symbol for us, _, _ in extra_chains]
+        [s for s in PRICE_TICKERS.values() if s] + [us.symbol for us, _, _ in extra_chains]
         + (["SPY"] if COLLECT_SPY else [])
     ))
     log.info(f"subscribing to {len(option_syms)} option symbols + {len(price_syms)} price tickers")

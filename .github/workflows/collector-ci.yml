@@ -10,9 +10,8 @@ on:
       - "market_data/**"
       - "deployment/python/**"
       - "tests/producer_packaging.py"
-      - "experiments/market_overview/**"
       - "tests/test_market_overview.py"
-      - "experiments/market_overview/probe_symbols.py"
+      - "tests/test_price_observations.py"
       - "tests/test_probe_cross_market_symbols.py"
       - "market_data/live_market/probe_oauth.py"
       - "market_data/tradier/probe.py"
@@ -46,9 +45,8 @@ on:
       - "market_data/**"
       - "deployment/python/**"
       - "tests/producer_packaging.py"
-      - "experiments/market_overview/**"
       - "tests/test_market_overview.py"
-      - "experiments/market_overview/probe_symbols.py"
+      - "tests/test_price_observations.py"
       - "tests/test_probe_cross_market_symbols.py"
       - "market_data/live_market/probe_oauth.py"
       - "market_data/tradier/probe.py"
@@ -102,6 +100,10 @@ jobs:
         run: python -m unittest discover -s tests -p 'test_oa203_active*.py' -v
       - name: Run cross-market overview suite (#132)
         run: python -m unittest discover -s tests -p test_market_overview.py -v
+      - name: Run price observation provenance suite (#132)
+        run: python -m unittest discover -s tests -p test_price_observations.py -v
+      - name: Run full overview activation suite (#132)
+        run: python -m unittest discover -s tests -p test_overview_activation.py -v
       - name: Run cross-market symbol probe safety suite (#132)
         run: python -m unittest discover -s tests -p test_probe_cross_market_symbols.py -v
       - name: Run OA-203 multi-session window suite (#130)

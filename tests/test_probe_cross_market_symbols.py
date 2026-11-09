@@ -7,9 +7,9 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-import experiments.market_overview.probe_symbols as probe  # noqa: E402
+import market_data.overview.probe_symbols as probe  # noqa: E402
 
-SOURCE = (ROOT / "experiments/market_overview/probe_symbols.py").read_text(encoding="utf-8")
+SOURCE = (ROOT / "market_data/overview/probe_symbols.py").read_text(encoding="utf-8")
 
 
 class ProbeSafety(unittest.TestCase):
