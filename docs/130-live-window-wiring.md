@@ -1,6 +1,6 @@
 # Live window producer / publication wiring — #130 / F2 inventory
 
-Status: INVENTORY + DORMANT WIRING (live-builder implemented offline, flag off).
+Status: INVENTORY + DORMANT WIRING (live-builder implemented offline, flag off; Chej's four release blockers on `6de0d7a4` repaired offline 2026-11-09, flag still off).
 Nothing in this document activates, deploys, or publishes anything. The first bounded batch publication
 remains an acceptance probe (docs/130-first-window-publication-plan.md);
 this doc answers what has to exist for window products to be produced
@@ -25,11 +25,11 @@ published windows found.
 | 6 | Local-day loader (finalized archives → observations) | `market_data/options_scanner/windows_live.py:load_local_session` (new in this commit) | IMPLEMENTED, offline |
 | 7 | Build driver (all kinds → local emit root) | `windows_live.py:build_windows`; CLI `windows-build` (`cli.py`) | IMPLEMENTED, offline |
 | 8 | Publisher (validate → budget → readback → pointer) | `market_data/options_scanner/windows_publish.py:publish_window` (line 912); `WindowBudget` (line 734: 90 days, 8 GiB, 20 MiB reserve, 3 attempts, 16 revisions); `R2Backend` + `r2_backend()` (line 714, reuses `market_data.tradier.probe` `r2_client`) | PRESENT as code, offline only |
-| 9 | Publish-all driver (emit root → backend) | `windows_live.py:publish_windows`; CLI `windows-publish` (local backend only) | IMPLEMENTED, offline |
+| 9 | Publish-all driver (emit root → backend) | `windows_live.py:publish_windows`; CLI `windows-publish` (local backend only); with `window_ids` it publishes exactly one cycle's explicit list and refuses a missing listed window before any upload | IMPLEMENTED, offline |
 | 10 | Consumer (window_rankings + pointer check) | `market_mcp/consumer.js:window()`, `server.js:window_rankings`; image pinned to exact `c8fcf529` in `.github/workflows/publish-market-mcp-renaissance.yml` | PRESENT as code; deployment is Chej's release step |
-| 11 | Live trigger (build + publish after finalize) | `session.py:finalize` → `maybe_run_windows_after_finalize` → `windows_live.run_after_finalize`, gated by env `OA203_WINDOWS_LIVE_ENABLED == "1"` (default off; enabling is Chej's activation step) | IMPLEMENTED, offline, disabled by default |
+| 11 | Live trigger (build + publish after finalize) | `session.py:finalize` → `maybe_run_windows_after_finalize` → `windows_live.run_after_finalize`, gated by env `OA203_WINDOWS_LIVE_ENABLED == "1"` (default off; enabling is Chej's activation step); each cycle writes its own emit root `<spool>/windows_emit/<day>/` + `cycle.json` and publishes only that cycle's explicit window list | IMPLEMENTED, offline, disabled by default |
 | 12 | Partial-day admission (final but assessment ≠ complete) | `windows_replay.validate_manifest` admits assessment `complete` or `partial`; `load_session` carries `assessment_reasons`; `windows_outputs.window_state` propagates `session_partial:<day>`; torn/invalid manifests still refused | IMPLEMENTED, offline |
-| 13 | Full-universe combine-emit (14 batches → one emit) | `market_data/options_scanner/windows_combine.py` (`combine_rows` / `combine_csv_rows` / `combine_emit` / `rows_from_paths`); `windows_live.build_windows(full_universe=True)` ranks the combined universe before the shortlist; CLI `windows-build --full-universe` + `windows-combine` | IMPLEMENTED, offline |
+| 13 | Full-universe combine-emit (14 batches → one emit) | `market_data/options_scanner/windows_combine.py` (`combine_rows` / `combine_csv_rows` / `combine_emit` / `rows_from_paths`); `combine_emit` requires an explicit `CombineCoverage` contract (expected underlyings, batches, source locks, scope); `build_windows(full_universe=True)` ranks the combined universe before the shortlist with the 500 cap applied per day, not to the union; CLI `windows-build --full-universe` + `windows-combine --coverage` | IMPLEMENTED, offline |
 | 14 | Retention janitor (standalone expiry deletion) | `WindowBudget` retention is enforced only inside `clean_and_reserve` during a publish; no independent expiry runner exists — by decision, publish-time cleanup is sufficient (next publish is the next cleanup); no standalone janitor is added | DECIDED — publish-time cleanup only |
 | 15 | Intraday `in_progress` windows | Publisher refuses `in_progress` outright; consumer serves summary-only | NOT SUPPORTED BY DESIGN (scope disposition, not a gap) |
 
@@ -48,7 +48,9 @@ full-universe build final; partial-day admitted with reasons; torn
 manifest refused; shared-symbol conflict excluded; bounds;
 publish-all + idempotent re-publish; CLI build + publish),
 `tests/test_oa203_windows_combine.py` (combine conflict/duplicate/
-rank-after-combine + the real 14-batch replay counts) and
+rank-after-combine + the real 14-batch replay counts; plus the blocker
+regressions: coverage contract, quote-only conflicts, per-basis conflict
+report) and
 `tests/test_oa203_windows_trigger.py` (flag off no-op; flag on
 build + publish over a local backend). The chain is callable today, by
 hand, offline:
@@ -61,6 +63,102 @@ python -m market_data.options_scanner windows-build \
 python -m market_data.options_scanner windows-publish \
   --emit-root <emit-root> --out <local-backend-root>
 ```
+
+## Blocker repairs (2026-11-09, on Chej's review of `6de0d7a4`)
+
+All four are implementation fixes in local commits on `nova/f1-f2-renaissance`,
+offline, flag still off. No push, no activation.
+
+1. **Combine coverage contract (`windows_combine.combine_emit`).** A
+   single offline-replay subset used to come out `final`/`full_universe`
+   because the scope was inferred from whatever arrived. `combine_emit`
+   now requires an explicit `CombineCoverage`: expected underlyings,
+   batch names, `(key, sha256)` source locks, and scope
+   (`full_universe` | `bounded_subset`). A missing batch, unexpected
+   batch, aliased duplicate batch (identical window content under two
+   names, or the same underlying in two batches), underlyings or source
+   locks that do not match the contract exactly, or summaries that
+   disagree all fail closed. Every summary is validated including the
+   first (kind/window id, policy version, sessions, session status,
+   sources present). A subset/partial input comes out
+   `bounded_subset`/`partial` with the reason recorded (or is refused);
+   only a `full_universe` contract matching the actual inputs exactly
+   may produce `full_universe`/`final`, and the contract is recorded in
+   `combine_report.json` and the summary scope. CLI `windows-combine`
+   takes required `--coverage` (JSON).
+2. **Full per-basis evidence (`windows_combine._row_evidence`).** Two
+   rows differing only in `qualified.entry_ask_ms` used to dedupe with
+   zero conflicts, because only status/reasons/pct/entry/exit/entry_ms/
+   exit_ms were compared per basis. Evidence is now every field
+   `windows_outputs.BASIS_COLUMNS` carries per basis — status, reasons,
+   values, sessions, boundary offsets, and the full quote evidence
+   (bid/ask, quote stamps, sizes, ages, spreads) — plus identity
+   (type/strike/expiration/root/contract size), flags and exclusions.
+   This mirrors the #130 checkpoint's `EVIDENCE_FIELDS`
+   (`combine-full-universe.py`) and extends it to evaluated rows;
+   nothing in that list is narrowed. `conflicts.csv` keeps its flat
+   qualified-basis columns and adds the same evidence for every basis
+   (prefixed `mid_`/`exec_`/`qualified_`); `combine_report.json`
+   carries the full per-basis attributions, not just batch names.
+3. **Per-day universe rotation (`windows_live.build_windows`).** The
+   500-underlying cap is a DAILY cap, not a union cap: each loaded day
+   selects at most 500 underlyings (a day selecting 501 still fails
+   closed); the per-day set may rotate, so the combined window universe
+   — the union of the per-day capped sets — may exceed 500 (bounded by
+   10 sessions x 500). A 500-day + 1 replacement (501-union) builds and
+   ranks correctly. The passed set must still cover every selected
+   underlying of every loaded day.
+4. **Per-cycle publication (`windows_live.run_after_finalize` /
+   `publish_windows`).** The shared emit root accumulated old windows
+   and every publish republished them all. Each cycle now writes to its
+   own emit root (`<emit_root>/<day>`, default
+   `<spool>/windows_emit/<day>/`) with a `cycle.json` manifest listing
+   exactly which windows it built, and `publish_windows` publishes only
+   that explicit list (a listed window missing from the emit root is
+   refused before any upload). The cycle timestamp is threaded into the
+   build as `generated_at`, so re-running a cycle with unchanged inputs
+   rebuilds byte-identically and the publisher returns
+   `already_published` (no fresh revision, no re-upload); a changed
+   window gets a new revision only for that window. A retry at a later
+   wall-clock time republishes only that cycle's windows, never
+   historical ones. Manual publish-all without a window list is
+   unchanged.
+
+### Spool / history prerequisite for ongoing production
+
+The hook reads ONLY the local spool on the scanner host; nothing is
+fetched from R2 and no spool backup, replication, or R2 read-back of
+day archives exists. What must persist between cycles on that host:
+
+- The finalized day archives for the last 10 sessions:
+  `<spool>/<YYYY-MM-DD>/{summary.json, universe.json,
+  sweeps/manifest.jsonl, sweeps/sweep_NNNN.jsonl.gz}` — the exact files
+  `finalize` wrote. `run_after_finalize` loads up to 10 sessions ending
+  at the finalized day from these.
+- The per-cycle emit roots `<spool>/windows_emit/<day>/{cycle.json,
+  oa203/windows/...}` if a cycle is to be re-run idempotently from disk
+  (the manifest is the record of what that cycle built).
+- The backend's published state: per-window `latest.json` pointers,
+  immutable `rev_<sha256(summary.json)>` members, flat consumer keys,
+  and per-window `latest-attempt.json` ledgers under
+  `oa203/windows/oa203-windows-v1/<kind>/<window_id>/`. The
+  budget/reservation check reads that same inventory — there is no
+  separate budget-ledger file — and `already_published` depends on the
+  pointer and revision members still being there.
+
+What breaks if it does not persist: a fresh machine with no spool
+history cannot build multi-session windows at all —
+`run_after_finalize` raises `no finalized day archives in spool ...`
+on an empty spool, and with fewer than 10 days it builds windows only
+over the days present (weekly windows need a complete calendar week, so
+a partial week yields no weekly windows). If the spool is lost, the day
+archives are gone except for what is already published to R2 as window
+products (summaries/rankings/paths per window), which cannot rebuild
+other windows. If the backend's pointers are lost, re-publication
+re-uploads everything (no `already_published` shortcut) and retention
+accounting restarts from the visible inventory. If a cycle emit root is
+lost, the cycle rebuilds from the spool instead — same result while the
+spool and timestamp match, but the on-disk `cycle.json` record is gone.
 
 ## Remaining implementation (live-builder work done; release gates remain)
 
@@ -80,12 +178,16 @@ python -m market_data.options_scanner windows-publish \
    (partial, never final); torn/invalid manifests are still refused
    fail-closed. The parity work already proves the consumer serves
    such partial windows correctly.
-3. **Full-universe combine-emit — IMPLEMENTED offline (live-builder).**
-   `market_data/options_scanner/windows_combine.py` merges batch emits
-   with the same conflict semantics as `combine-full-universe.py`
-   (conflicting attributions excluded fail-closed with a conflict
-   report; pure duplicates deduped); `build_windows(full_universe=True)`
-   combines and ranks the full universe before the shortlist is cut.
+3. **Full-universe combine-emit — IMPLEMENTED offline (live-builder +
+   blocker repairs).** `market_data/options_scanner/windows_combine.py`
+   merges batch emits with the same conflict semantics as
+   `combine-full-universe.py` (conflicting attributions excluded
+   fail-closed with a conflict report; pure duplicates deduped);
+   `build_windows(full_universe=True)` combines and ranks the full
+   universe before the shortlist is cut. Since the blocker repairs,
+   `combine_emit` requires an explicit coverage contract (see above),
+   evidence compares all per-basis quote/path fields, and the 500 cap
+   applies per day with the union allowed to rotate past it.
 4. **Retention janitor — DECIDED, no janitor added.** Publish-time
    cleanup inside `clean_and_reserve` is sufficient within the 8 GiB
    cap: the next publish is the next cleanup (see
