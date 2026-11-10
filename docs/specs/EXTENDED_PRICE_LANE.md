@@ -177,13 +177,17 @@ unavailable and never matches. The flags word supplies the transactional type
 and the spread-leg bit; the explicit derived fields are accepted when present.
 Non-valid ticks, spread legs, unknown transactional types and
 corrections/cancellations without an identity are rejected. A NEW print moves
-the price only forward, a CORRECTION applies only to the print it identifies
-(an unrelated or older correction cannot rewind the latest), and a CANCEL
-removes the print it identifies even when it carries no price. A matching
-correction that cannot be accepted — non-valid tick, spread leg, non-positive
-or non-finite price — invalidates the print it supersedes instead of leaving
-the old price selected. The collector receipt is stored beside the print but
-never substitutes for the provider time.
+the price only forward in `(time, sequence)` order — a later print in the same
+millisecond wins on its higher sequence, an equal or lower sequence at the same
+time is rejected, a duplicate identity is not a new print, and an equal-time
+event without a sequence on either side fails closed rather than being guessed
+later. A CORRECTION applies only to the print it identifies (an unrelated or
+older correction cannot rewind the latest), and a CANCEL removes the print it
+identifies even when it carries no price. A matching correction that cannot be
+accepted — non-valid tick, spread leg, non-positive or non-finite price —
+invalidates the print it supersedes instead of leaving the old price selected.
+The collector receipt is stored beside the print but never substitutes for the
+provider time.
 
 Selection uses a print only in premarket/after-hours, only when the print's
 provider time is inside the active session, only when the provider did not mark

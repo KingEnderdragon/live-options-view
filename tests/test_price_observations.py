@@ -630,6 +630,81 @@ class FeedEventEvidence(unittest.TestCase):
                                  flags=0x02, tradeId=50))   # CANCEL, no VT, no price
         self.assertNotIn("ts_price", feed.get_state()["QQQ"])
 
+    def test_equal_time_higher_sequence_replaces_the_print(self):
+        feed = self._feed()
+        feed._ingest(self._print(price=100, time=1794262000000, sequence=1,
+                                 validTick=True))
+        feed._ingest(self._print(price=101, time=1794262000000, sequence=2,
+                                 validTick=True))
+        state = feed.get_state()["QQQ"]
+        self.assertEqual((state["ts_price"], state["ts_sequence"]), (101, 2))
+        self.assertEqual(feed.get_health()["timesale"]["counts"]["out_of_order"], 0)
+
+    def test_equal_time_lower_sequence_is_rejected_and_equal_is_duplicate(self):
+        feed = self._feed()
+        feed._ingest(self._print(price=100, time=1794262100000, sequence=2,
+                                 validTick=True))
+        feed._ingest(self._print(price=99, time=1794262100000, sequence=1,
+                                 validTick=True))
+        feed._ingest(self._print(price=98, time=1794262100000, sequence=2,
+                                 validTick=True))
+        self.assertEqual(feed.get_state()["QQQ"]["ts_price"], 100)
+        counts = feed.get_health()["timesale"]["counts"]
+        self.assertEqual(counts["out_of_order"], 1)
+        self.assertEqual(counts["duplicate"], 1)
+
+    def test_equal_time_without_a_sequence_fails_closed(self):
+        feed = self._feed()
+        feed._ingest(self._print(price=100, time=1794262200000, sequence=2,
+                                 validTick=True))
+        feed._ingest(self._print(price=99, time=1794262200000, validTick=True))
+        self.assertEqual(feed.get_state()["QQQ"]["ts_price"], 100)
+        self.assertEqual(feed.get_health()["timesale"]["counts"]["out_of_order"], 1)
+
+    def test_missing_sequence_with_a_later_time_is_accepted(self):
+        feed = self._feed()
+        feed._ingest(self._print(price=100, time=1794262300000, sequence=2,
+                                 validTick=True))
+        feed._ingest(self._print(price=101, time=1794262301000, validTick=True))
+        self.assertEqual(feed.get_state()["QQQ"]["ts_price"], 101)
+        self.assertIsNone(feed.get_state()["QQQ"]["ts_sequence"])
+
+    def test_duplicate_new_identity_is_rejected_before_ordering(self):
+        feed = self._feed()
+        big = 9007199254740992
+        feed._ingest(self._print(price=100, time=1794262400000, index=big,
+                                 validTick=True))
+        feed._ingest(self._print(price=999, time=1794262400000, index=big,
+                                 validTick=True))
+        self.assertEqual(feed.get_state()["QQQ"]["ts_price"], 100)
+        self.assertEqual(feed.get_health()["timesale"]["counts"]["duplicate"], 1)
+
+    def test_large_integer_sequences_order_and_identify(self):
+        feed = self._feed()
+        big = 9007199254740992
+        feed._ingest(self._print(price=100, time=1794262500000, sequence=big,
+                                 validTick=True))
+        feed._ingest(self._print(price=101, time=1794262500000, sequence=big + 1,
+                                 validTick=True))
+        self.assertEqual(feed.get_state()["QQQ"]["ts_price"], 101)
+        feed._ingest(self._print(price=102, time=1794262500000, sequence=big + 1,
+                                 type="CORRECTION"))
+        self.assertEqual(feed.get_state()["QQQ"]["ts_price"], 102)
+        feed._ingest(self._print(time=1794262500000, sequence=big + 1,
+                                 type="CANCEL"))
+        self.assertNotIn("ts_price", feed.get_state()["QQQ"])
+
+    def test_out_of_order_snapshot_does_not_rewind(self):
+        feed = self._feed()
+        feed._ingest(self._print(price=100, time=1794262600000, sequence=9,
+                                 validTick=True))
+        feed._ingest(self._print(price=90, time=1794262500000, sequence=9,
+                                 validTick=True))
+        feed._ingest(self._print(price=80, time=1794262400000, sequence=9,
+                                 validTick=True))
+        self.assertEqual(feed.get_state()["QQQ"]["ts_price"], 100)
+        self.assertEqual(feed.get_health()["timesale"]["counts"]["out_of_order"], 2)
+
     def test_large_index_identities_do_not_collide_through_float(self):
         feed = self._feed()
         feed._ingest(self._print(price=100, time=1794260000000,
