@@ -5,7 +5,7 @@
 // register/login) lives in backend/bots.js.
 
 import {
-  BOT_USERNAME_RE, SESSION_TTL_SECONDS, STARTING_BALANCE, STRATEGY_ID_RE,
+  BOT_USERNAME_RE, SESSION_COOKIE, SESSION_TTL_SECONDS, STARTING_BALANCE, STRATEGY_ID_RE,
   checkOrigin, clearedSessionCookieHeader, jsonResponse, parseCookies,
   readJsonBody, requireSession, sessionCookieHeader,
 } from './common.js';
