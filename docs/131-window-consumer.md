@@ -81,13 +81,14 @@ deployment, no publication, no activation. Chej owns review/release.
    publisher's per-window `latest.json` is read by the consumer, but
    only to pin the window it was already asked for to one revision
    (point 10); it is never listed or followed to another window.
-9. **Publisher exists offline only.** `market_data/options_scanner/windows_publish.py`
+9. **Publisher exists offline, plus one live R2 trial.** `market_data/options_scanner/windows_publish.py`
    validates and publishes windows to a pluggable backend (fake and
    local-filesystem backends tested; see `docs/130-window-publisher.md`),
-   but live R2 publication is a separate, unapproved step
-   (`windows_outputs.py` is local-only). This consumer reads whatever a
-   future approved publisher writes; it does not publish, set any env
-   flag, start a collector, or deploy.
+   and the first live window (overnight-2026-10-05_2026-10-06,
+   rev_c1abd845...) was published to R2 on 2026-11-10 by Chej's conditional
+   trial. Further live publication remains Chej's release step. This
+   consumer reads whatever the publisher writes; it does not publish, set
+   any env flag, start a collector, or deploy.
 10. **A read is pinned to one revision by the pointer.** The flat keys
     are written one at a time, so a concurrent republish can leave a
     stable mixed revision on disk (new summary, old rankings, or vice
@@ -170,9 +171,10 @@ producer contract exists).
    `docs/130-window-publisher.md`); it writes
    `oa203/windows/<policy>/<kind>/<window_id>/{summary.json,rankings.csv,paths.csv.gz}`
    to a pluggable backend, with retention/budget policy and a
-   per-window `latest.json` pointer (no index). Live R2 publication is
-   still unapproved -- Chej/Owen approval plus the release gate in
-   `docs/130-window-publisher.md` is required before any live write.
+   per-window `latest.json` pointer (no index). The first live window was
+   published to R2 on 2026-11-10 (Chej's conditional trial); further live
+   publication remains Chej's release step, gated by the release checks in
+   `docs/130-window-publisher.md`.
 2. **Live R2**: verify the published keys are readable at the public origin
    and that a real complete week exists (the inspected Oct 5–9 week is not
    complete: Oct 8 is `partial`).

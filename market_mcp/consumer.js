@@ -24,8 +24,12 @@ const QUALIFIED_RANK = 'qualified_first_ask_to_later_bid_rank';
 const ACTIVE_PATH_SWEEPS = 2;
 // #130 multi-session windows (F2). The consumer reads producer-written
 // oa203/windows/ artifacts only; it never builds windows, never publishes
-// them, and never invents an exit. Publication under oa203/windows/ is a
-// separate, unapproved step (see docs/131-window-consumer.md).
+// them, and never invents an exit. Live R2 publication is Chej's release
+// step (see docs/131-window-consumer.md): the first live window
+// (overnight-2026-10-05_2026-10-06, rev_c1abd845...) was published to R2
+// on 2026-11-10 by Chej's conditional trial. This consumer reads whatever
+// the publisher writes; it does not publish, set any env flag, start a
+// collector, or deploy.
 const WINDOW_POLICY_VERSION = 'oa203-windows-v1';
 const WINDOW_KINDS = ['weekly_cheapest', 'weekly_fixed', 'weekly_cheapest_best_exit', 'overnight', 'sessions_2', 'sessions_3'];
 const WINDOW_BASES = ['mid', 'exec', 'qualified'];
@@ -332,10 +336,11 @@ class Consumer {
         cadence: chain ? 'collector session cycles; field timestamps govern age' : id === 'scheduled_squeeze' ? '09:00 and 12:00 America/New_York exchange-session calendar' : 'selected finalized session; about five-minute samples',
         coverage: probe.value?.coverage || probe.value?.assessment || (chain ? `latest ${chain} 0DTE snapshot only` : null), historical_index: 'not_supported' });
     }
-    // Windows have no latest pointer or index to probe: the producer writes
-    // one directory per window, and publication under oa203/windows/ is a
-    // separate, unapproved step. Discovery therefore advertises the fixed
-    // contract and requires an explicit window; it never claims live data.
+    // Windows have no global index or window list to probe: the producer writes
+    // one directory per window, each with its own latest.json pointer that pins
+    // a read to one revision. Live R2 publication is Chej's release step.
+    // Discovery therefore advertises the fixed contract and requires an
+    // explicit window; it never claims live data.
     out.capabilities.push({dataset:'options_windows',producer_schema:'oa203-windows-v1',
       availability:'explicit_window_required',source_locator:'oa203/windows/oa203-windows-v1/<kind>/<window_id>/{summary.json,rankings.csv,paths.csv.gz}',
       error:null,actual:null,fields:['summary','rankings','paths','counts','labels'],
