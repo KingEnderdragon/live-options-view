@@ -19,6 +19,7 @@ import contextlib
 import io
 import json
 import os
+import subprocess
 import sys
 import time
 import unittest
@@ -223,6 +224,32 @@ class GateBehaviourTests(unittest.TestCase):
         code, out = self.cli(base="no-such-revision-anywhere")
         self.assertEqual(code, 2)
         self.assertIn("base revision", out["error"])
+
+    def test_git_base_ref_reads_the_catalog_from_that_revision(self):
+        # Exercises the real git path (`git show <ref>:crassus/accounts...`)
+        # rather than the --base-catalog fixture override. HEAD and the
+        # worktree agree in a clean checkout, so nothing is newly active; a
+        # developer with uncommitted catalog edits is skipped rather than
+        # failed, because that delta is not the commit under test.
+        catalog = ROOT / "crassus" / "accounts.example.json"
+        dirty = subprocess.run(
+            ["git", "-C", str(ROOT), "diff", "--quiet", "HEAD", "--",
+             "crassus/accounts.example.json"],
+            capture_output=True,
+        )
+        if dirty.returncode not in (0, 1):
+            self.skipTest("git is not available to resolve a base revision here")
+        if dirty.returncode == 1:
+            self.skipTest("the catalog differs from HEAD; the delta is uncommitted work")
+
+        code, out = _run([
+            "--base-ref", "HEAD", "--json",
+            "--catalog", str(catalog), "--evidence", str(self.evidence),
+        ])
+        self.assertEqual(code, 0, out)
+        self.assertTrue(out["base_available"])
+        self.assertEqual(out["newly_active"], [])
+        self.assertGreater(out["checked_entries"], 0)
 
     def test_repository_catalog_passes_on_delta_against_itself_like_baseline(self):
         # Both sides are the live catalog: nothing is newly active, so the gate

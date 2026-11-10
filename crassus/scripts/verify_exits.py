@@ -23,6 +23,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "crassus"))
@@ -562,6 +563,35 @@ class RunnerWiringTests(unittest.TestCase):
         self.assertEqual(submitted, [])
         self.assertEqual(
             runner.exit_state.cooldown_remaining_s("crassus_luigi", SYMBOL, 15.0), 0.0
+        )
+
+    def test_reentry_cooldown_blocks_a_real_entry_decision(self):
+        # End-to-end through the runner: the account is flat, the strategy
+        # proposes a buy, and the cooldown from an earlier exit turns that buy
+        # into an audited no_trade rather than an order.
+        directory = _tmpdir()
+        runner, account, submitted = self._runner(directory, trades=[])
+        runner.exit_state.record("crassus_luigi", SYMBOL,
+                                 trigger="protective_stop", quantity=1)
+        buy = Decision(action="buy", symbol=SYMBOL, quantity=1, reason="signal still long",
+                       strategy_id="reddit_sentiment_qqq", strategy_version="1")
+        with mock.patch("crassus.runner.get_strategy", return_value=lambda ctx: buy):
+            runner._run_account(account, self._snapshot(), "open")
+
+        self.assertEqual(submitted, [])
+        ledger = sorted(directory.glob("decisions-*.jsonl"))[-1].read_text().strip().splitlines()
+        record = json.loads(ledger[-1])
+        self.assertEqual(record["outcome_class"], "no_trade")
+        self.assertIn("Exit cooldown", record["reason"])
+        self.assertEqual(record["decision"]["metadata"]["blocked_symbol"], SYMBOL)
+
+    def _snapshot(self):
+        return MarketSnapshot.from_payload(
+            url="test://snapshot",
+            payload={"timestamp": "2024-01-02T17:00:00+00:00",
+                     "snapshot_time": "2024-01-02T17:00:00+00:00",
+                     "expiration": "2024-01-02", "underlying_price": 400.0, "rows": []},
+            raw=b"{}",
         )
 
     def test_invalid_exit_config_records_an_error_instead_of_trading(self):
