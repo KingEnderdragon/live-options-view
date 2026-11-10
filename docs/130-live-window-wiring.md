@@ -190,12 +190,16 @@ was found. The scanner is a scheduled/build-only service.
   raised to 48 MiB (`docs/130-window-publisher.md`).
 - Binding constraint, stated plainly: the scanner's own day-archive
   growth (~110 MB/day) is what fills the volume, not windows emit.
-  At ~110 MB/day the ~773 MiB free lasts ~7 days total, and the
-  576 MiB pre-check starts refusing builds after ~2 days of archive
-  growth. Windows auto-cleanup removes windows' own contribution but
-  cannot fix archive growth -- that is a Chej/Owen capacity decision
-  (volume resize is a paid service change, out of scope; deleting
-  source archives is forbidden).
+  At ~110 MB/day the ~773 MiB free lasts ~7 days total. The window
+  builder no longer contributes: its emit moved to ephemeral scratch
+  (see below), so the 576 MiB pre-check now guards the scratch
+  filesystem, not the archive volume, and archive growth no longer
+  makes the hook refuse builds. The remaining ~7-day limit is the
+  scanner's own archive mirror, not a windows problem -- that is a
+  Chej/Owen capacity decision (volume resize is a paid service change,
+  out of scope; deleting source archives is forbidden). A bounded
+  local cache lifecycle for the mirror is separate follow-up work,
+  not part of this change.
 
 ### The retention policy (local output only)
 
@@ -204,17 +208,28 @@ was found. The scanner is a scheduled/build-only service.
   then remove expendable derived output; the products live in the
   backend and the emit is rebuildable from the spool while the spool
   matches), records the cleanup in its return, and best-effort prunes
-  older verified cycles (`keep_cycles=0`, `max_emit_bytes=0`). A
-  failed publish raises before cleanup, so the emit root is kept as
-  recovery evidence. The hook binds ONE effective backend
-  (`effective_backend`: the passed backend, else `r2_backend()`) and
-  uses it for BOTH the publish and the older prune, so the production
-  default path prunes too. Steady state emit is ~0 (only unverified
-  cycles remain).
+  older verified cycles (`keep_cycles=0`, `max_emit_bytes=0`). By
+  default the emit root is ephemeral scratch (a fresh
+  `oa203-windows-*` temporary directory under
+  `OA203_WINDOWS_SCRATCH_DIR` or the system temp dir), NOT the spool:
+  the hook writes nothing to the archive volume except the small
+  `windows_live.json` record in the day archive, and the scratch dir
+  is removed on success AND on failure (the backend attempt ledger
+  plus the deterministic byte-identical rebuild are the recovery
+  evidence). An explicit `emit_root` (tests / operator runs) keeps
+  the old behaviour, including keeping the emit on publish failure,
+  and the scratch root is refused when it resolves inside the spool.
+  The hook binds ONE effective backend (`effective_backend`: the
+  passed backend, else `r2_backend()`) and uses it for BOTH the
+  publish and the older prune, so the production default path prunes
+  too. Steady state emit is ~0 (only unverified cycles remain).
 - There is NO hard cycle-count floor: `DEFAULT_KEEP_CYCLES = 0` and
-  the manual prune budget is `DEFAULT_MAX_EMIT_BYTES = 192 MiB`
-  (192 + 576 = 768 MiB <= ~773 MiB free, so pruning to budget always
-  leaves room for the next build). A floor of 10 cycle dirs cannot fit
+  the manual prune budget is `DEFAULT_MAX_EMIT_BYTES = 192 MiB`.
+  The old sizing note (192 + 576 = 768 MiB <= ~773 MiB free on /data)
+  applied when emit lived on the archive volume; since emit moved to
+  scratch, the 576 MiB pre-check applies to the scratch filesystem
+  and the manual prune now covers legacy spool emit leftovers
+  (`windows-prune-emit`) only. A floor of 10 cycle dirs cannot fit
   the headroom at full-universe scale; `keep_cycles` is an explicit
   operator recency preference only, and the byte budget alone decides.
 - A per-cycle emit root may be pruned ONLY when its manifest is
@@ -248,20 +263,25 @@ was found. The scanner is a scheduled/build-only service.
   delete, the recency preference (not a floor), the unpublished-cycle
   skip, the exact manifest/supersede/member evidence rules, the
   symlink/junction/spool rejections, the 32-window 10-session build,
-  and the auto-cleanup (remove after publish, keep on failure, prune
-  older, low-headroom boundary).
+  the auto-cleanup (remove after publish, keep on failure, prune
+  older, low-headroom boundary), and the scratch default (scratch,
+  not spool; removed on success and on failure; inside-spool and
+  missing-root refusals; scratch headroom).
 
 ### Headroom pre-check (fail closed before a build)
 
 - `build_windows` (and therefore the `run_after_finalize` hook and the
   `windows-build` CLI) requires at least `MIN_EMIT_FREE_BYTES`
   (576 MiB = 2x the corrected worst-case per-cycle 288 MiB: 1x the
-  build peak plus 1x for a local-backend copy) free on the emit volume
-  before building, and raises `ValueError` naming free/required bytes
-  otherwise. The operator then prunes older per-cycle emit roots; the
-  build never starts on a volume too full to finish it. The refusal
-  message names the actual situation: emit pruning only helps if emit
-  is what fills the volume (see the binding constraint above).
+  build peak plus 1x for a local-backend copy) free before building,
+  and raises `ValueError` naming free/required bytes otherwise. The
+  check probes the filesystem the emit will actually land on: the
+  scratch filesystem for the hook's default path
+  (`scratch_emit=True`, refusal names the scratch filesystem), the
+  explicit emit volume when an explicit `emit_root` is given. The
+  build never starts on a filesystem too full to finish it. The
+  refusal message names the actual situation: emit pruning only helps
+  if emit is what fills the volume (see the binding constraint above).
 - Spool-missing behaviour is already fail-closed and is now tested:
   an empty spool raises `ValueError` (`no finalized day archives`), a
   missing spool directory raises `FileNotFoundError`; a torn or
