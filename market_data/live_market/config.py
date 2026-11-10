@@ -61,6 +61,10 @@ WEEKLY_R2_PREFIX = "raw/weekly"
 # PRICE_LANE_ENABLED=0 restores the legacy in-session publisher; both paths are
 # mutually exclusive, so prices.json always has exactly one writer.
 PRICE_LANE_ENABLED = os.environ.get("PRICE_LANE_ENABLED", "1") != "0"
+# Trade prints for extended-hours equity prices, on a separate DXLink channel so
+# a field/event rejection cannot disturb the accepted quote/trade feed. Set 0 to
+# disable the probe without reverting the release.
+PRICE_LANE_TIMESALE = os.environ.get("PRICE_LANE_TIMESALE", "1") != "0"
 PRICE_LANE_HEALTH_KEY = "intraday/price_lane_health.json"
 PRICE_LANE_HEALTH_SECS = 30
 PRICE_LANE_MIN_BACKOFF_SECS = 60
@@ -68,7 +72,19 @@ PRICE_LANE_MAX_BACKOFF_SECS = 1800
 PRICE_LANE_MAX_AUTH_CYCLES = 4          # per retry window, then a long sleep
 PRICE_LANE_RETRY_WINDOW_SECS = 3600
 PRICE_LANE_CONTRACT_REFRESH_SECS = 6 * 3600  # daily/roll reconciliation while healthy
+# A failed or partial contract resolution must retry long before the six-hour
+# cadence: the live November 9 failure left every futures row frozen for the
+# rest of the evening because the next attempt was six hours away.
+CONTRACT_RESOLVE_RETRY_MIN_SECS = 60
+CONTRACT_RESOLVE_RETRY_MAX_SECS = 900
 ROLLING_REFERENCE_KEY = "intraday/price_references.json"
+# Extended-session equity selection (#178 repair). A stale regular-session
+# trade may not stand in for an active premarket/after-hours market: when the
+# feed carries a live two-sided quote and the last trade predates the current
+# session, the quote midpoint is the current price. The bounds reject
+# half-updated and wide quotes (IGV's 13% after-hours spread is not a price).
+EXTENDED_QUOTE_MAX_AGE_SECS = STALE_FEED_SECS
+EXTENDED_QUOTE_MAX_SPREAD_PCT = 2.0
 
 # Keep the weekly archive byte-for-byte compatible with qqq-data-pipeline's
 # chain CSV field set and order.  The live 0DTE CSV intentionally retains its
@@ -187,6 +203,7 @@ __all__ = [
     "R2_BUCKET",
     "WEEKLY_R2_PREFIX",
     "PRICE_LANE_ENABLED",
+    "PRICE_LANE_TIMESALE",
     "PRICE_LANE_HEALTH_KEY",
     "PRICE_LANE_HEALTH_SECS",
     "PRICE_LANE_MIN_BACKOFF_SECS",
@@ -194,6 +211,10 @@ __all__ = [
     "PRICE_LANE_MAX_AUTH_CYCLES",
     "PRICE_LANE_RETRY_WINDOW_SECS",
     "PRICE_LANE_CONTRACT_REFRESH_SECS",
+    "CONTRACT_RESOLVE_RETRY_MIN_SECS",
+    "CONTRACT_RESOLVE_RETRY_MAX_SECS",
+    "EXTENDED_QUOTE_MAX_AGE_SECS",
+    "EXTENDED_QUOTE_MAX_SPREAD_PCT",
     "ROLLING_REFERENCE_KEY",
     "PIPELINE_CHAIN_COLUMNS",
     "EIA_API_KEY",
