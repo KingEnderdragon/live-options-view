@@ -84,9 +84,17 @@ def fetch(key: str, attempts: int = 4) -> bytes:
 
 def validate_manifest(manifest: list[dict], summary: dict, day: str,
                       selected: dict[str, dict[str, str | None]] | None = None) -> None:
-    """Reject torn or amended sweep indexes before treating a replay as final."""
-    if summary.get("assessment", {}).get("status") != "complete":
-        raise RuntimeError(f"{day}: daily assessment is not complete")
+    """Reject torn or amended sweep indexes before treating a replay as final.
+
+    A final day assessed "partial" is admitted: its manifest must still be
+    fully valid (contiguous sweeps, no truncated non-final sweep, valid
+    chain evidence); the partiality is carried as session_partial reasons
+    by the caller, never hidden. Any other assessment status, a missing
+    assessment, or a torn manifest is still refused fail-closed.
+    """
+    status = summary.get("assessment", {}).get("status")
+    if status not in ("complete", "partial"):
+        raise RuntimeError(f"{day}: daily assessment is not complete or partial (status={status!r})")
     if not manifest or [m.get("sweep") for m in manifest] != list(range(1, len(manifest) + 1)):
         raise RuntimeError(f"{day}: non-contiguous manifest")
     files = [m.get("file") for m in manifest]
@@ -223,6 +231,7 @@ def load_session(day: str, underlyings: set[str], rows_by_symbol: dict, sampled:
     return {"day": day, "session": w.Session(day, summary["session_open_ms"], summary["session_close_ms"]),
             "sweeps": len(manifest), "rows_kept": kept, "final": bool(summary.get("final")),
             "assessment": summary["assessment"]["status"],
+            "assessment_reasons": list(summary["assessment"].get("reasons") or []),
             "excluded_final_sweep": excluded_final_sweep,
             "universe_selection_version": universe.get("selection_version"),
             "universe_selected_at": universe.get("selected_at"),

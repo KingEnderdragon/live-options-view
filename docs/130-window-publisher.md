@@ -102,7 +102,7 @@ things the consumer cannot:
   exactly ranks `1..shortlist`, pct-descending with symbol tiebreak,
   negative-count rule, OCC identity cross-check, pct arithmetic within
   `2e-6`.
-- Paths: expanded size at most 24 MiB (the consumer ceiling), exact
+- Paths: expanded size at most 48 MiB (the consumer ceiling; measured full-universe maximum 34,295,267 B), exact
   header, row count equals `contracts_evaluated`, symbols unique
   (conflicting attributions for one symbol fail closed with no canonical
   path asserted), per-basis eligible/excluded counts **and**
@@ -191,16 +191,25 @@ lives in `latest.json` + the consumer's digest check, and the two meet
 only when the consumer actually reads the pointer. A mixed flat tree
 is refused, never repaired, by the consumer.
 
-## Retention / budget proposal (not a live approval)
+## Retention / budget (measured, implemented)
 
 Mirrors `active_budget.py`'s shape with numbers sized for windows
-instead of intraday snapshots. These are proposals for Chej/Owen to
-approve, not an approved budget.
+instead of intraday snapshots. The per-member caps are implemented
+from measured full-universe evidence (real producer, 14-batch combine,
+71,710 contracts/window, 2026-11-09): summary at most 55,492 B,
+rankings at most 65,497 B (shortlist-capped at 600 rows), paths.gz at
+most 2,436,802 B -- all inside their caps, which are NOT raised. Only
+the expanded-paths ceiling was demonstrated insufficient (measured
+32,806,912-34,295,267 B expanded, over the old 24 MiB bound) and is
+raised to 48 MiB: 1.46x the measured maximum, still inside the 64 MiB
+per-query budget with the other members. The old ~8 MB ranked-CSV
+figures do NOT justify a rankings raise: those were old-format
+qualified-only CSVs, not new-format rankings members.
 
-| Bound | Proposed value | Reasoning |
+| Bound | Value | Reasoning |
 | --- | --- | --- |
-| Per-member bytes | summary ≤ 1 MiB, rankings ≤ 4 MiB, paths ≤ 4 MiB compressed / 24 MiB expanded | Consumer artifact (4 MiB) and expanded (24 MiB) ceilings |
-| Reservation per revision | 20 MiB | Flat members (≤ 9 MiB) + immutable revision copy (≤ 9 MiB) + pointer/ledger |
+| Per-member bytes | summary ≤ 1 MiB, rankings ≤ 4 MiB, paths ≤ 4 MiB compressed / 48 MiB expanded | Consumer artifact (4 MiB) and expanded (48 MiB) ceilings; only the expanded bound changed, from measurement |
+| Reservation per revision | 20 MiB | Flat members (≤ 6.1 MiB measured at full-universe scale: summary ~0.06 + rankings ~0.07 + paths.gz ~2.4 MiB, plus pointer/ledger) + immutable revision copy (same again); 20 MiB still covers a revision with ~3x headroom |
 | Global cap | 8 GiB | Matches the scanner's reviewed bound |
 | Retention | 90 days | Expired revisions, flat members, pointers and ledgers deleted together; deletion re-verified by re-listing |
 | Attempts | 3 per revision | Same as active snapshots |
@@ -213,10 +222,21 @@ new publications until cleanup or an approved raise — it never silently
 deletes live data. There is no legacy data under `oa203/windows/`, so no
 policy-start floor is needed (unlike the scanner prefix).
 
-## What remains for live publication (release gate, unapproved)
+Retention timing (decision): cleanup runs inside `clean_and_reserve`
+during a publish — expired objects are deleted and the deletion
+re-verified before the new revision is charged — so the NEXT PUBLISH is
+the next cleanup. There is no standalone janitor, no timer, and no
+background expiry run. If publications stop, expired objects simply
+stay until the next publish; the cap and the per-revision reservation
+still bound every publish.
 
-1. **Chej/Owen approval** of this publisher, its state decisions, and the
-   budget/retention numbers above.
+## What remains for live publication (release gate)
+
+1. **Chej's release decision** for live publication and activation.
+   The per-member caps and budget numbers above are implemented from
+   measured evidence (not an approval wait); what remains is Chej's
+   release step -- publication to R2 and enabling
+   `OA203_WINDOWS_LIVE_ENABLED` -- after review.
 2. **OA203-style pre-checks** before any live R2 write: regression tests
    green (`tests/test_oa203_windows_publish.py`,
    `tests/test_oa203_windows_parity.py`,
@@ -237,3 +257,29 @@ policy-start floor is needed (unlike the scanner prefix).
 
 Until the gate passes, `windows_publish.py` is offline-only: use the fake
 or local-filesystem backend, never `r2_backend()`.
+
+## Stable product identity (retry fix)
+
+The revision is still `rev_<sha256(summary.json)>` and the member
+digests are still the SHA-256 of the published member bytes -- no
+protocol change. What changed is the PRODUCER: `build_windows` (and
+`combine_emit`) now write stable canonical per-window summary bytes,
+so an unchanged window rebuilds byte-identically and the same revision
+genuinely denotes the same content:
+
+- `generated_at` in a window summary is the window's exit-session
+  close (its data-as-of time), NOT the build/cycle wall clock. The
+  wall clock stays in the build report and `cycle.json` (cycle
+  metadata), never in a window summary.
+- `scope.underlyings` lists only underlyings selected on the window's
+  own sessions and in the build's universe (the live builder
+  previously listed the union across all loaded days).
+- Rows cover only contracts with in-session observations in the
+  window's own sessions, so an unrelated day's universe rotation
+  cannot leak rows or scope into a historical window.
+
+A retry at a later wall-clock time, or a next-day cycle overlapping
+the same windows, therefore returns `already_published` for every
+unchanged window (no fresh revision, no re-upload, no attempt token
+consumed) and a new revision only for genuinely changed/added window
+products. See `tests/test_oa203_windows_retry.py`.

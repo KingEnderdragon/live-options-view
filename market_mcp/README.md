@@ -154,7 +154,7 @@ Raw trade-bar drilldown and the full `contracts.csv.gz` universe are deferred.
 | --- | --- |
 | Rows per page / offset | 1..50 / 0..10000 |
 | Session | One real date, 2020..2100; no multi-date search/fallback |
-| Artifact / expanded gzip | 4 MiB / 24 MiB |
+| Artifact / expanded gzip | 4 MiB / 48 MiB |
 | Total query bytes / source requests / deadline | 64 MiB / 12 / 15 seconds |
 | Detail quote page | At most 6 sweeps; reduce limit if byte cap is reached |
 | Serialized result | 256 KiB, before text/structured duplication |

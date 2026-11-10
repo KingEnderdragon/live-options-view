@@ -24,8 +24,12 @@ const QUALIFIED_RANK = 'qualified_first_ask_to_later_bid_rank';
 const ACTIVE_PATH_SWEEPS = 2;
 // #130 multi-session windows (F2). The consumer reads producer-written
 // oa203/windows/ artifacts only; it never builds windows, never publishes
-// them, and never invents an exit. Publication under oa203/windows/ is a
-// separate, unapproved step (see docs/131-window-consumer.md).
+// them, and never invents an exit. Live R2 publication is Chej's release
+// step (see docs/131-window-consumer.md): the first live window
+// (overnight-2026-10-05_2026-10-06, rev_c1abd845...) was published to R2
+// on 2026-11-10 by Chej's conditional trial. This consumer reads whatever
+// the publisher writes; it does not publish, set any env flag, start a
+// collector, or deploy.
 const WINDOW_POLICY_VERSION = 'oa203-windows-v1';
 const WINDOW_KINDS = ['weekly_cheapest', 'weekly_fixed', 'weekly_cheapest_best_exit', 'overnight', 'sessions_2', 'sessions_3'];
 const WINDOW_BASES = ['mid', 'exec', 'qualified'];
@@ -245,7 +249,7 @@ const warnings = {
   scheduled_squeeze: ['Scores are experimental screens, not squeeze probabilities.', 'first_seen_at/is_new describe producer shortlist publication history; unknown values remain unknown.', 'Provider source times can be absent; acquisition and publication times are distinct.'],
   options_returns: ['Sampled returns miss between-sample extremes. Trade-bar backfill covers only already-ranked contracts.', 'Midpoint and ask-entry/bid-exit comparisons describe observations, not achievable fills.', 'Qualified ask-to-later-bid is a hindsight quote comparison; sizes and spreads do not establish obtainable fills.', 'All/clean coverage is the old top 200 all OR clean; qualified coverage is its separate full-universe top 200.', 'Session artifacts may be rebuilt in place; detail detects summary/shortlist changes and asks for a new query.'],
 };
-warnings.options_windows = ['Sampled quotes (~5-minute sweeps); between-sample moves are missed.', 'Quote comparisons, not executed fills; spread/size qualification does not establish fills, fees or capacity.', 'Ranks are cut only after a full-universe ranking; the shortlist holds at most 200 rows per basis.', 'Window publication under oa203/windows/ is a separate, unapproved step; no live window artifacts are published.', 'In-progress windows have no final exit; no ranking is served for them.'];
+warnings.options_windows = ['Sampled quotes (~5-minute sweeps); between-sample moves are missed.', 'Quote comparisons, not executed fills; spread/size qualification does not establish fills, fees or capacity.', 'Ranks are cut only after a full-universe ranking; the shortlist holds at most 200 rows per basis.', 'Window availability is determined for the requested window; partial replay coverage is not full-universe coverage.', 'In-progress windows have no final exit; no ranking is served for them.'];
 warnings.spy_snapshot = [...warnings.qqq_snapshot,
   'SPY RVOL reports insufficient_history/no_data until its own baseline has five completed collection sessions; QQQ baselines are never used for SPY.',
   'SPY is collected 0DTE only (no nearest-weekly archive). Live SPY collection must be observed before it is treated as supported in production.'];
@@ -332,17 +336,18 @@ class Consumer {
         cadence: chain ? 'collector session cycles; field timestamps govern age' : id === 'scheduled_squeeze' ? '09:00 and 12:00 America/New_York exchange-session calendar' : 'selected finalized session; about five-minute samples',
         coverage: probe.value?.coverage || probe.value?.assessment || (chain ? `latest ${chain} 0DTE snapshot only` : null), historical_index: 'not_supported' });
     }
-    // Windows have no latest pointer or index to probe: the producer writes
-    // one directory per window, and publication under oa203/windows/ is a
-    // separate, unapproved step. Discovery therefore advertises the fixed
-    // contract and requires an explicit window; it never claims live data.
+    // Windows have no global index or window list to probe: the producer writes
+    // one directory per window, each with its own latest.json pointer that pins
+    // a read to one revision. Live R2 publication is Chej's release step.
+    // Discovery therefore advertises the fixed contract and requires an
+    // explicit window; it never claims live data.
     out.capabilities.push({dataset:'options_windows',producer_schema:'oa203-windows-v1',
       availability:'explicit_window_required',source_locator:'oa203/windows/oa203-windows-v1/<kind>/<window_id>/{summary.json,rankings.csv,paths.csv.gz}',
       error:null,actual:null,fields:['summary','rankings','paths','counts','labels'],
       filters:['window_id','kind','basis','underlying','type','limit','offset'],
       kinds:WINDOW_KINDS,bases:WINDOW_BASES,states:WINDOW_STATES,shortlist_per_basis:WINDOW_SHORTLIST,
       units:units.options_windows,warnings:warnings.options_windows,
-      publication:'not_published_to_R2',historical_index:'explicit window only; no index or latest pointer'});
+      publication:'query_explicit_window',historical_index:'explicit window only; no global index'});
     const activeSession=a.session??exchangeDate(this.now());
     const activeKey=`oa203/scanner/${activeSession}/inprogress/latest.json`;
     const activeProbe=await q.optionalJson(activeKey);
@@ -808,7 +813,7 @@ class Consumer {
         pointer.value.members['summary.json']===baseline[0] && pointer.value.members['rankings.csv']===baseline[1],
         'Published window pointer disagrees with the flat summary/rankings just read; the window is being republished.','source_changed');
     } else out.warnings.push('No published window pointer for this window; the flat members are not revision-pinned.');
-    out.actual.rankings_sha256=q.evidence.at(-1).retrieved_sha256;
+    out.actual.rankings_sha256=baseline[1];
     out.warnings.push('Matching before/after summary/rankings digests detect observed rebuilds; the published pointer pins the read to one revision when present.');
     const filtered=rows.filter(r=>r.basis===basis && (!a.underlying||r.underlying===a.underlying) && (!a.type||r.option_type===a.type));
     filtered.sort((x,y)=>Number(x.rank)-Number(y.rank)); // producer rank, never re-score
