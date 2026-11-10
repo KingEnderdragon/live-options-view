@@ -303,6 +303,13 @@ class PriceLane:
         except Exception as exc:
             log.warning(f"price lane resolution token refresh failed: {type(exc).__name__}")
             return (self._auth_payload or {}).get("access_token")
+        # Persist the renewed credentials for every later REST attempt. The live
+        # feed keeps the streamer token it connected with; the refreshed payload
+        # serves resolution now and any later rebuild. Without this, the next
+        # attempt 61 seconds later reused the expired token.
+        merged = dict(self._auth_payload or {})
+        merged.update(auth)
+        self._auth_payload = merged
         self._access_token_at = now
         return auth["access_token"]
 
@@ -363,7 +370,12 @@ class PriceLane:
         snapshot = futures_snapshot()
         previous = dict(self._contracts or {})
         if snapshot == previous:
-            if previous and all(previous.values()):
+            # A preserved map looks unchanged; only the resolver's own recovery
+            # may clear a retry deadline. Clearing it here on a degraded
+            # resolution was the review blocker: the deadline vanished while the
+            # provider was still failing.
+            if (previous and all(previous.values())
+                    and resolution_status()["state"] == "ok"):
                 self._contract_gaps = 0
                 self._contract_retry_at = None
                 self._contract_gap_since = None
@@ -383,14 +395,16 @@ class PriceLane:
                 f"price lane contract resolution incomplete; keeping "
                 f"{sum(1 for value in previous.values() if value)} known contracts")
             return
-        if self._contract_retry_at is not None and now < self._contract_retry_at:
+        # A changed snapshot is provider-directed and actionable even while a
+        # resolution retry is pending; only a failed replacement feed suppresses
+        # another attempt.
+        if (self._contract_retry_at is not None and now < self._contract_retry_at
+                and self._contract_gap_reason == "subscription_rebuild_failed"):
             return
         if self._rebuild_feed(snapshot):
             self._contracts = dict(snapshot)
             self._contract_reconciliations += 1
-            self._contract_gap_since = None
-            self._contract_retry_at = None
-            self._contract_gap_reason = None
+            self._record_resolution_outcome(now)
         else:
             # Never connect-storm: a failed replacement backs off like any
             # other lane failure, and the old feed keeps streaming meanwhile.

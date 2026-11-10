@@ -50,6 +50,9 @@ class DXLinkFeed:
         # the provider actually sends makes that answer observable.
         self._event_counts: dict[str, int] = {}
         self._quote_time_counts = {"with_provider_time": 0, "without_provider_time": 0}
+        # Observed field names per event type: the deployment's answer to "what
+        # does this feed actually send", instead of an inference from absence.
+        self._event_fields: dict[str, list[str]] = {}
 
     def set_subscriptions(self, option_symbols: list[str], price_symbols: list[str]):
         self._subs = []
@@ -117,6 +120,8 @@ class DXLinkFeed:
                 "last_feed_event_time": self._last_event_time,
                 "event_counts": dict(self._event_counts),
                 "quote_time_counts": dict(self._quote_time_counts),
+                "event_fields": {name: list(fields)
+                                 for name, fields in self._event_fields.items()},
             }
 
     def needs_reauth(self) -> bool:
@@ -329,6 +334,10 @@ class DXLinkFeed:
                 s = self._state.setdefault(sym, {})
                 if et:
                     self._event_counts[et] = self._event_counts.get(et, 0) + 1
+                    if et not in self._event_fields:
+                        self._event_fields[et] = sorted(
+                            key for key in event.keys()
+                            if key not in ("eventType", "eventSymbol"))[:40]
                 if et == "Quote":
                     b = self._to_float(event.get("bidPrice"))
                     a = self._to_float(event.get("askPrice"))

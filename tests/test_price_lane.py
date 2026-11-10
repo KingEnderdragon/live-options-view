@@ -673,12 +673,14 @@ class LaneContractRecovery(unittest.TestCase):
                          for row in INSTRUMENTS if row["profile"] == "FU"}
         self.now = [datetime(2026, 11, 9, 17, 0, tzinfo=UTC)]
         self.feeds = []
+        self.feed_args = []
         self.published = []
         self.auth_calls = []
 
         def fake_auth(_manager):
             self.auth_calls.append(1)
-            return {"access_token": f"a{len(self.auth_calls)}", "streamer_token": "s",
+            index = len(self.auth_calls)
+            return {"access_token": f"a{index}", "streamer_token": f"s{index}",
                     "streamer_url": "ws://test"}
 
         def fake_publish(s3, feed, counters, registry, **kw):
@@ -686,6 +688,7 @@ class LaneContractRecovery(unittest.TestCase):
             s3.put_object(Bucket="b", Key="intraday/prices.json", Body=b"{}")
 
         def make_feed(url, token):
+            self.feed_args.append((url, token))
             built = FakeFeed()
             self.feeds.append(built)
             return built
@@ -707,6 +710,140 @@ class LaneContractRecovery(unittest.TestCase):
         self.sources._RESOLVE_ATTEMPTS = self.saved_attempts
         for label, symbol in self._futures.items():
             entry.PRICE_TICKERS[label] = symbol
+
+    def full_map(self):
+        """Populate every futures label the way a successful resolution would."""
+        for label in futures_labels():
+            row = next(r for r in INSTRUMENTS if r["label"] == label)
+            root = row["id"][4:].upper()
+            symbol = f"/{root}Z26:XNYM"
+            entry.PRICE_TICKERS[label] = symbol
+            self.sources.RESOLVED_CONTRACTS[label] = {
+                "symbol": symbol, "root": root, "expiry": "2026-12-31",
+                "exchange": "XNYM", "selection": "provider_active_month"}
+
+    def test_full_map_keeps_the_retry_deadline_while_resolution_degrades(self):
+        self.full_map()
+        self.lane._resolve = self.sources.resolve_futures
+        with patch.object(self.sources.requests, "get", side_effect=RuntimeError("network")):
+            self.lane.cycle()
+            health = self.lane.health()
+            self.assertEqual(health["contract_resolution"]["state"], "degraded")
+            self.assertIsNotNone(health["contract_retry_at"],
+                                 "a degraded full map must keep its retry deadline")
+            self.assertEqual(health["contract_gap_reason"], "resolution_degraded")
+            first = health["contract_retry_at"]
+            self.lane.cycle()
+            self.assertEqual(self.lane.health()["contract_retry_at"], first,
+                             "an unchanged full map must not erase the deadline")
+            for advance in (61, 121, 241, 481):
+                self.now[0] += timedelta(seconds=advance)
+                self.lane.cycle()
+                health = self.lane.health()
+                self.assertEqual(health["contract_resolution"]["state"], "degraded")
+                self.assertIsNotNone(health["contract_retry_at"],
+                                     f"retry survives cycle after {advance}s")
+                self.assertEqual(len(self.feeds), 1, "a preserved map never rebuilds")
+
+    def test_resolution_token_persists_the_renewed_credentials(self):
+        self.full_map()
+        self.lane.cycle()
+        self.assertEqual(self.lane._auth_payload["access_token"], "a1")
+        self.now[0] += timedelta(seconds=601)
+        first = self.lane._resolution_token(self.now[0])
+        second = self.lane._resolution_token(self.now[0] + timedelta(seconds=1))
+        self.assertEqual((first, second), ("a2", "a2"))
+        self.assertEqual(self.lane._auth_payload["streamer_token"], "s2")
+
+    def test_a_renewed_token_is_used_by_later_attempts(self):
+        self.full_map()
+        tokens = []
+        real = self.sources.resolve_futures
+        self.lane._resolve = (lambda token, force=False:
+                              tokens.append(token) or real(token, force=force))
+        with patch.object(self.sources.requests, "get", side_effect=RuntimeError("network")):
+            self.lane.cycle()
+            self.assertEqual(tokens[0], "a1")
+            self.now[0] += timedelta(seconds=6 * 3600 + 1)
+            self.lane.cycle()
+            self.assertEqual(tokens[-1], "a2")
+            self.now[0] += timedelta(seconds=61)
+            self.lane.cycle()
+            self.assertEqual(tokens[-1], "a2",
+                             "the renewed token must persist for the next attempt")
+
+    def test_a_rebuild_after_renewal_uses_the_renewed_streamer_token(self):
+        self.full_map()
+        self.lane.cycle()
+        self.assertEqual(self.feed_args[-1][1], "s1")
+        self.now[0] += timedelta(seconds=6 * 3600 + 1)
+        self.lane.cycle()
+        self.assertEqual(len(self.feeds), 1, "a renewed token alone does not rebuild")
+        entry.PRICE_TICKERS["/GC"] = "/GCG27:XCEC"
+        self.lane.cycle()
+        self.assertEqual(len(self.feeds), 2)
+        self.assertEqual(self.feed_args[-1][1], "s2",
+                         "a rebuild after renewal uses the renewed credentials")
+
+    def test_partial_loss_with_a_new_contract_rebuilds_and_keeps_the_retry(self):
+        self.full_map()
+        self.lane.cycle()
+        self.assertEqual(len(self.feeds), 1)
+        # The provider rolls /GC while /CL loses its contract without a usable
+        # replacement: a genuine change and a gap in the same answer.
+        entry.PRICE_TICKERS["/GC"] = "/GCG27:XCEC"
+        entry.PRICE_TICKERS["/CL"] = None
+        self.sources._RESOLVE_STATE.update(state="partial")
+        self.now[0] += timedelta(seconds=price_lane.PRICE_LANE_CONTRACT_REFRESH_SECS + 1)
+        self.lane.cycle()
+        self.assertEqual(len(self.feeds), 2, "a provider-directed change is actionable")
+        self.assertIn("/GCG27:XCEC", self.feeds[1].price_symbols)
+        self.assertNotIn("/CLZ26:XNYM", self.feeds[1].price_symbols)
+        health = self.lane.health()
+        self.assertEqual(health["contracts"]["/GC"], "/GCG27:XCEC")
+        self.assertIsNone(health["contracts"]["/CL"])
+        self.assertEqual(health["contract_gap_reason"], "resolution_partial")
+        self.assertIsNotNone(health["contract_retry_at"])
+
+    def test_failure_with_an_expired_known_contract_never_mutates_the_map(self):
+        self.full_map()
+        self.sources.RESOLVED_CONTRACTS["/CL"]["expiry"] = "2025-12-01"
+        self.lane._resolve = self.sources.resolve_futures
+        self.lane.cycle()
+        with patch.object(self.sources.requests, "get", side_effect=RuntimeError("network")):
+            self.now[0] += timedelta(seconds=6 * 3600 + 1)
+            self.lane.cycle()
+        self.assertEqual(entry.PRICE_TICKERS["/CL"], "/CLZ26:XNYM",
+                         "a failure never mutates the map, even past expiry")
+        health = self.lane.health()
+        self.assertEqual(health["contract_resolution"]["state"], "degraded")
+        self.assertIsNotNone(health["contract_retry_at"])
+
+    def test_backoff_grows_then_resets_after_a_successful_resolution(self):
+        self.full_map()
+        self.lane._resolve = self.sources.resolve_futures
+        with patch.object(self.sources.requests, "get", side_effect=RuntimeError("network")):
+            self.lane.cycle()
+            first = self.lane.health()["contract_retry_at"]
+            self.now[0] += timedelta(seconds=61)
+            self.lane.cycle()
+            second = self.lane.health()["contract_retry_at"]
+            self.assertGreater(second, first, "the retry ladder grows")
+        with patch.object(self.sources.requests, "get",
+                          return_value=FakeFuturesResponse(futures_items())):
+            self.now[0] += timedelta(seconds=121)
+            self.lane.cycle()
+            health = self.lane.health()
+            self.assertEqual(health["contract_resolution"]["state"], "ok")
+            self.assertIsNone(health["contract_retry_at"])
+            self.assertIsNone(health["contract_gap_reason"])
+        with patch.object(self.sources.requests, "get", side_effect=RuntimeError("network")):
+            self.now[0] += timedelta(seconds=6 * 3600 + 1)
+            self.lane.cycle()
+            health = self.lane.health()
+            self.assertEqual(health["contract_gap_reason"], "resolution_degraded")
+            self.assertIsNotNone(health["contract_retry_at"],
+                                 "a new lapse starts a fresh deadline")
 
     def test_null_snapshot_does_not_unsubscribe_a_healthy_contract(self):
         entry.PRICE_TICKERS["/GC"] = "/GCZ26:XCEC"

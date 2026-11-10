@@ -76,10 +76,19 @@ prior is dropped rather than resubscribed.
 
 The lane treats a snapshot that only *loses* contracts as a resolution gap: it
 keeps its current subscriptions, records `contract_gap_reason` and
-`contract_retry_at` in health, and retries on the bounded cadence. A replacement
-feed is started before the old one is stopped, so a failed rebuild cannot leave
-the lane with no subscriptions. Health now carries `contract_resolution`
-(state, last error, retry, per-label symbols) alongside `contracts`.
+`contract_retry_at` in health, and retries on the bounded cadence. A preserved
+map that looks unchanged does not clear that deadline — only the resolver
+reporting `ok` does, so a degraded discovery keeps retrying across cycles. A
+snapshot with a genuine change is actionable even while a retry is pending;
+only a failed replacement feed suppresses another attempt. A replacement feed is
+started before the old one is stopped, so a failed rebuild cannot leave the lane
+with no subscriptions. Health now carries `contract_resolution` (state, last
+error, retry, per-label symbols) alongside `contracts`.
+
+The resolution token is refreshed rather than reused: an access token issued at
+startup is long expired six hours later (tastytrade access tokens last 15
+minutes). A renewal persists the new credentials for every later REST attempt
+and for any rebuild; the live feed keeps the streamer token it connected with.
 
 The live November 9 failure this repairs: the 17:54:07Z six-hour reconciliation
 produced a null mapping, the lane rebuilt onto it, and every futures row stayed
@@ -148,15 +157,31 @@ If no qualified quote exists, the stale close is retained rather than replaced.
 Regular-session rows are unchanged, and futures/crypto/FX/daily families keep
 their provider-timed or explicitly dated selection.
 
-Provider evidence for the limit: this DXLink feed sends no extended-hours trade
-prints for US equities (0 of 71 rows advanced past the closing print across
-2.7 hours) and no `bidTime`/`askTime` on Quote events (QQQ's own 16:14 ET
-chain-session provenance records both as null while receipts advance). The feed
-health now counts events by type and counts quotes with/without provider time,
-so a future deployment can state which of the two is missing instead of
-inferring it. Fresh timestamped after-hours equity observations therefore need
-a provider route that supplies extended trade prints or quote timestamps; that
-is an owner decision, not something fixtures can manufacture.
+Provider evidence, and what it does not prove: the lane subscribes Quote, Trade,
+TradeETH and Summary, and requests `bidTime`/`askTime` on Quote and `time` on
+both trade types. In the observed 2.7-hour after-hours window no TradeETH event
+arrived for any of the 71 streaming equity rows, and QQQ's chain-session
+provenance at 16:14 ET records bid/ask provider times as null while receipts
+advance. That is consistent with two documented facts but is not proof of
+entitlement. dxFeed defines TradeETH as the extended-hours last trade and states
+that during extended hours the Trade event updates only day volume and turnover;
+its price stays at the regular close
+(https://docs.dxfeed.com/dxfeed/api/com/dxfeed/event/market/TradeETH.html).
+dxFeed's Quote does carry `bidTime`/`askTime`
+(https://get-prod-web-rt.dxfeed.com/realtime/javadoc/com/dxfeed/event/market/Quote.html).
+tastytrade's DXLink documentation, however, lists Quote, Trade, Summary, Greeks,
+TimeAndSale, Profile and Candle, and notes that which types a feed returns
+depends on the feed and token
+(https://developer.tastytrade.com/docs/concepts/streaming/).
+
+So the honest statement is narrower: this feed and window produced no
+extended-hours trade prints and no observable quote timestamps, and the
+mechanism matches the documented semantics. Whether TradeETH is unavailable on
+this gateway, unattributed to this token, or simply quiet is not established.
+Feed health now reports event counts and the exact field names observed per
+event type, so the deployment answers that instead of inference. If further
+same-feed investigation is wanted, TimeAndSale is the documented stream to test
+before any provider change; no paid provider is recommended on this evidence.
 
 ## Verification
 

@@ -480,6 +480,20 @@ class FeedEventEvidence(unittest.TestCase):
         self.assertEqual(health["quote_time_counts"],
                          {"with_provider_time": 1, "without_provider_time": 1})
 
+    def test_observed_event_fields_are_reported_for_schema_evidence(self):
+        feed = DXLinkFeed("unused", "unused")
+        feed._ingest([
+            {"eventType": "Quote", "eventSymbol": "QQQ", "bidPrice": 100, "askPrice": 101,
+             "bidTime": 1, "askTime": 2},
+            {"eventType": "Quote", "eventSymbol": "QQQ", "bidPrice": 100, "askPrice": 101},
+            {"eventType": "TradeETH", "eventSymbol": "QQQ", "price": 100.5, "time": 3},
+        ])
+        fields = feed.get_health()["event_fields"]
+        self.assertEqual(fields["Quote"],
+                         ["askPrice", "askTime", "bidPrice", "bidTime"])
+        self.assertEqual(fields["TradeETH"], ["price", "time"],
+                         "the first observed TradeETH sample is preserved")
+
 
 if __name__ == "__main__":
     unittest.main()
