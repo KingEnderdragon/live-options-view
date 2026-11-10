@@ -6,9 +6,10 @@
 
 import {
   BOT_USERNAME_RE, MAX_KV_WRITE_ATTEMPTS, STARTING_BALANCE, STRATEGY_ID_RE,
-  botKey, computeBookFromTrades, jsonResponse, readJsonBody, sleep, userKey,
+  computeBookFromTrades, jsonResponse, readJsonBody, sleep,
   withUserRecord,
 } from './common.js';
+import { createStorage } from './storage.js';
 
 export const BOT_INDEX_KEY = 'system/bot-membership-v1.json';
 const MAX_BOT_INDEX_MEMBERS = 500;
@@ -53,24 +54,22 @@ export async function updateBotIndex(env, additions, { ready = false, sleeper = 
   }
   throw new Error('Bot membership update conflicted; retry');
 }
-// Only migration/reconciliation and the explicit staged rollout mode enumerate
-// KV. Never fall back to listing on an ordinary index read failure.
-async function listMigrationKeys(env, prefix) {
-  const names = [];
-  let cursor;
-  for (let page = 0; page < 5; page++) {
-    const result = await env.USERS.list({ prefix, limit: 100, ...(cursor ? { cursor } : {}) });
-    names.push(...result.keys.map(k => k.name));
-    if (names.length > MAX_BOT_INDEX_MEMBERS) throw new Error('Bot migration scan limit exceeded');
-    if (result.list_complete === true) return names;
-    if (!result.cursor || result.cursor === cursor) throw new Error('Incomplete bot migration scan');
-    cursor = result.cursor;
-  }
-  throw new Error('Bot migration scan limit exceeded');
+// Account and marker enumeration now comes from D1 (#208); the legacy KV scan
+// existed only because KV had no other way to list. The bound on the roster
+// size stays: a runaway scan is a signal to stop, not to keep reading.
+async function listAccountNames(env) {
+  const names = await createStorage(env).users.listUsernames();
+  if (names.length > MAX_BOT_INDEX_MEMBERS) throw new Error('Bot migration scan limit exceeded');
+  return names;
+}
+async function listMarkerNames(env) {
+  const names = await createStorage(env).botMarkers.listUsernames();
+  if (names.length > MAX_BOT_INDEX_MEMBERS) throw new Error('Bot migration scan limit exceeded');
+  return names;
 }
 export async function botUsernames(env) {
   if (env.BOT_INDEX_READS === 'legacy') {
-    return (await listMigrationKeys(env, 'bot:')).map(k => k.slice(4));
+    return (await listMarkerNames(env));
   }
   if (env.BOT_INDEX_READS && env.BOT_INDEX_READS !== 'r2') throw new Error('Invalid bot index mode');
   const current = await loadBotIndex(env);
@@ -78,25 +77,14 @@ export async function botUsernames(env) {
   return current.value.members;
 }
 export async function repairLegacyBotMarker(env, username, sleeper = sleep) {
-  const key = botKey(username);
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const raw = await env.USERS.get(key);
-    let marker;
-    try { marker = raw ? JSON.parse(raw) : null; } catch { marker = null; }
-    if (typeof marker?.username === 'string' &&
-        marker.username.toLowerCase() === username.toLowerCase()) return;
-    try {
-      await env.USERS.put(key, JSON.stringify({ username }));
-      return;
-    } catch (error) {
-      // A competing repair or an eventually consistent stale read can still
-      // cause a same-key PUT. Retry only rate limits, outside the one-second
-      // write window, and re-read so a completed competing repair is a no-op.
-      const rateLimited = error?.status === 429 || /\b429\b/.test(String(error?.message));
-      if (!rateLimited || attempt === 2) throw error;
-      await sleeper(1100);
-    }
-  }
+  // Kept for rollout/rollback compatibility: the marker table exists so old
+  // code paths and reconciliation see the same membership. D1 makes the
+  // retry-on-429 loop unnecessary; the parameter stays for call-site
+  // compatibility and is intentionally unused.
+  void sleeper;
+  const store = createStorage(env);
+  if (await store.botMarkers.has(username)) return;
+  await store.botMarkers.put(username, { username });
 }
 export async function syncBotMembership(env, username) {
   // Keep the legacy marker during rollout/rollback. The account already exists;
@@ -111,14 +99,15 @@ export async function handleBotIndexReconcile(request, env) {
   try {
     // Scan account records, not just bot: markers, to repair interrupted legacy
     // registrations. A bounded, fully paginated scan must finish before publish.
-    const keys = await listMigrationKeys(env, 'user:');
+    const keys = await listAccountNames(env);
     const members = [];
-    for (const key of keys) {
-      const raw = await env.USERS.get(key);
-      if (!raw) throw new Error('Migration account unavailable; retry');
-      const record = JSON.parse(raw);
+    const store = createStorage(env);
+    for (const name of keys) {
+      const record = await store.users.get(name);
+      if (!record) throw new Error('Migration account unavailable; retry');
       if (record.is_bot === true) {
-        if (typeof record.username !== 'string' || userKey(record.username) !== key) {
+        if (typeof record.username !== 'string' ||
+            record.username.toLowerCase() !== String(name).toLowerCase()) {
           throw new Error('Migration account identity mismatch');
         }
         members.push(record.username);
@@ -260,10 +249,10 @@ export async function handleBots(request, env) {
     const usernames = await botUsernames(env);
 
     const bots = [];
+    const store = createStorage(env);
     for (const name of usernames) {
-      const raw = await env.USERS.get(`user:${name}`);
-      if (!raw) throw new Error('Indexed bot account unavailable');
-      const record = JSON.parse(raw);
+      const record = await store.users.get(name);
+      if (!record) throw new Error('Indexed bot account unavailable');
       if (!record.is_bot) continue;    // index and record disagree -- trust the record
       const trades = Array.isArray(record.trades) ? record.trades : [];
       bots.push({

@@ -7,8 +7,9 @@
 import {
   BOT_USERNAME_RE, SESSION_TTL_SECONDS, STARTING_BALANCE, STRATEGY_ID_RE,
   checkOrigin, clearedSessionCookieHeader, jsonResponse, parseCookies,
-  readJsonBody, requireSession, sessionCookieHeader, sessionKey, userKey,
+  readJsonBody, requireSession, sessionCookieHeader,
 } from './common.js';
+import { createStorage } from './storage.js';
 import { syncBotMembership } from './bots.js';
 
 const PBKDF2_ITERATIONS = 100_000;
@@ -49,13 +50,10 @@ export function constantTimeEqual(a, b) {
   for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
   return diff === 0;
 }
-async function startSession(request, env, record, status) {
+async function startSession(request, env, record, status, storage = null) {
+  const store = storage ?? createStorage(env);
   const token = crypto.randomUUID();
-  await env.SESSIONS.put(
-    sessionKey(token),
-    JSON.stringify({ username: record.username, createdAt: new Date().toISOString() }),
-    { expirationTtl: SESSION_TTL_SECONDS },
-  );
+  await store.sessions.create(token, record.username, SESSION_TTL_SECONDS);
   return jsonResponse(
     { username: record.username, balance_cash: record.balance_cash, trades: record.trades },
     status,
@@ -112,11 +110,10 @@ export async function handleRegister(request, env) {
     return jsonResponse({ error: `Password must be ${MIN_PASSWORD_LEN}-${MAX_PASSWORD_LEN} characters` }, 400);
   }
 
-  const key = userKey(username);
-  // KV has no conditional-create, so two simultaneous registrations of the
-  // same username can both pass this check and the second put() wins --
-  // accepted given this app's low-stakes, low-concurrency usage.
-  const existing = await env.USERS.get(key);
+  const storage = createStorage(env);
+  // Fast path avoids paying PBKDF2 for an obviously taken username; the
+  // authoritative check is the INSERT below, whose UNIQUE key decides a race.
+  const existing = await storage.users.get(username);
   if (existing) return jsonResponse({ error: 'Username already taken' }, 409);
 
   const salt = randomSaltBase64();
@@ -137,7 +134,11 @@ export async function handleRegister(request, env) {
       ...(paper_financing_rate !== undefined ? { paper_financing_rate } : {}),
     } : {}),
   };
-  await env.USERS.put(key, JSON.stringify(record));
+  // One statement, one winner: two simultaneous registrations cannot both
+  // succeed, which is the guarantee KV could not give.
+  if (await storage.users.insert(username, record) === 'exists') {
+    return jsonResponse({ error: 'Username already taken' }, 409);
+  }
   // Index after the record exists, so the roster can never point at a
   // username that has no account behind it.
   if (isBot) {
@@ -145,7 +146,7 @@ export async function handleRegister(request, env) {
     catch { return jsonResponse({ error: 'Bot membership update failed; login to retry' }, 503); }
   }
 
-  return startSession(request, env, record, 201);
+  return startSession(request, env, record, 201, storage);
 }
 export async function handleLogin(request, env) {
   const originError = checkOrigin(request);
@@ -158,9 +159,9 @@ export async function handleLogin(request, env) {
     return jsonResponse({ error: 'Invalid username or password' }, 401);
   }
 
-  const raw = await env.USERS.get(userKey(username));
-  if (!raw) return jsonResponse({ error: 'Invalid username or password' }, 401);
-  const record = JSON.parse(raw);
+  const storage = createStorage(env);
+  const record = await storage.users.get(username);
+  if (!record) return jsonResponse({ error: 'Invalid username or password' }, 401);
 
   const candidateHash = await derivePasswordHash(password, record.salt, record.iterations);
   if (!constantTimeEqual(candidateHash, record.hash)) {
@@ -172,12 +173,12 @@ export async function handleLogin(request, env) {
     catch { return jsonResponse({ error: 'Bot membership update failed; retry login' }, 503); }
   }
 
-  return startSession(request, env, record, 200);
+  return startSession(request, env, record, 200, storage);
 }
 export async function handleLogout(request, env) {
   const cookies = parseCookies(request);
   const token = cookies[SESSION_COOKIE];
-  if (token) await env.SESSIONS.delete(sessionKey(token));
+  if (token) await createStorage(env).sessions.delete(token);
   return new Response(null, { status: 204, headers: { 'Set-Cookie': clearedSessionCookieHeader(request) } });
 }
 export async function handleMe(request, env) {

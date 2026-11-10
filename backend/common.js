@@ -5,6 +5,8 @@
 // public names so the Worker's 32-export API is unchanged. Moved verbatim
 // from worker.js; only the file changed, not the code.
 
+import { createStorage } from './storage.js';
+
 export const R2_ORIGIN = "https://pub-4d5c916b8cb74ffb8c0abd7dfadb02cf.r2.dev";
 const ALLOWED_ORIGINS = ['https://options.moopertonic.net', 'http://localhost:8787'];
 export const MAX_BODY_BYTES = 16 * 1024; // a trade record is a few hundred bytes; this leaves ample headroom
@@ -80,51 +82,36 @@ export function checkOrigin(request) {
 // break in the chain, including a session that still exists but whose
 // account was since deleted (e.g. liquidated by /api/settle from another
 // device) -- that account is gone, not just logged out.
-export async function requireSession(request, env) {
+//
+// Sessions and accounts come from D1 (#208). The session row stores a hash of
+// the token, so the cookie value never appears at rest; the lookup hashes what
+// the client presented.
+export async function requireSession(request, env, storage = null) {
   const cookies = parseCookies(request);
   const token = cookies[SESSION_COOKIE];
   if (!token) return null;
-  const sessionRaw = await env.SESSIONS.get(sessionKey(token));
-  if (!sessionRaw) return null;
-  const session = JSON.parse(sessionRaw);
-  const userRaw = await env.USERS.get(userKey(session.username));
-  if (!userRaw) return null;
-  return { token, username: session.username, record: JSON.parse(userRaw) };
+  const store = storage ?? createStorage(env);
+  const session = await store.sessions.get(token);
+  if (!session) return null;
+  const record = await store.users.get(session.username);
+  if (!record) return null;
+  return { token, username: record.username ?? session.username, record };
 }
-// Applies `mutate(record)` to a user's KV record and writes the result back.
-// KV has no compare-and-swap, so this is optimistic concurrency: read,
-// mutate, write a bumped `version`, then re-read to check the write actually
-// stuck before trusting it; retries from a fresh read on a version mismatch.
-// Good enough given this app's single-user-at-a-time usage pattern -- not a
-// true CAS, and KV's eventual consistency means the confirming re-read is a
-// best-effort check, not a guarantee.
+// Applies `mutate(record)` to an account record and writes the result back.
+//
+// This used to be KV read-modify-write: read, mutate, put a bumped version,
+// then re-read to see whether the write stuck -- a check its own comment called
+// best effort. D1 gives a real conditional write, so this is now a single
+// UPDATE guarded by the version that was read, with the row count as proof and
+// a bounded retry only when somebody else genuinely won the race.
 //
 // `mutate` returns one of:
 //   { error }             -- reject, no write (e.g. insufficient balance)
 //   { result }             -- no-op (e.g. idempotent replay), no write
 //   { record, result }     -- write `record` (version is added automatically)
-export async function withUserRecord(env, username, mutate) {
-  const key = userKey(username);
-  for (let attempt = 0; attempt < MAX_KV_WRITE_ATTEMPTS; attempt++) {
-    const raw = await env.USERS.get(key);
-    if (!raw) return { error: 'not_found' };
-    const record = JSON.parse(raw);
-    const outcome = mutate(record);
-    if (outcome.error) return outcome;
-    if (!outcome.record) return outcome;
-
-    const nextVersion = record.version + 1;
-    const nextRecord = { ...outcome.record, version: nextVersion };
-    await env.USERS.put(key, JSON.stringify(nextRecord));
-
-    const confirmRaw = await env.USERS.get(key);
-    const confirmed = confirmRaw ? JSON.parse(confirmRaw) : null;
-    if (confirmed && confirmed.version === nextVersion) {
-      return { record: nextRecord, result: outcome.result };
-    }
-    await sleep(10 + Math.floor(Math.random() * 40));
-  }
-  return { error: 'conflict' };
+export async function withUserRecord(env, username, mutate, storage = null) {
+  const store = storage ?? createStorage(env);
+  return store.users.mutate(username, mutate);
 }
 export function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
