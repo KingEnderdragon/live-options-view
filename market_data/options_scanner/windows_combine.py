@@ -536,8 +536,15 @@ def combine_emit(batch_emit_roots: Sequence[Path | str], out_root: Path | str,
                              "conflicting symbols excluded fail-closed, see conflicts.csv; "
                              "full_universe claimed only because the explicit coverage contract "
                              "matches the actual inputs exactly"}
+        # Stable canonical summary bytes (retry fix): generated_at is the
+        # window's exit-session close (its data-as-of time), NOT the
+        # combine wall clock, so re-running the same combine rebuilds
+        # byte-identical summaries and the released
+        # rev_<sha256(summary.json)> genuinely denotes the same content.
+        win_generated = datetime.fromtimestamp(
+            window.sessions[-1].close_ms / 1000, tz=timezone.utc).isoformat()
         outputs.write_window(out_root, window, kept, policy, session_status, sources,
-                             generated_at, scope)
+                             win_generated, scope)
         # Conflict report rows are flattened on the qualified basis (the
         # published ranking basis); the full per-basis evidence lives in
         # combine_report.json.

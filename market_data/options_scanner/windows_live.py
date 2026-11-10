@@ -159,14 +159,17 @@ def run_after_finalize(spool_dir: Path | str, day, universe: Mapping[str, Any], 
     emit root (``<emit_root>/<day>``, or ``<spool>/windows_emit/<day>``
     by default) and records exactly which windows it built in
     ``cycle.json`` there. ``publish_windows`` is then given that
-    explicit list — never a directory scan of an accumulated emit root —
+    explicit list -- never a directory scan of an accumulated emit root --
     so stale windows from earlier cycles are never republished and an
-    unchanged re-run of the same cycle is idempotent: the build is
-    byte-identical for unchanged inputs (the cycle timestamp ``now``
-    is threaded into the build as ``generated_at``), so the publisher
-    returns ``already_published`` with no new revision and no re-upload.
-    A retry at a later wall-clock time republishes only this cycle's
-    windows with fresh revisions, never historical windows.
+    unchanged re-run of the same cycle is idempotent: each window's
+    summary bytes are a function of that window's own inputs only
+    (stable per-window generated_at from its exit-session close,
+    window-scoped scope and rows), so the rebuild is byte-identical
+    for unchanged inputs and the publisher returns
+    ``already_published`` with no new revision and no re-upload. A
+    retry at a later wall-clock time, or a next-day cycle overlapping
+    the same windows, republishes only genuinely changed/added window
+    products; unchanged historical windows stay already_published.
     """
     spool = Path(spool_dir)
     day = date.fromisoformat(day) if isinstance(day, str) else day
@@ -216,6 +219,18 @@ def build_windows(day_dirs: list[Path] | tuple[Path, ...], underlyings: set[str]
     ``bounded_universe_subset`` (replay emits stay forced partial as
     ``bounded_universe_replay``). Returns the build report. Writes
     nothing outside ``emit_root`` and touches no provider or R2.
+
+    Stable product identity: each window's summary bytes are a function
+    of that window's own inputs only (its sessions, source locks,
+    per-basis rows/counts/evidence, state and reasons). generated_at is
+    the window's exit-session close, scope lists only the window's own
+    sessions' selected underlyings, and rows cover only contracts with
+    observations in the window's sessions. The cycle wall clock
+    (``generated_at`` parameter / report ``generated_at``) is cycle
+    metadata and never enters a window summary, so a retry at a later
+    wall-clock time rebuilds byte-identical summaries for unchanged
+    windows and the publisher returns already_published with no fresh
+    revision. A genuinely changed window still gets a new revision.
     """
     dirs = [Path(d) for d in day_dirs]
     if not 1 <= len(dirs) <= MAX_SESSIONS:
@@ -318,22 +333,41 @@ def build_windows(day_dirs: list[Path] | tuple[Path, ...], underlyings: set[str]
                               "contracts_kept": 0, "conflicts": all_conflicts,
                               "conflicting_symbols": 0,
                               "skipped_weeks": skipped, "windows": []}
+    dir_by_day = {d.name: d for d in dirs}
     for win in windows:
-        evaluated = [(under, w.evaluate(win, info, path, days, policy))
-                     for (info, path, under), days in zip(candidates, candidate_days)]
+        days = {s.day for s in win.sessions}
+        # Window-scoped rows: only contracts with in-session observations
+        # in THIS window's own sessions are evaluated for it. A contract
+        # first sampled on an unrelated later day (or rotated out of the
+        # window's days) contributes no row here, so unrelated universe
+        # rotation cannot leak rows into a historical window.
+        evaluated = [(under, w.evaluate(win, info, path, cd, policy))
+                     for (info, path, under), cd in zip(candidates, candidate_days)
+                     if cd & days]
         rows, conflicts, _stats = combine.combine_rows(
             win.window_id, [(under, [row]) for under, row in evaluated])
         for c in conflicts:
             all_conflicts.append({"window_id": win.window_id, "symbol": c["symbol"],
                                   "attributions": c["attributions"]})
         kept_total += len(rows)
-        days = {s.day for s in win.sessions}
         srcs = [x for x in all_sources if x["key"].split("/")[2] in days]
+        # Stable canonical summary bytes (retry fix): the summary is a
+        # function of THIS window's own inputs only, so an unchanged
+        # window rebuilds byte-identically and the released
+        # rev_<sha256(summary.json)> genuinely denotes the same content
+        # (no protocol change: the revision is still the SHA-256 of the
+        # summary bytes). generated_at is the window's exit-session close
+        # -- its data-as-of time -- NOT the cycle wall clock; scope lists
+        # only underlyings selected on the window's own sessions and in
+        # this build's universe; the calendar package version is build
+        # metadata in the report, not a window input.
+        win_generated = datetime.fromtimestamp(
+            win.sessions[-1].close_ms / 1000, tz=timezone.utc).isoformat()
+        win_unders = sorted(selected_underlyings([dir_by_day[d] for d in days]) & unders)
         outputs.write_window(Path(emit_root), win, rows, policy,
-                             {d: status[d] for d in days}, srcs, generated,
+                             {d: status[d] for d in days}, srcs, win_generated,
                              {"mode": "live_archive", "universe_scope": universe_scope,
-                              "underlyings": sorted(unders),
-                              "calendar_package_version": calendar_version,
+                              "underlyings": win_unders,
                               "note": ("built from the complete selected universe on the scanner host; "
                                        "no provider, no R2 read") if full_universe else
                                       ("built from a bounded subset of the selected universe on the scanner host; "
