@@ -1,11 +1,14 @@
 # First real-archive window publication plan — #130 / F2 (bounded, unapproved)
 
-Status: PLAN ONLY. No publication, no budget approval, no activation,
-no live R2 write, no deployment has happened under this plan. Chej owns
-review/release; Owen owns the approval gates. This document is the
-preparation Chej asked for; every step below that touches R2, a flag, or
-a deployment is Chej's release step, not Nova's, and must not be run
-until the gates in "Pre-checks" pass and Chej/Owen approve them.
+Status: PLAN ONLY. No publication, no activation, no live R2 write,
+no deployment has happened under this plan. Chej owns review/release and
+real publication: Chej states tonight's reviewed release/activation is
+already authorized and he owns release and real publication (Chej's
+statement, recorded here as his; not Owen-verified in this chat). This
+document is the preparation Chej asked for; every step below that touches
+R2, a flag, or a deployment is Chej's release step, not Nova's, and must
+not be run until the technical gates in "Pre-checks" pass. The
+budget/retention numbers remain unapproved proposals.
 
 Reviewed source for the code this plan publishes with:
 `c8fcf529698bc57b930495f8c0272b5c1b16b2f4` on branch
@@ -49,7 +52,7 @@ Two corrections to earlier notes:
    producer over the preserved cache (step 2). A full-universe combined
    emit would additionally need a combine-emit step that merges the 14
    batch emits with the same conflict semantics as
-   `combine-full-universe.py`; that step does not exist yet and is NOT
+   `combine-full-universe.py`; that step now exists as `windows_combine.combine_emit` and requires the explicit `--coverage` flag (CombineCoverage: expected underlyings, batch names, source locks, scope) -- a combine without it fails closed. It is NOT
    part of this first publication. The first publication is one batch's
    emit (step 1), which is executable today with existing code.
 2. A replay-built emit is NEVER `final`: `windows_outputs.write_window`
@@ -135,10 +138,19 @@ Acceptance of the builder run (fail closed, all must hold):
   `state_reasons: ["bounded_universe_replay"]`,
   `contracts_evaluated: 5946`.
 
-## 3. Caps (proposed, NOT approved)
+## 3. Caps (measured, implemented)
 
-Exactly the publisher's proposed numbers (`docs/130-window-publisher.md`).
-Nothing here approves them; Chej/Owen own that gate.
+Exactly the publisher's numbers (`docs/130-window-publisher.md`),
+implemented from measured full-universe evidence: real producer,
+14-batch combine, 71,710 contracts/window (2026-11-09) -- summary at
+most 55,492 B, rankings at most 65,497 B (shortlist-capped at 600
+rows), paths.gz at most 2,436,802 B, paths expanded at most
+34,295,267 B. Only the expanded-paths ceiling changed (24 MiB to
+48 MiB, 1.46x the measured maximum); the summary/rankings/compressed
+caps are NOT raised. The old ~8 MB ranked-CSV figures were old-format
+qualified-only CSVs, not new-format rankings members, and do NOT
+justify a rankings raise. There is no cap-approval wait left on these
+numbers; publication and activation remain Chej's release step.
 
 | Bound | Value |
 | --- | --- |
@@ -147,7 +159,7 @@ Nothing here approves them; Chej/Owen own that gate.
 | Reservation per revision | 20 MiB |
 | Attempts per revision | 3 (conditional `budget/<rev>-<attempt>.json` tokens) |
 | Revisions per window | 16 |
-| Per-member bytes | summary ≤ 1 MiB, rankings ≤ 4 MiB, paths ≤ 4 MiB compressed / 24 MiB expanded |
+| Per-member bytes | summary ≤ 1 MiB, rankings ≤ 4 MiB, paths ≤ 4 MiB compressed / 48 MiB expanded (measured max 34,295,267 B) |
 | Inventory | 1,000 keys per kind prefix, 32,000 total; truncated listings and unknown keys fail closed |
 
 The byte cap binds before retention for full-universe windows near the
@@ -227,7 +239,7 @@ print(result["status"], result["state"], result["revision"])
 ```
 
 `r2_backend()` is never used in tests and must not be called before
-pre-checks 1–6 pass and Chej/Owen approve. A validation refusal
+pre-checks 1–6 pass. Release/activation authority is Chej's (he states tonight's reviewed release/activation is already authorized); the pre-checks are technical gates, not an approval wait. A validation refusal
 uploads nothing at all, including no ledger entry; a readback digest
 mismatch fails closed with no pointer written.
 
@@ -281,12 +293,14 @@ service (Chej-owned release, deploy by the workflow digest):
 
 ## 8. What this plan does NOT do
 
-- It does NOT approve publication, the budget/retention numbers, or
-  activation. Those gates belong to Chej/Owen.
+- It does NOT approve publication or activation: those are Chej's release step (Chej states tonight's reviewed release/activation is already authorized and he owns release and real publication; Chej's statement, not Owen-verified in this chat), gated by the technical pre-checks, not by an approval wait. The budget/retention/cap numbers are implemented from measured evidence (see section 3); they are not an approval wait.
 - It does NOT publish a full-universe window: the preserved combined
   CSVs cannot be published as a window (no paths, qualified basis
-  only). The full-universe first publication needs the combine-emit
-  step named in section 0, reviewed separately.
+  only). The combine-emit step has since been RUN for measurement
+  (14-batch combine, 5 windows, 71,710 contracts each, in the
+  measurement scratch dir) to size the caps; a full-universe first
+  publication still needs its own reviewed release step, run with the
+  required `--coverage` flag.
 - It does NOT claim the mixed-flat pin survives a flat-only read.
   See "Availability limitation" in `docs/130-window-publisher.md`
   and `docs/131-window-consumer.md`: the pointer check is a refusal
@@ -295,11 +309,7 @@ service (Chej-owned release, deploy by the workflow digest):
   not what it reads; a window with no `latest.json`, or any reader
   that reads flat keys without the pointer, can be served or can
   misread a mixed revision.
-- It does NOT bypass formal review. The claim that Owen authorized a
-  formal-review bypass and all seven activations arrived signed by
-  Chej and is relayed, not Owen-verified; the PR #202 one-off bypass
-  is explicitly not a general waiver. This plan is preparation for
-  review, not a substitute for it.
+- It does NOT claim Owen authorized a formal-review bypass: no Owen-verified bypass is recorded in this chat, and the PR #202 one-off bypass is explicitly not a general waiver. Chej states tonight's reviewed release/activation is already authorized and he owns release and real publication (Chej's statement, recorded here as his). This plan remains preparation; Chej executes the release.
 
 ## Release-path return sheet
 

@@ -222,5 +222,117 @@ class ParityBridge(unittest.TestCase):
             check_node_ok(run_node_parity(manifest_path), "all-kinds parity")
 
 
+# Real full-universe windows: the 14-batch combine (71,710 contracts per
+# window) measured 2026-11-09 in the MEASURE_FULL_UNIVERSE scratch dir
+# (combined-a/b/c). Env-gated: skip unless that dir exists.
+FULL_UNIVERSE_WINDOWS = [
+    ("overnight", "overnight-2026-10-05_2026-10-06", "combined-a"),
+    ("sessions_2", "sessions2-2026-10-05_2026-10-06", "combined-a"),
+    ("overnight", "overnight-2026-10-06_2026-10-07", "combined-b"),
+    ("sessions_2", "sessions2-2026-10-06_2026-10-07", "combined-b"),
+    ("sessions_3", "sessions3-2026-10-05_2026-10-07", "combined-c"),
+]
+OLD_EXPANDED_LIMIT = 24 * 1024 * 1024
+
+
+def _full_universe_manifest_rows(window_dir: Path) -> dict:
+    """Producer truth for one full-universe window dir (lean: streams paths
+    for the rank-1 rows only, never materializes all 71,710 path rows)."""
+    summary = json.loads((window_dir / "summary.json").read_text(encoding="utf-8"))
+    with open(window_dir / "rankings.csv", encoding="utf-8", newline="") as f:
+        ranked = list(csv.DictReader(f))
+    rows = {b: [{k: r[k] for k in ROW_FIELDS} for r in ranked if r["basis"] == b]
+            for b in BASES}
+    wanted = {rows[b][0]["symbol"] for b in BASES if rows[b]}
+    detail = {b: None for b in BASES}
+    with gzip.open(window_dir / "paths.csv.gz", "rt", encoding="utf-8", newline="") as f:
+        for r in csv.DictReader(f):
+            if r["symbol"] in wanted:
+                for b in BASES:
+                    if rows[b] and rows[b][0]["symbol"] == r["symbol"]:
+                        detail[b] = {"symbol": r["symbol"],
+                                     **{fld: r[f"{b}_{fld}"] for fld in DETAIL_FIELDS}}
+                wanted.discard(r["symbol"])
+                if not wanted:
+                    break
+    return {"state": summary["state"], "state_reasons": summary["state_reasons"],
+            "counts": summary["counts"], "rows": rows, "detail": detail}
+
+
+class FullUniverseCapsTests(unittest.TestCase):
+    """Repair 1: measured full-universe caps, real producer-built emit."""
+
+    def setUp(self):
+        scratch = os.environ.get("MEASURE_FULL_UNIVERSE")
+        if not scratch:
+            self.skipTest("MEASURE_FULL_UNIVERSE not set (real 14-batch combine)")
+        self.scratch = Path(scratch)
+        missing = [d for _, _, d in FULL_UNIVERSE_WINDOWS
+                   if not (self.scratch / d).is_dir()]
+        if missing:
+            self.skipTest(f"combined emit dirs missing in MEASURE_FULL_UNIVERSE: {missing}")
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = Path(self.tmp.name) / "store"
+        self.backend = pub.LocalFilesystemBackend(self.store)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _window_dir(self, kind, window_id, sub):
+        return (self.scratch / sub / "oa203" / "windows" / "oa203-windows-v1"
+                / kind / window_id)
+
+    def test_full_universe_windows_publish_under_new_caps(self):
+        # Every combined window publishes through the real publisher
+        # under the new 48 MiB expanded bound, member bytes unchanged.
+        for kind, window_id, sub in FULL_UNIVERSE_WINDOWS:
+            window_dir = self._window_dir(kind, window_id, sub)
+            summary = json.loads((window_dir / "summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(summary["contracts_evaluated"], 71710,
+                             f"{kind}/{window_id}")
+            result = pub.publish_window(self.scratch / sub, kind, window_id,
+                                        self.backend, now=NOW)
+            self.assertEqual(result["status"], "published", f"{kind}/{window_id}")
+            prefix = f"oa203/windows/oa203-windows-v1/{kind}/{window_id}"
+            for name in pub.WINDOW_MEMBERS:
+                self.assertEqual((self.store / prefix / name).read_bytes(),
+                                 (window_dir / name).read_bytes(),
+                                 f"{kind}/{window_id}/{name}")
+
+    def test_old_24mib_expanded_bound_refuses_real_full_universe_paths(self):
+        # The old bound is demonstrated insufficient on the real combined
+        # members; the new 48 MiB bound admits them.
+        self.assertEqual(pub.MAX_PATHS_EXPANDED_BYTES, 48 * 1024 * 1024)
+        for kind, window_id, sub in FULL_UNIVERSE_WINDOWS:
+            data = (self._window_dir(kind, window_id, sub) / "paths.csv.gz").read_bytes()
+            with self.assertRaises(ValueError):
+                pub._decompress_bounded(data, OLD_EXPANDED_LIMIT)
+            text = pub._decompress_bounded(data, pub.MAX_PATHS_EXPANDED_BYTES)
+            self.assertGreater(len(text.encode("utf-8")), OLD_EXPANDED_LIMIT)
+
+    def test_full_universe_consumer_parity(self):
+        # The real consumer serves the real full-universe windows: all
+        # three bases' rows plus rank-1 pinned detail, exactly the
+        # producer's rows. Under the old 24 MiB expanded ceiling the
+        # detail calls would fail closed (excessive_response); the 48 MiB
+        # ceiling admits them inside the 64 MiB query budget.
+        manifest = {"version": 1, "variants": []}
+        for kind, window_id, sub in FULL_UNIVERSE_WINDOWS:
+            window_dir = self._window_dir(kind, window_id, sub)
+            result = pub.publish_window(self.scratch / sub, kind, window_id,
+                                        self.backend, now=NOW)
+            self.assertEqual(result["status"], "published", f"{kind}/{window_id}")
+            entry = {"kind": kind, "window_id": window_id, "root": str(self.store),
+                     **_full_universe_manifest_rows(window_dir)}
+            manifest["variants"].append(entry)
+        for v in manifest["variants"]:
+            for basis in BASES:
+                self.assertTrue(v["rows"][basis], f"{v['kind']} {basis} has no rows")
+                self.assertIsNotNone(v["detail"][basis], f"{v['kind']} {basis} has no detail")
+        manifest_path = Path(self.tmp.name) / "parity-manifest-full.json"
+        manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        check_node_ok(run_node_parity(manifest_path), "full-universe parity")
+
+
 if __name__ == "__main__":
     unittest.main()

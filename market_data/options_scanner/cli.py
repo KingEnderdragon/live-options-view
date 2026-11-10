@@ -28,6 +28,9 @@ from .runtime import ET, Config, on_stop
 from .session import build_universe_for, finalize, run_day
 from .sweep import run_sweep, select_universe
 from .tradier import Tradier, load_token
+from .windows_combine import combine_coverage_from_dict, combine_emit
+from .windows_live import build_windows, prune_windows_emit, publish_windows
+from .windows_publish import LocalFilesystemBackend
 
 
 # --------------------------------------------------------------------------
@@ -61,6 +64,25 @@ def main(argv: list[str] | None = None) -> int:
     rd.add_argument("--dir", type=Path, action="append", required=True)
     rd.add_argument("--top", type=int, default=100)
     rd.add_argument("--all", action="store_true", help="use all ranks, not only clean rows")
+    wb = sub.add_parser("windows-build", help="build #130 windows from local finalized day archives (no provider, no R2)")
+    wb.add_argument("--dir", type=Path, action="append", required=True, help="one finalized day directory per session")
+    wb.add_argument("--underlyings", nargs="+", required=True, help="underlyings (at most 50; with --full-universe the cap is 500 per day and the union over the window may exceed 500)")
+    wb.add_argument("--emit-root", type=Path, required=True)
+    wb.add_argument("--top", type=int, default=15)
+    wb.add_argument("--full-universe", action="store_true", help="load the complete selected universe (at most 500 underlyings per day; the union over the window may exceed 500 as the per-day set rotates); the set must cover every selected underlying of every day, or the build fails closed")
+    wc = sub.add_parser("windows-combine", help="combine per-batch window emits into one full-universe emit (local only, no provider, no R2)")
+    wc.add_argument("--emit-root", type=Path, action="append", required=True, help="one batch emit root per batch (distinct roots, same window set)")
+    wc.add_argument("--out", type=Path, required=True, help="combined emit root")
+    wc.add_argument("--coverage", type=Path, required=True, help="JSON coverage contract: expected_underlyings, expected_batches, expected_sources [[key, sha256], ...], scope full_universe|bounded_subset (required: no combine without an explicit contract)")
+    wp = sub.add_parser("windows-publish", help="publish a local windows emit root to a local backend (no R2)")
+    wp.add_argument("--emit-root", type=Path, required=True)
+    wp.add_argument("--out", type=Path, required=True, help="local backend root directory")
+    wpe = sub.add_parser("windows-prune-emit", help="prune old per-cycle window emit roots (derived output only; dry-run by default; local backend only)")
+    wpe.add_argument("--emit-root", type=Path, required=True, help="emit root holding per-cycle <YYYY-MM-DD>/ dirs")
+    wpe.add_argument("--backend-root", type=Path, required=True, help="local backend root directory (published pointers are verified here)")
+    wpe.add_argument("--keep-cycles", type=int, default=0, help="newest cycles to keep as a recency preference even when over budget (default 0: the byte budget alone decides; a hard floor cannot fit the headroom)")
+    wpe.add_argument("--max-emit-mb", type=int, default=192, help="emit budget in MiB (default 192: sized so pruning to it leaves room for the next 32-window build)")
+    wpe.add_argument("--confirm", action="store_true", help="actually delete (without this, dry-run: list only)")
     args = parser.parse_args(argv)
     cfg = Config.from_env()
 
@@ -139,6 +161,36 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "readout":
         print(readout(args.dir, args.top, clean_only=not args.all))
+        return 0
+    if args.command == "windows-build":
+        # Local build only. No provider, no R2, no schedule.
+        report = build_windows(args.dir, {u.strip() for u in args.underlyings},
+                               args.emit_root, top=args.top, full_universe=args.full_universe)
+        print(json.dumps(report, indent=2, default=str))
+        return 0
+    if args.command == "windows-combine":
+        # Local combine only. No provider, no R2, no schedule.
+        coverage = combine_coverage_from_dict(
+            json.loads(args.coverage.read_text(encoding="utf-8")))
+        report = combine_emit(args.emit_root, args.out, coverage=coverage)
+        print(json.dumps(report, indent=2, default=str))
+        return 0
+    if args.command == "windows-publish":
+        # Local backend only. R2 publication is a release step (Chej) via
+        # windows_publish.r2_backend(); this command never constructs it.
+        results = publish_windows(args.emit_root, LocalFilesystemBackend(args.out))
+        print(json.dumps(results, indent=2, default=str))
+        return 0
+    if args.command == "windows-prune-emit":
+        # Local backend only, dry-run by default. Deletes ONLY verified
+        # per-cycle emit dirs under --emit-root; never day archives,
+        # never source history, never live/published data. For R2
+        # verification Chej calls prune_windows_emit with r2_backend().
+        report = prune_windows_emit(args.emit_root, LocalFilesystemBackend(args.backend_root),
+                                    keep_cycles=args.keep_cycles,
+                                    max_emit_bytes=args.max_emit_mb * 1024 * 1024,
+                                    dry_run=not args.confirm)
+        print(json.dumps(report, indent=2, default=str))
         return 0
     return 2
 

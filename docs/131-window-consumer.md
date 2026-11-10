@@ -73,21 +73,29 @@ deployment, no publication, no activation. Chej owns review/release.
    asserted. The paths row is located by a line scan without materializing
    the whole file, but the read still counts against the existing
    artifact/expanded/query byte limits: a full-universe `paths.csv.gz`
-   larger than the 24 MiB expanded ceiling fails closed with
-   `excessive_response` instead of returning a partial path.
+   larger than the 48 MiB expanded ceiling fails closed with
+   `excessive_response` instead of returning a partial path. Measured
+   full-universe paths expand to at most 34,295,267 B (32.7 MiB), so
+   the 48 MiB ceiling admits them with 1.46x headroom; the worst-case
+   detail query totals ~50.5 MiB (48 expanded + ~2.4 compressed +
+   ~0.1 summary/rankings/pointer), inside the 64 MiB query budget.
+   The 10,000-row `csv_rows` limit does not block pinned detail at
+   71,710 rows: `windowPathsRow` scans lines and parses only the header
+   plus the one matching row, never the whole file.
 8. **No window index.** There is no index of windows, so
    `discover_sources` advertises the fixed contract with availability
    `explicit_window_required` and never claims live data. The
    publisher's per-window `latest.json` is read by the consumer, but
    only to pin the window it was already asked for to one revision
    (point 10); it is never listed or followed to another window.
-9. **Publisher exists offline only.** `market_data/options_scanner/windows_publish.py`
+9. **Publisher exists offline, plus one live R2 trial.** `market_data/options_scanner/windows_publish.py`
    validates and publishes windows to a pluggable backend (fake and
    local-filesystem backends tested; see `docs/130-window-publisher.md`),
-   but live R2 publication is a separate, unapproved step
-   (`windows_outputs.py` is local-only). This consumer reads whatever a
-   future approved publisher writes; it does not publish, set any env
-   flag, start a collector, or deploy.
+   and the first live window (overnight-2026-10-05_2026-10-06,
+   rev_c1abd845...) was published to R2 on 2026-11-10 by Chej's conditional
+   trial. Further live publication remains Chej's release step. This
+   consumer reads whatever the publisher writes; it does not publish, set
+   any env flag, start a collector, or deploy.
 10. **A read is pinned to one revision by the pointer.** The flat keys
     are written one at a time, so a concurrent republish can leave a
     stable mixed revision on disk (new summary, old rankings, or vice
@@ -170,9 +178,10 @@ producer contract exists).
    `docs/130-window-publisher.md`); it writes
    `oa203/windows/<policy>/<kind>/<window_id>/{summary.json,rankings.csv,paths.csv.gz}`
    to a pluggable backend, with retention/budget policy and a
-   per-window `latest.json` pointer (no index). Live R2 publication is
-   still unapproved -- Chej/Owen approval plus the release gate in
-   `docs/130-window-publisher.md` is required before any live write.
+   per-window `latest.json` pointer (no index). The first live window was
+   published to R2 on 2026-11-10 (Chej's conditional trial); further live
+   publication remains Chej's release step, gated by the release checks in
+   `docs/130-window-publisher.md`.
 2. **Live R2**: verify the published keys are readable at the public origin
    and that a real complete week exists (the inspected Oct 5–9 week is not
    complete: Oct 8 is `partial`).
