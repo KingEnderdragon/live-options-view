@@ -156,6 +156,24 @@ revoked session cannot be resurrected because an earlier pass remembered it.
 
 ## Bounded, resumable phases
 
+Workers CPU is the other per-invocation budget: 10 ms on the Free plan. The
+first production verify attempt died with Cloudflare error 1102 against 38
+accounts, 1,484 sessions and 32 markers. The cause was the source snapshot: every
+entry was kept in the checkpoint, so the persisted row grew past 200 KB and each
+bounded call paid to parse and rewrite the whole array several times. The
+snapshot is now a constant-size SHA-256 hash chain over the scan — one link per
+key/value pair, 64 hex characters total — and the checkpoint stays under a
+kilobyte. Measured on that exact shape locally: the checkpoint went from 206,491
+bytes to 654 bytes, with the same 79 bounded calls completing the pass.
+
+The chain commits to the same information the entry list did (kind, identity and
+raw value or "absent"). Scan order is deterministic — KV lists lexicographically
+within a prefix and the phases walk users, then sessions, then markers — so
+verify, stabilize and postcheck compute the same chain for the same source. A
+source that only changed order would fail closed rather than be accepted. For
+accounts, byte-identical serialized records skip both canonical-JSON digests,
+because equality of bytes already proves equality of content.
+
 KV's Free plan also bills `list` requests separately — 1,000 per day, a much
 smaller allowance than the read/write budgets — and the copy walks a page one
 record at a time. A naive adapter therefore issues one `list` per record, which a
@@ -313,6 +331,11 @@ Each item is checkable without exposing an account, a record or a secret.
    is a separate decision.
 
 ## Evidence
+
+`tests/verify_bounded.test.mjs` (4 checks): a production-shaped source keeps the
+verify checkpoint under 4 KB, the digest is deterministic across a restart,
+verify and stabilize agree through finalize, and a late legacy write still fails
+finalize after the chain change.
 
 `tests/kv_page_cache.test.mjs` (5 checks): one list for repeated reads of the
 same page, prefix and token isolation, a new adapter seeing a fresh listing while
