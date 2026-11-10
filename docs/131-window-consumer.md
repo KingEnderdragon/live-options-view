@@ -104,6 +104,32 @@ deployment, no publication, no activation. Chej owns review/release.
     `window_rankings` call now makes 5 artifact reads (summary,
     rankings, both re-reads, pointer).
 
+## Availability limitation — the pointer is a refusal, not an immutability guarantee
+
+The pointer check in point 10 refuses a mixed revision; it does not
+make flat reads immutable, and it does not protect any read that does
+not use it. The consumer only reads flat keys (`summary.json`,
+`rankings.csv`, `paths.csv.gz`) plus `latest.json`; the immutable
+`rev_<sha>/` members are not what it reads, so the pin does NOT
+survive a flat-only read:
+
+- Pointer present and digests match: the read is pinned to that one
+  revision; the consumer serves it.
+- Pointer present and flat summary/rankings digests (or detail paths
+  digest) mismatch the pointer's member digests: the consumer refuses
+  with `source_changed` and serves nothing. That is an AVAILABILITY
+  loss — a correct window becomes unreadable until the flat tree is
+  repaired or republished — not a silent wrong answer, and not a
+  guarantee that the data is intact.
+- No pointer: the consumer serves the flat keys with a
+  `not revision-pinned` warning. A mixed flat revision can then be
+  served without any refusal; the publisher always writes a pointer,
+  so a missing one means a legacy or hand-placed window.
+- Any reader that reads the flat keys without `latest.json` gets no
+  protection at all. Do not claim the immutable pin survives a
+  flat-only read: the `rev_*/` copy is an audit artifact, not a read
+  path.
+
 ## Producer-publisher-consumer parity (proven, offline)
 
 `tests/test_oa203_windows_parity.py` builds every supported kind with

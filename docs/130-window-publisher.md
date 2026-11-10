@@ -46,9 +46,12 @@ and `budget/` are never queried by the consumer. The pointer is what
 pins a consumer read to one revision: after its before/after digest
 check the consumer verifies the flat summary/rankings digests against
 the pointer's member digests and refuses a mismatch, and detail pins
-the paths bytes to the pointer the same way. The revision copy is
-immutable: a corrected republication writes a new `rev_<sha>/` and
-moves the pointer, so the old revision stays pinned and auditable.
+the paths bytes to the pointer the same way. Revision members are never overwritten in place: a corrected
+republication writes a new `rev_<sha>/` and moves the pointer, so the
+old revision's bytes stay on disk and auditable. That is NOT a read
+pin: the consumer never reads `rev_*/`, so the old revision staying
+on disk does not by itself protect any read (see "Availability
+limitation" below).
 The flat keys are what the consumer reads, so they are overwritten on
 republication. The revision itself is `rev_<sha256(summary.json)>`:
 two emits with identical summaries but different rankings/paths
@@ -157,6 +160,36 @@ uploads nothing at all, including no ledger entry.
 - **Retention deletion race: benign.** Two publishers deleting the same
   expired objects is idempotent, and deletion is re-verified by
   re-listing.
+
+## Availability limitation — the pointer is a refusal, not an immutability guarantee
+
+The pointer check refuses a mixed revision; it does not make flat
+reads immutable, and it does not protect any read that does not use it:
+
+- Pointer present and digests match: the read is pinned to that one
+  revision; the consumer serves it.
+- Pointer present and flat summary/rankings (or detail paths) digests
+  mismatch the pointer's member digests: the consumer refuses with
+  `source_changed` and serves nothing. This is an AVAILABILITY loss
+  (a correct window becomes unreadable until the flat tree is
+  repaired or republished), not a silent wrong answer — and not a
+  guarantee that the data is intact.
+- No pointer (`latest.json` absent): the consumer serves the flat
+  keys with a `not revision-pinned` warning. A mixed flat revision
+  (new summary, old rankings, or vice versa) can then be served
+  without any refusal. The publisher always writes a pointer, so a
+  missing one means a legacy or hand-placed window.
+- Any reader that reads the flat keys without the pointer — any
+  client, script, or future consumer version that skips the pointer
+  check — gets NO protection at all: the immutable `rev_*/` members
+  are not what it reads, and the pin does NOT survive a flat-only
+  read. Do not claim otherwise anywhere: the `rev_<sha>/` copy is an
+  audit artifact, not a read path.
+
+In short: immutability lives in `rev_*/` (never overwritten), the pin
+lives in `latest.json` + the consumer's digest check, and the two meet
+only when the consumer actually reads the pointer. A mixed flat tree
+is refused, never repaired, by the consumer.
 
 ## Retention / budget proposal (not a live approval)
 
