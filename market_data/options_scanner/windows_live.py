@@ -7,7 +7,8 @@ This is the producer-to-publisher link for live window products:
   sweeps/manifest.jsonl, sweeps/sweep_NNNN.jsonl.gz). It never touches a
   provider and never reads R2.
 * ``build_windows`` writes a local emit root (``oa203/windows/`` tree).
-  ``publish_windows`` publishes that emit root to an injected backend.
+  ``publish_windows`` publishes an emit root — or, with ``window_ids``,
+  exactly the windows one cycle built — to an injected backend.
   The CLI's ``windows-publish`` only offers the local-filesystem backend;
   R2 publication is a release step (Chej) via ``windows_publish.r2_backend``.
 * The production hook is ``run_after_finalize`` (called from
@@ -153,6 +154,19 @@ def run_after_finalize(spool_dir: Path | str, day, universe: Mapping[str, Any], 
     this on ``windows_live_enabled()``; this function itself performs
     the build + publish and must never be called from an unflagged path.
     Returns the build report plus per-window publish results.
+
+    Per-cycle output: one cycle (one finalized day) writes to its own
+    emit root (``<emit_root>/<day>``, or ``<spool>/windows_emit/<day>``
+    by default) and records exactly which windows it built in
+    ``cycle.json`` there. ``publish_windows`` is then given that
+    explicit list — never a directory scan of an accumulated emit root —
+    so stale windows from earlier cycles are never republished and an
+    unchanged re-run of the same cycle is idempotent: the build is
+    byte-identical for unchanged inputs (the cycle timestamp ``now``
+    is threaded into the build as ``generated_at``), so the publisher
+    returns ``already_published`` with no new revision and no re-upload.
+    A retry at a later wall-clock time republishes only this cycle's
+    windows with fresh revisions, never historical windows.
     """
     spool = Path(spool_dir)
     day = date.fromisoformat(day) if isinstance(day, str) else day
@@ -163,16 +177,26 @@ def run_after_finalize(spool_dir: Path | str, day, universe: Mapping[str, Any], 
     unders = selected_underlyings(dirs)
     if today_selected and not today_selected <= unders:
         raise ValueError(f"finalized day {day.isoformat()}: universe disagrees with its own archive")
-    emit = Path(emit_root) if emit_root is not None else spool / "windows_emit"
-    report = build_windows(dirs, unders, emit, full_universe=True)
-    results = publish_windows(emit, backend or pub.r2_backend(), now=now)
-    return {"enabled": True, "day": day.isoformat(), "days": [d.name for d in dirs],
+    cycle = day.isoformat()
+    emit = (Path(emit_root) / cycle) if emit_root is not None else spool / "windows_emit" / cycle
+    report = build_windows(dirs, unders, emit, full_universe=True, generated_at=now)
+    window_ids = sorted({(w["kind"], w["window_id"]) for w in report["windows"]})
+    manifest = {"cycle": cycle, "day": day.isoformat(), "days": [d.name for d in dirs],
+                "underlyings": sorted(unders), "universe_scope": report["universe_scope"],
+                "generated_at": report["generated_at"],
+                "windows": [[kind, window_id] for kind, window_id in window_ids]}
+    (emit / "cycle.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    results = publish_windows(emit, backend or pub.r2_backend(),
+                              window_ids={(kind, window_id) for kind, window_id in window_ids},
+                              now=now)
+    return {"enabled": True, "cycle": cycle, "day": day.isoformat(), "days": [d.name for d in dirs],
             "underlyings": sorted(unders), "emit_root": str(emit),
             "build": report, "publish": results}
 
 
 def build_windows(day_dirs: list[Path] | tuple[Path, ...], underlyings: set[str],
-                  emit_root: Path, *, top: int = 15, full_universe: bool = False) -> dict[str, Any]:
+                  emit_root: Path, *, top: int = 15, full_universe: bool = False,
+                  generated_at: datetime | str | None = None) -> dict[str, Any]:
     """Evaluate every supported window kind over local finalized days.
 
     ``day_dirs`` are finalized day-archive directories (sorted by date,
@@ -273,11 +297,17 @@ def build_windows(day_dirs: list[Path] | tuple[Path, ...], underlyings: set[str]
     status = {m["day"]: {"final": m["final"], "assessment": m["assessment"],
                          "assessment_reasons": m.get("assessment_reasons", []),
                          "sweeps": m["sweeps"]} for m in sessions_meta}
-    generated = datetime.now(timezone.utc).isoformat()
+    if generated_at is None:
+        generated = datetime.now(timezone.utc).isoformat()
+    elif isinstance(generated_at, datetime):
+        generated = generated_at.isoformat()
+    else:
+        generated = str(generated_at)
     universe_scope = "full_universe" if full_universe else "bounded_subset"
     all_conflicts: list[dict] = []
     kept_total = 0
     report: dict[str, Any] = {"builder": "windows_live", "mode": "live_archive",
+                              "generated_at": generated,
                               "universe_scope": universe_scope,
                               "calendar": {"name": "NYSE", "package": "pandas_market_calendars",
                                            "version": calendar_version},
@@ -329,27 +359,42 @@ def build_windows(day_dirs: list[Path] | tuple[Path, ...], underlyings: set[str]
 
 def publish_windows(emit_root: Path, backend: pub.StorageBackend, *,
                     budget: pub.WindowBudget | None = None,
+                    window_ids: set[tuple[str, str]] | None = None,
                     now: datetime | None = None) -> list[dict[str, Any]]:
-    """Publish every window in a local emit root to ``backend``.
+    """Publish windows in a local emit root to ``backend``.
 
-    Walks ``emit_root/oa203/windows/<policy>/<kind>/<window_id>/`` in
-    sorted order and calls ``windows_publish.publish_window`` for each
-    (validation, budget reservation, readback, pointer last). Returns the
-    per-window pointer payloads. The caller chooses the backend: tests
-    and the CLI use ``LocalFilesystemBackend``; R2 is a release step
-    (Chej) via ``windows_publish.r2_backend``. Raises (and publishes
-    nothing further) on the first invalid, over-budget or failed window.
+    With ``window_ids`` given, publishes ONLY those ``(kind, window_id)``
+    pairs — the explicit list of windows one cycle built — and refuses
+    if a listed window is missing from the emit root (checked before
+    anything is published). Without it, every window in the emit root
+    is published in sorted order (the manual CLI behaviour). Either way
+    each window goes through ``windows_publish.publish_window``
+    (validation, budget reservation, readback, pointer last). Returns
+    the per-window pointer payloads. The caller chooses the backend:
+    tests and the CLI use ``LocalFilesystemBackend``; R2 is a release
+    step (Chej) via ``windows_publish.r2_backend``. Raises (and
+    publishes nothing further) on the first invalid, over-budget or
+    failed window.
     """
     root = Path(emit_root) / "oa203" / "windows" / w.WINDOW_POLICY_VERSION
     if not root.is_dir():
         raise ValueError(f"no windows emit root at {root}")
-    results: list[dict[str, Any]] = []
+    planned: list[tuple[str, str]] = []
     for kind_dir in sorted(p for p in root.iterdir() if p.is_dir()):
         for win_dir in sorted(p for p in kind_dir.iterdir() if p.is_dir()):
-            results.append(pub.publish_window(Path(emit_root), kind_dir.name, win_dir.name,
-                                              backend, budget=budget, now=now))
-    if not results:
+            if window_ids is not None and (kind_dir.name, win_dir.name) not in window_ids:
+                continue
+            planned.append((kind_dir.name, win_dir.name))
+    if window_ids is not None:
+        missing = sorted(window_ids - set(planned))
+        if missing:
+            raise ValueError(f"emit root is missing cycle windows: {missing}")
+    if not planned:
         raise ValueError(f"no windows found under {root}")
+    results: list[dict[str, Any]] = []
+    for kind, window_id in planned:
+        results.append(pub.publish_window(Path(emit_root), kind, window_id,
+                                          backend, budget=budget, now=now))
     return results
 
 

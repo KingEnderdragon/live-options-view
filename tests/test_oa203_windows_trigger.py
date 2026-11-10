@@ -6,6 +6,7 @@ build + publish runs for the finalized day. Nothing here touches a
 provider, R2, or a collector.
 """
 
+import json
 import os
 import sys
 import tempfile
@@ -152,6 +153,7 @@ class RunAfterFinalizeTests(unittest.TestCase):
             backend=pub.LocalFilesystemBackend(backend_root),
             emit_root=self.root / "emit", now=NOW)
         self.assertTrue(report["enabled"])
+        self.assertEqual(report["cycle"], "2026-10-09")
         self.assertEqual(report["day"], "2026-10-09")
         self.assertEqual(report["days"], DAYS)
         self.assertEqual(report["build"]["universe_scope"], "full_universe")
@@ -159,19 +161,104 @@ class RunAfterFinalizeTests(unittest.TestCase):
         self.assertTrue(all(r["status"] == "published" for r in report["publish"]))
         self.assertEqual(len(report["publish"]), 14)
         first_revisions = {r["window_id"]: r["revision"] for r in report["publish"]}
-        # A second run rebuilds (generated_at changes), so it publishes a
-        # NEW revision rather than silently overwriting: the publisher
-        # never mutates a revision in place. Publish-layer idempotency
-        # (same emit root twice -> already_published) is proven by the
-        # live tests; the hook level is re-runnable, not a no-op.
+        # The cycle manifest records exactly which windows this cycle built.
+        manifest = json.loads((Path(report["emit_root"]) / "cycle.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["cycle"], "2026-10-09")
+        self.assertEqual(manifest["days"], DAYS)
+        self.assertEqual(len(manifest["windows"]), 14)
+        # Re-running the same cycle with unchanged inputs is idempotent:
+        # the rebuild is byte-identical (same cycle timestamp), so the
+        # publisher returns already_published with the same revisions —
+        # no fresh revisions, no re-upload.
         again = live.run_after_finalize(
             self.spool, "2026-10-09", self.universe,
             backend=pub.LocalFilesystemBackend(backend_root),
             emit_root=self.root / "emit", now=NOW)
-        self.assertTrue(all(r["status"] == "published" for r in again["publish"]))
+        self.assertTrue(all(r["status"] == "already_published" for r in again["publish"]))
         self.assertEqual(len(again["publish"]), 14)
-        self.assertTrue(all(r["revision"] != first_revisions[r["window_id"]]
-                            for r in again["publish"]))
+        self.assertEqual({r["window_id"]: r["revision"] for r in again["publish"]},
+                         first_revisions)
+
+    def test_changed_window_new_revision_only_for_that_window(self):
+        import shutil
+        import test_oa203_windows_live as live_tests
+        backend_root = self.root / "backend"
+        report = live.run_after_finalize(
+            self.spool, "2026-10-09", self.universe,
+            backend=pub.LocalFilesystemBackend(backend_root),
+            emit_root=self.root / "emit", now=NOW)
+        first = {r["window_id"]: r["revision"] for r in report["publish"]}
+        # Change only day 2026-10-09's AAA mid (0.55 -> 0.90) and rebuild that day.
+        mids = live_tests.MIDS["AAA261009C00100000"]
+        old = mids[4]
+        mids[4] = 0.90
+        try:
+            shutil.rmtree(self.spool / "2026-10-09")
+            _write_day(self.spool, "2026-10-09")
+        finally:
+            mids[4] = old
+        again = live.run_after_finalize(
+            self.spool, "2026-10-09", self.universe,
+            backend=pub.LocalFilesystemBackend(backend_root),
+            emit_root=self.root / "emit", now=NOW)
+        by_id = {r["window_id"]: r for r in again["publish"]}
+        self.assertEqual(len(by_id), 14)
+        # Windows whose sessions include 2026-10-09: 3 overnight/sessions
+        # kinds touching the day + the 3 weekly kinds spanning the week.
+        emit = Path(again["emit_root"]) / "oa203" / "windows" / "oa203-windows-v1"
+        touching = set()
+        for kind_dir in emit.iterdir():
+            for win_dir in kind_dir.iterdir():
+                s = json.loads((win_dir / "summary.json").read_text(encoding="utf-8"))
+                if "2026-10-09" in {x["day"] for x in s["sessions"]}:
+                    touching.add(s["window_id"])
+        self.assertEqual(len(touching), 6)
+        for window_id, r in by_id.items():
+            if window_id in touching:
+                self.assertEqual(r["status"], "published", window_id)
+                self.assertNotEqual(r["revision"], first[window_id], window_id)
+            else:
+                self.assertEqual(r["status"], "already_published", window_id)
+                self.assertEqual(r["revision"], first[window_id], window_id)
+
+    def test_stale_window_planted_in_cycle_root_not_published(self):
+        import shutil
+        backend_root = self.root / "backend"
+        report = live.run_after_finalize(
+            self.spool, "2026-10-09", self.universe,
+            backend=pub.LocalFilesystemBackend(backend_root),
+            emit_root=self.root / "emit", now=NOW)
+        self.assertEqual(len(report["publish"]), 14)
+        # Plant a valid-looking stale window inside the cycle root: a copy
+        # of a real window re-labelled to an older window id.
+        cycle_emit = Path(report["emit_root"]) / "oa203" / "windows" / "oa203-windows-v1"
+        src = cycle_emit / "overnight" / "overnight-2026-10-05_2026-10-06"
+        dst = cycle_emit / "overnight" / "overnight-2026-10-01_2026-10-02"
+        shutil.copytree(src, dst)
+        summary_path = dst / "summary.json"
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        summary["window_id"] = "overnight-2026-10-01_2026-10-02"
+        summary_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+        again = live.run_after_finalize(
+            self.spool, "2026-10-09", self.universe,
+            backend=pub.LocalFilesystemBackend(backend_root),
+            emit_root=self.root / "emit", now=NOW)
+        self.assertEqual(len(again["publish"]), 14)
+        self.assertNotIn("overnight-2026-10-01_2026-10-02",
+                         {r["window_id"] for r in again["publish"]})
+        self.assertFalse((backend_root / "oa203" / "windows" / "oa203-windows-v1"
+                          / "overnight" / "overnight-2026-10-01_2026-10-02").exists())
+
+    def test_publish_windows_explicit_list_refuses_missing(self):
+        emit = self.root / "emit-list"
+        live.build_windows([self.spool / d for d in DAYS], {"AAA", "BBB", "CCC"}, emit)
+        backend = pub.LocalFilesystemBackend(self.root / "backend-list")
+        with self.assertRaises(ValueError):
+            live.publish_windows(emit, backend, window_ids={
+                ("overnight", "overnight-2026-10-05_2026-10-06"),
+                ("overnight", "overnight-2099-01-01_2099-01-02")}, now=NOW)
+        # Nothing was published: the missing-window check runs before any upload.
+        self.assertFalse((self.root / "backend-list").exists())
 
     def test_finalized_day_dirs_includes_partial_day(self):
         import shutil
