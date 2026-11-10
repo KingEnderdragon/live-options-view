@@ -188,6 +188,15 @@ disabling the check -- the one thing a typo must not do is silently remove
 monitoring. A failed probe never stops trading: it is classified and logged,
 and per-account registration errors remain authoritative.
 
+The monitor reports only through ordinary structured logging. It must never
+write to the supervisor's heartbeat pipe: that channel carries the three
+lifecycle events (`cycle_started`, `cycle_completed`, `cycle_failed`), and its
+consumer fails closed on anything else — which is exactly how a `key_health`
+diagnostic once became a restart loop. `report_cycle` now refuses
+non-protocol names and logs `heartbeat_event_rejected` instead, and
+`crassus/scripts/verify_heartbeat_protocol.py` exercises the real pipe path
+from a runner cycle through `Progress.accept`.
+
 To verify a deployment, run the same code path by hand:
 
 ```bash

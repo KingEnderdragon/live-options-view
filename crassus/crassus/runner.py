@@ -382,14 +382,16 @@ class Runner:
         # configured interval, on a monotonic clock, inside the cycle that is
         # already running. A failed probe is a diagnostic, never a reason to
         # stop trading -- per-account registration errors remain authoritative.
+        #
+        # The monitor reports through ordinary structured logging
+        # (`event()`/`event(log, "key_health_ok"|...)`). It must never write to
+        # the supervisor pipe: `Progress.accept` accepts only cycle_started,
+        # cycle_completed and cycle_failed and fails closed on anything else,
+        # so a diagnostic there becomes a supervisor restart. That happened in
+        # production once; `report_cycle` now also refuses non-protocol names.
         if getattr(self, "key_health", None) is not None:
             try:
-                report = self.key_health.maybe_check()
-                if report is not None:
-                    report_cycle("key_health", **fields, state=report["state"],
-                                 consecutive_failures=report["consecutive_failures"],
-                                 observed_interval_s=report["observed_interval_s"],
-                                 last_lateness_s=report["last_lateness_s"])
+                self.key_health.maybe_check()
             except Exception as exc:  # never let a diagnostic break a cycle
                 log.warning("key health check failed to run: %s", type(exc).__name__)
         processed = 0
