@@ -434,7 +434,8 @@ class RunnerWiringTests(unittest.TestCase):
     def tearDown(self):
         self._clock.now_et = self._original_now_et
 
-    def _runner(self, directory: Path, *, params=None):
+    def _runner(self, directory: Path, *, params=None, trades=None, outcome="filled",
+               pending=None):
         from crassus.audit import DecisionLedger, Outcome
         from crassus.runner import Runner
 
@@ -444,7 +445,7 @@ class RunnerWiringTests(unittest.TestCase):
             strategy_id="reddit_sentiment_qqq", params=params or {},
         )
         state = AccountState(username="crassus_luigi", balance_cash=10000.0,
-                             trades=[long_trade()])
+                             trades=list(trades) if trades is not None else [long_trade()])
         runner.accounts = [account]
         runner.dry_run = False
         runner.ledger = DecisionLedger(directory)
@@ -459,15 +460,17 @@ class RunnerWiringTests(unittest.TestCase):
         runner.sessions = {"Luigi": SimpleNamespace(me=lambda: state,
                                                    sync_metadata=lambda **kw: None)}
         submitted = []
+        outcome_class = getattr(Outcome, outcome.upper())
 
         class _Executor:
             def pending_intent(self):
-                return None
+                return pending
 
             def submit(self, **kwargs):
                 submitted.append(kwargs)
-                return SimpleNamespace(outcome_class=Outcome.FILLED,
-                                       execution_request_id="req-1", http_status=200,
+                return SimpleNamespace(outcome_class=outcome_class,
+                                       execution_request_id=f"req-{len(submitted)}",
+                                       http_status=500 if outcome_class == Outcome.REJECTED else 200,
                                        server_response={}, latency_ms=12,
                                        state_after=state, note=None)
 
@@ -475,7 +478,7 @@ class RunnerWiringTests(unittest.TestCase):
                 return None
 
         runner.executors = {"Luigi": _Executor()}
-        runner._recover_pending = lambda acct: False
+        runner._recover_pending = lambda acct: pending is not None
         return runner, account, submitted
 
     def test_exit_becomes_a_sell_attributed_to_the_exit_policy(self):
@@ -498,6 +501,67 @@ class RunnerWiringTests(unittest.TestCase):
         # The cooldown was recorded before submission.
         self.assertGreater(
             runner.exit_state.cooldown_remaining_s("crassus_luigi", SYMBOL, 15.0), 0
+        )
+
+    def test_rejected_exit_is_recorded_and_retried_on_the_next_cycle(self):
+        directory = _tmpdir()
+        runner, account, submitted = self._runner(directory, outcome="rejected")
+        snapshot = MarketSnapshot.from_payload(
+            url="test://snapshot",
+            payload={"timestamp": "2024-01-02T17:00:00+00:00",
+                     "snapshot_time": "2024-01-02T17:00:00+00:00",
+                     "expiration": "2024-01-02", "underlying_price": 400.0, "rows": []},
+            raw=b"{}",
+        )
+        runner._run_account(account, snapshot, "open")
+        self.assertEqual(len(submitted), 1)
+        ledger = sorted(directory.glob("decisions-*.jsonl"))[-1].read_text().strip().splitlines()
+        self.assertEqual(json.loads(ledger[-1])["outcome_class"], "rejected")
+
+        # The position is still held and still below its stop: the next cycle
+        # must propose the exit again rather than treat the rejection as done.
+        runner._run_account(account, snapshot, "open")
+        self.assertEqual(len(submitted), 2)
+        self.assertNotEqual(submitted[1]["decision_id"], submitted[0]["decision_id"])
+
+    def test_settled_position_produces_no_second_exit(self):
+        # Long then sold: the book is flat, so a settled position cannot be
+        # exited twice.
+        directory = _tmpdir()
+        settled = [
+            long_trade(),
+            {"sym": SYMBOL, "side": "sell", "qty": 1, "price": 0.55,
+             "ts": "2024-01-02T11:00:00Z"},
+        ]
+        runner, account, submitted = self._runner(directory, trades=settled)
+        snapshot = MarketSnapshot.from_payload(
+            url="test://snapshot",
+            payload={"timestamp": "2024-01-02T17:00:00+00:00",
+                     "snapshot_time": "2024-01-02T17:00:00+00:00",
+                     "expiration": "2024-01-02", "underlying_price": 400.0, "rows": []},
+            raw=b"{}",
+        )
+        runner._run_account(account, snapshot, "open")
+        self.assertEqual(submitted, [])
+
+    def test_pending_exit_intent_is_reconciled_before_any_new_exit(self):
+        directory = _tmpdir()
+        runner, account, submitted = self._runner(
+            directory, pending={"execution_request_id": "req-0", "decision_id": "d-0"}
+        )
+        snapshot = MarketSnapshot.from_payload(
+            url="test://snapshot",
+            payload={"timestamp": "2024-01-02T17:00:00+00:00",
+                     "snapshot_time": "2024-01-02T17:00:00+00:00",
+                     "expiration": "2024-01-02", "underlying_price": 400.0, "rows": []},
+            raw=b"{}",
+        )
+        runner._run_account(account, snapshot, "open")
+        # Recovery handled the in-flight exit; no second exit was proposed and
+        # no cooldown entry was written for a trade that has not been re-sent.
+        self.assertEqual(submitted, [])
+        self.assertEqual(
+            runner.exit_state.cooldown_remaining_s("crassus_luigi", SYMBOL, 15.0), 0.0
         )
 
     def test_invalid_exit_config_records_an_error_instead_of_trading(self):
