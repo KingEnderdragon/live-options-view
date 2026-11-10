@@ -722,6 +722,31 @@ class LaneContractRecovery(unittest.TestCase):
         self.assertIsNotNone(health["contract_retry_at"])
         self.assertEqual(health["contracts"]["/GC"], "/GCZ26:XCEC")
 
+    def test_failed_resolution_with_a_preserved_mapping_retries_soon(self):
+        self.sources.RESOLVED_CONTRACTS["/GC"] = {
+            "symbol": "/GCZ26:XCEC", "root": "GC", "expiry": "2026-12-29",
+            "exchange": "XCEC", "selection": "provider_active_month"}
+        entry.PRICE_TICKERS["/GC"] = "/GCZ26:XCEC"
+        self.lane._resolve = self.sources.resolve_futures
+        attempts = []
+
+        def failing_get(*args, **kwargs):
+            attempts.append(1)
+            raise RuntimeError("network")
+
+        with patch.object(self.sources.requests, "get", side_effect=failing_get):
+            self.lane.cycle()
+            health = self.lane.health()
+            self.assertEqual(health["contract_gap_reason"], "resolution_degraded")
+            self.assertIsNotNone(health["contract_retry_at"])
+            self.assertEqual(health["contracts"]["/GC"], "/GCZ26:XCEC")
+            before = len(attempts)
+            self.lane.cycle()
+            self.assertEqual(len(attempts), before, "not due before the bounded retry")
+            self.now[0] += timedelta(seconds=61)
+            self.lane.cycle()
+            self.assertGreater(len(attempts), before, "a preserved mapping still retries")
+
     def test_recovered_mapping_rebuilds_after_the_bounded_retry(self):
         entry.PRICE_TICKERS["/GC"] = "/GCZ26:XCEC"
         self.lane.cycle()

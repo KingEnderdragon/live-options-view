@@ -271,6 +271,7 @@ class PriceLane:
             # Contract resolution is best-effort; unresolved futures stay
             # explicitly unavailable rather than subscribing to a guess.
             log.warning(f"price lane futures resolution unavailable: {type(exc).__name__}")
+        self._record_resolution_outcome(now)
         symbols = self._price_symbols()
         feed = self._feed_factory(auth["streamer_url"], auth["streamer_token"])
         feed.set_subscriptions([], symbols)  # Option symbols are never part of this lane.
@@ -304,6 +305,22 @@ class PriceLane:
             return (self._auth_payload or {}).get("access_token")
         self._access_token_at = now
         return auth["access_token"]
+
+    def _record_resolution_outcome(self, now: datetime) -> None:
+        """Bounded retry when discovery is degraded, even if the map survived."""
+        status = resolution_status()
+        if status["state"] == "ok":
+            self._contract_retry_at = None
+            self._contract_gap_since = None
+            self._contract_gap_reason = None
+            self._contract_gaps = 0
+            return
+        if status["state"] not in ("degraded", "partial"):
+            return
+        if self._contract_retry_at is None or now >= self._contract_retry_at:
+            self._contract_retry_at = now + timedelta(seconds=self._contract_retry_delay())
+        self._contract_gap_since = self._contract_gap_since or now
+        self._contract_gap_reason = f"resolution_{status['state']}"
 
     def _contract_retry_delay(self) -> float:
         """Bounded retry after an incomplete resolution (not the 6h cadence)."""
@@ -342,6 +359,7 @@ class PriceLane:
                 log.warning(f"price lane contract refresh failed: {type(exc).__name__}")
             self._contracts_checked_at = now
             self._contracts_et_date = now_et.date()
+            self._record_resolution_outcome(now)
         snapshot = futures_snapshot()
         previous = dict(self._contracts or {})
         if snapshot == previous:
