@@ -106,6 +106,22 @@ jobs:
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22'
+      - name: Set up Python 3.11
+        # Mirrors Collector CI (.github/workflows/collector-ci.yml) exactly:
+        # setup-python@v5, Python 3.11, then the shared producer
+        # requirements. The one addition is pytest, pinned to the
+        # MSI-verified 9.1.1: pytest appears nowhere else in the repo and
+        # deployment/python/requirements.txt has no pytest, yet the step
+        # below invokes `python3 -m pytest`. Without this step that
+        # invocation fails on a fresh ubuntu-latest runner (no pytest).
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install bounded Python dependencies
+        working-directory: source
+        run: |
+          python3 -m pip install -r deployment/python/requirements.txt
+          python3 -m pip install pytest==9.1.1
       - name: Check approved Renaissance source
         working-directory: source
         run: |
