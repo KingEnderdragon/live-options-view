@@ -27,13 +27,14 @@ function userRecord(username, version, balance, extra = {}) {
   };
 }
 
-function harness({ drain = '0' } = {}) {
+function harness({ drain = '0', stable = '0' } = {}) {
   const d1 = makeStorage();
   const kv = new FakeKV();
   const env = {
     DB: d1, USERS: kv, SESSIONS: kv, MIGRATION_TOKEN: TOKEN,
     // Tests compress the drain window; production defaults to 75s.
     CUTOVER_DRAIN_SECONDS: drain,
+    CUTOVER_STABLE_SECONDS: stable,
   };
   const call = async (phase, extra = {}) => {
     const response = await handleMigration(new Request('https://worker.test/api/admin/migrate', {
@@ -549,4 +550,79 @@ test('reverse honours max_records across the whole invocation', async () => {
   for (let i = 0; i < 9; i++) {
     assert.equal(JSON.parse(await kv.get(`user:bot_${i}`)).version, 5);
   }
+});
+
+test('REVIEW: a late legacy write after verify cannot ride a stable snapshot', async () => {
+  const { d1, kv, call } = harness();
+  await kv.put('user:alpha', JSON.stringify(userRecord('alpha', 1, 10)));
+
+  await call('fence', { action: 'arm' });
+  await drain(call, 'users');
+  await drain(call, 'sessions');
+  await drain(call, 'bot_markers');
+  await drain(call, 'reconcile');
+  await drain(call, 'verify');            // parity proven against alpha v1
+
+  // The write the fence did not stop: accepted before arm, visible now.
+  await kv.put('user:alpha', JSON.stringify(userRecord('alpha', 2, 11)));
+
+  // Stabilization is satisfied: both scans see the same new source.
+  const stable = await drain(call, 'stabilize');
+  assert.equal(stable.body.stable, true);
+
+  const finalized = await call('finalize');
+  assert.equal(finalized.status, 409, 'D1 is still v1; this must not finalize');
+  assert.match(finalized.body.error, /different source snapshot|parity/);
+
+  // Repair path: copy the newer record, reconcile, verify, stabilize, finalize.
+  for (const phase of ['users', 'reconcile', 'verify', 'stabilize']) {
+    await call(phase, { restart: true });
+    await drain(call, phase);
+  }
+  const repaired = await call('finalize');
+  assert.equal(repaired.status, 200);
+  const stored = JSON.parse(
+    d1.raw('SELECT record FROM users WHERE username = ?', 'alpha')[0].record,
+  );
+  assert.equal(stored.balance_cash, 11);
+  assert.equal(stored.version, 2);
+});
+
+test('postcheck detects a legacy write that only became visible after finalize', async () => {
+  const { kv, call } = harness();
+  await kv.put('user:alpha', JSON.stringify(userRecord('alpha', 1, 10)));
+
+  assert.equal((await call('postcheck')).status, 200);
+  assert.equal((await call('postcheck')).body.error, 'not_finalized');
+
+  await call('fence', { action: 'arm' });
+  await drain(call, 'users');
+  await drain(call, 'sessions');
+  await drain(call, 'bot_markers');
+  await drain(call, 'reconcile');
+  await drain(call, 'verify');
+  await drain(call, 'stabilize');
+  assert.equal((await call('finalize')).status, 200);
+
+  const clean = await call('postcheck');
+  assert.equal(clean.body.matches, true);
+  assert.equal(clean.body.error, null);
+
+  // A write whose visibility arrived after finalize.
+  await kv.put('user:alpha', JSON.stringify(userRecord('alpha', 9, 900)));
+  const dirty = await call('postcheck', { restart: true });
+  assert.equal(dirty.body.matches, false);
+  assert.equal(dirty.body.error, 'legacy_source_changed_after_finalize');
+});
+
+test('stabilize is not satisfied by two immediate identical scans when a quiet window is required', async () => {
+  const { kv, call } = harness({ stable: '120' });
+  await kv.put('user:alpha', JSON.stringify(userRecord('alpha', 1, 10)));
+  await call('fence', { action: 'arm' });
+
+  const first = await call('stabilize');
+  assert.equal(first.body.stable, false);
+  const second = await call('stabilize');
+  assert.equal(second.body.stable, false, 'identical but the quiet window has not elapsed');
+  assert.ok(second.body.stable_wait_ms > 0);
 });

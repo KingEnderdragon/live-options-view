@@ -47,12 +47,16 @@ const CHECKPOINT_EVERY = 5;              // records between checkpoint writes
 // instantaneous. The drain window is the bound we actually rely on: no parity
 // claim is made until it has elapsed and two full scans agree.
 const DEFAULT_DRAIN_SECONDS = 75;
+// KV documents propagation as "60 seconds or more" -- there is no guaranteed
+// upper bound. So two back-to-back identical scans are not proof that in-flight
+// writes drained; the digest must also stay identical across this quiet window.
+const DEFAULT_STABLE_SECONDS = 120;
 const MAX_STABILIZE_PASSES = 8;
 const STABILIZE_ENTRY_CAP = 5000;
 
 const PHASES = new Set([
   'fence', 'status', 'users', 'sessions', 'bot_markers', 'reconcile', 'verify',
-  'stabilize', 'finalize', 'reverse_preflight', 'reverse_users',
+  'stabilize', 'postcheck', 'finalize', 'reverse_preflight', 'reverse_users',
 ]);
 
 function json(value, status = 200) {
@@ -207,8 +211,11 @@ function freshState() {
     conflicts: 0, d1_ahead: 0, missing: 0, mismatch: 0, extra: 0,
     done: false, stage: null, cleared: false,
     epoch: null, data_epoch: null,
+    // source snapshot shared by verify, stabilize and postcheck
+    source_entries: [], source_digest: null,
     // stabilize-only
-    entries: [], pass: 0, prev_digest: null, digest: null, stable: false,
+    pass: 0, prev_digest: null, digest: null, stable: false,
+    stable_since: null, stable_at: null, stable_wait_ms: 0,
     count_users: 0, count_sessions: 0, count_markers: 0, error: null, too_early_ms: 0,
   };
 }
@@ -238,6 +245,12 @@ function publicState(state) {
     epoch: state.epoch ?? null,
     data_epoch: state.data_epoch ?? null,
     stable: state.stable === true,
+    stable_since: state.stable_since ?? null,
+    stable_at: state.stable_at ?? null,
+    stable_wait_ms: state.stable_wait_ms ?? 0,
+    source_digest: state.source_digest ?? null,
+    matches: state.matches ?? null,
+    checked_at: state.checked_at ?? null,
     pass: state.pass ?? 0,
     too_early_ms: state.too_early_ms ?? 0,
     error: state.error ?? null,
@@ -440,6 +453,33 @@ async function reconcile(session, legacy, state, budget) {
  * Parity verification, one record per loop iteration, stage-advancing. Steps:
  * users compared KV -> D1 by digest, D1 -> KV for extras, sessions, markers.
  */
+/** One entry in the source snapshot: a hash of the key and a hash of the value.
+ *
+ * The same scheme is used by verify, stabilize and postcheck, which is what lets
+ * finalize compare them. Neither the key nor the record is stored, and a key that
+ * is absent from a scan still contributes a deterministic "absent" entry.
+ */
+async function sourceEntry(kind, identifier, raw) {
+  const keyDigest = await sha256Hex(`crassus-source:${kind}:${identifier}`);
+  const valueDigest = await sha256Hex(raw === null || raw === undefined ? 'absent' : raw);
+  return `${keyDigest}:${valueDigest}`;
+}
+
+function sourceCapExceeded(state) {
+  if (state.source_entries.length < STABILIZE_ENTRY_CAP) return false;
+  state.error = 'source_snapshot_cap_exceeded';
+  state.done = true;
+  return true;
+}
+
+async function finishSourceDigest(state) {
+  state.source_digest = await sha256Hex(state.source_entries.slice().sort().join('\n'));
+  return state.source_digest;
+}
+
+/** Parity pass. Every KV key it checks also contributes to the source snapshot,
+ * so a later stable scan can prove it saw the same source this parity was proven
+ * against. */
 async function verify(session, legacy, state, budget) {
   let processed = 0;
   state.stage = state.stage ?? 'users_kv';
@@ -448,13 +488,13 @@ async function verify(session, legacy, state, budget) {
 
     if (state.stage === 'users_kv' || state.stage === 'users_db') {
       const useKv = state.stage === 'users_kv';
-      let keys; let nextToken = null; let dbRows = null;
+      let keys; let nextToken = null;
       if (useKv) {
         const page = await kvPage(legacy.listUsers, 'user:', state.cursor);
         keys = page.keys;
         nextToken = page.nextToken;
       } else {
-        dbRows = await session.all(
+        const dbRows = await session.all(
           'SELECT username FROM users WHERE username > ? ORDER BY username LIMIT ?',
           state.cursor ?? '', Math.min(50, budget.records - processed),
         );
@@ -473,11 +513,13 @@ async function verify(session, legacy, state, budget) {
       processed += 1;
 
       if (useKv) {
+        const username = String(key.slice('user:'.length)).toLowerCase();
         const raw = await legacy.getRaw(key);
+        state.source_entries.push(await sourceEntry('users', username, raw));
+        if (sourceCapExceeded(state)) break;
         if (!raw) { state.missing += 1; continue; }
         let record;
         try { record = JSON.parse(raw); } catch { state.mismatch += 1; continue; }
-        const username = String(key.slice('user:'.length)).toLowerCase();
         const row = await session.first('SELECT record, version FROM users WHERE username = ?', username);
         if (!row) { state.missing += 1; continue; }
         const d1Version = Number(row.version) || 0;
@@ -488,7 +530,6 @@ async function verify(session, legacy, state, budget) {
       } else {
         const username = String(key.slice('user:'.length));
         state.cursor = username;
-        // The DB stage advances by username, not by page offset.
         state.offset = 0;
         const raw = await legacy.getUser(username);
         if (!raw) state.extra += 1;
@@ -509,6 +550,8 @@ async function verify(session, legacy, state, budget) {
       processed += 1;
       const token = key.slice('sess:'.length);
       const raw = await legacy.getSessionRaw(token);
+      state.source_entries.push(await sourceEntry('sessions', token, raw));
+      if (sourceCapExceeded(state)) break;
       if (!raw) { state.missing += 1; continue; }
       let payload;
       try { payload = JSON.parse(raw); } catch { state.mismatch += 1; continue; }
@@ -526,7 +569,11 @@ async function verify(session, legacy, state, budget) {
 
     const page = await kvPage(legacy.listBotMarkers, 'bot:', state.cursor);
     if (state.offset >= page.keys.length) {
-      if (!page.nextToken) { state.done = true; break; }
+      if (!page.nextToken) {
+        state.done = true;
+        await finishSourceDigest(state);
+        break;
+      }
       state.cursor = page.nextToken; state.offset = 0;
       continue;
     }
@@ -535,6 +582,9 @@ async function verify(session, legacy, state, budget) {
     state.scanned += 1;
     processed += 1;
     const username = key.slice('bot:'.length).toLowerCase();
+    const raw = await legacy.getRaw(key);
+    state.source_entries.push(await sourceEntry('markers', username, raw));
+    if (sourceCapExceeded(state)) break;
     const row = await session.first('SELECT 1 AS present FROM bot_markers WHERE username = ?', username);
     if (!row) state.missing += 1;
   }
@@ -542,15 +592,15 @@ async function verify(session, legacy, state, budget) {
 }
 
 /**
- * Bounded stabilization: prove the legacy store has stopped changing before any
- * parity claim. The fence only stops writes at request entry, and KV may take up
- * to ~60s to show a write globally, so equality of two full scans taken after
- * the drain window is the evidence -- not the fence alone.
- *
- * Entries are hashed key digests, never account names or tokens, and the
- * checkpoint is capped; exceeding the cap is a hard stop, not a silent truncation.
+ * Bounded stabilization. The fence stops writes at request entry, but KV has no
+ * guaranteed propagation bound ("60 seconds or more"), so neither the drain
+ * timeout nor two cached scans prove that nothing is still in flight. What this
+ * phase does is make the claim falsifiable: it records a digest of the whole
+ * legacy source, requires a later scan to produce the same digest, and requires
+ * that the digest stay identical across a quiet window (`CUTOVER_STABLE_SECONDS`).
+ * A write that becomes visible later changes the digest and forces a re-run.
  */
-async function stabilize(session, legacy, state, budget, drainSeconds) {
+async function stabilize(session, legacy, state, budget, drainSeconds, stableSeconds) {
   const fence = await readCheckpoint(session, 'fence');
   if (!fence?.armed) return 0;
   state.epoch = fence.epoch ?? null;
@@ -567,15 +617,9 @@ async function stabilize(session, legacy, state, budget, drainSeconds) {
     if (session.queries >= budget.queries - 4) break;
     const stage = state.stage ?? 'users';
 
-    const collect = async (key, recordText) => {
-      if (state.entries.length >= STABILIZE_ENTRY_CAP) {
-        state.error = 'stabilize_entry_cap_exceeded';
-        state.done = true;
-        return;
-      }
-      const keyDigest = await sha256Hex(key);
-      const valueDigest = recordText === null ? 'absent' : await sha256Hex(recordText);
-      state.entries.push(`${keyDigest}:${valueDigest}`);
+    const collect = async (kind, identifier, raw) => {
+      state.source_entries.push(await sourceEntry(kind, identifier, raw));
+      return sourceCapExceeded(state);
     };
 
     if (stage === 'users' || stage === 'markers') {
@@ -592,9 +636,10 @@ async function stabilize(session, legacy, state, budget, drainSeconds) {
       state.offset += 1;
       state.scanned += 1;
       processed += 1;
-      const raw = stage === 'users' ? await legacy.getRaw(key) : await legacy.getRaw(key);
+      const raw = await legacy.getRaw(key);
       if (stage === 'users') state.count_users += 1; else state.count_markers += 1;
-      await collect(`${stage}:${key.slice(prefix.length).toLowerCase()}`, raw ?? null);
+      if (await collect(stage === 'users' ? 'users' : 'markers',
+        key.slice(prefix.length).toLowerCase(), raw)) break;
       if (processed % CHECKPOINT_EVERY === 0) await writeCheckpoint(session, 'phase:stabilize', state);
       continue;
     }
@@ -611,49 +656,128 @@ async function stabilize(session, legacy, state, budget, drainSeconds) {
       state.offset += 1;
       state.scanned += 1;
       processed += 1;
-      const raw = await legacy.getSessionRaw(key.slice('sess:'.length));
+      const token = key.slice('sess:'.length);
+      const raw = await legacy.getSessionRaw(token);
       state.count_sessions += 1;
-      await collect(`sessions:${key.slice('sess:'.length)}`, raw ?? null);
+      if (await collect('sessions', token, raw)) break;
       if (processed % CHECKPOINT_EVERY === 0) await writeCheckpoint(session, 'phase:stabilize', state);
       continue;
     }
 
     // finish: compare this pass with the previous one.
     state.pass = (state.pass ?? 0) + 1;
-    const digest = await sha256Hex(state.entries.slice().sort().join('\n'));
+    const digest = await finishSourceDigest(state);
     state.digest = digest;
-    if (state.prev_digest && state.prev_digest === digest) {
-      state.stable = true;
-      state.done = true;
-      state.data_epoch = await readDataEpoch(session);
-    } else if (!state.prev_digest) {
+
+    if (!state.prev_digest) {
       state.prev_digest = digest;
-      state.entries = [];
+      state.stable_since = new Date().toISOString();
+      state.source_entries = [];
       state.stage = 'users';
-      state.cursor = null;
-      state.offset = 0;
-      state.count_users = 0;
-      state.count_sessions = 0;
-      state.count_markers = 0;
+      state.cursor = null; state.offset = 0;
+      state.count_users = 0; state.count_sessions = 0; state.count_markers = 0;
       state.scanned = 0;
       state.done = false;
-    } else {
-      // Two scans disagree: data moved during the window (late write or KV
-      // propagation). Start a fresh pass; after MAX passes, abort loudly.
-      state.prev_digest = digest;
-      state.entries = [];
-      state.stage = 'users';
-      state.cursor = null;
-      state.offset = 0;
-      state.count_users = 0;
-      state.count_sessions = 0;
-      state.count_markers = 0;
-      state.scanned = 0;
-      if (state.pass >= MAX_STABILIZE_PASSES) {
-        state.done = true;
-        state.error = 'stabilization_did_not_converge';
-      }
+      break;
     }
+
+    if (state.prev_digest === digest) {
+      const since = Date.parse(state.stable_since ?? '') || Date.now();
+      const elapsed = Date.now() - since;
+      const required = stableSeconds * 1000;
+      if (elapsed >= required) {
+        state.stable = true;
+        state.done = true;
+        state.stable_at = new Date().toISOString();
+        state.stable_wait_ms = 0;
+        state.data_epoch = await readDataEpoch(session);
+      } else {
+        // Same digest, but the quiet window has not elapsed: not proof yet.
+        state.stable_wait_ms = required - elapsed;
+        state.done = false;
+        state.source_entries = [];
+        state.stage = 'users';
+        state.cursor = null; state.offset = 0;
+        state.count_users = 0; state.count_sessions = 0; state.count_markers = 0;
+        state.scanned = 0;
+      }
+      break;
+    }
+
+    // The source changed between scans: restart the window from this digest.
+    state.prev_digest = digest;
+    state.stable_since = new Date().toISOString();
+    state.stable = false;
+    state.source_entries = [];
+    state.stage = 'users';
+    state.cursor = null; state.offset = 0;
+    state.count_users = 0; state.count_sessions = 0; state.count_markers = 0;
+    state.scanned = 0;
+    if (state.pass >= MAX_STABILIZE_PASSES) {
+      state.done = true;
+      state.error = 'stabilization_did_not_converge';
+    }
+    break;
+  }
+  return processed;
+}
+
+/** Post-switch check: does the legacy source still hash to the finalized snapshot?
+ * A write that only became visible after finalize shows up here, and the repair
+ * is another copy+reconcile+verify cycle, not silence. */
+async function postcheck(session, legacy, state, budget) {
+  const cutover = await readCheckpoint(session, 'cutover');
+  if (!cutover?.finalized_at) {
+    state.error = 'not_finalized';
+    state.done = true;
+    return 0;
+  }
+  let processed = 0;
+  while (processed < budget.records) {
+    if (session.queries >= budget.queries - 4) break;
+    const stage = state.stage ?? 'users';
+    if (stage === 'users' || stage === 'markers') {
+      const listFn = stage === 'users' ? legacy.listUsers : legacy.listBotMarkers;
+      const prefix = stage === 'users' ? 'user:' : 'bot:';
+      const page = await kvPage(listFn, prefix, state.cursor);
+      if (state.offset >= page.keys.length) {
+        if (page.nextToken) { state.cursor = page.nextToken; state.offset = 0; continue; }
+        state.stage = stage === 'users' ? 'sessions' : 'finish';
+        state.cursor = null; state.offset = 0;
+        continue;
+      }
+      const key = page.keys[state.offset];
+      state.offset += 1;
+      state.scanned += 1;
+      processed += 1;
+      const raw = await legacy.getRaw(key);
+      state.source_entries.push(await sourceEntry(
+        stage === 'users' ? 'users' : 'markers', key.slice(prefix.length).toLowerCase(), raw));
+      if (sourceCapExceeded(state)) break;
+      continue;
+    }
+    if (stage === 'sessions') {
+      const page = await kvPage(legacy.listSessions, 'sess:', state.cursor);
+      if (state.offset >= page.keys.length) {
+        if (page.nextToken) { state.cursor = page.nextToken; state.offset = 0; continue; }
+        state.stage = 'markers';
+        state.cursor = null; state.offset = 0;
+        continue;
+      }
+      const key = page.keys[state.offset];
+      state.offset += 1;
+      state.scanned += 1;
+      processed += 1;
+      const token = key.slice('sess:'.length);
+      state.source_entries.push(await sourceEntry('sessions', token, await legacy.getSessionRaw(token)));
+      if (sourceCapExceeded(state)) break;
+      continue;
+    }
+    const digest = await finishSourceDigest(state);
+    state.matches = digest === cutover.kv_digest;
+    state.checked_at = new Date().toISOString();
+    state.done = true;
+    if (!state.matches) state.error = 'legacy_source_changed_after_finalize';
     break;
   }
   return processed;
@@ -686,6 +810,7 @@ export async function handleMigration(request, env, storage) {
   const legacy = createLegacyKvSource(env);
   const restart = body?.restart === true;
   const drainSeconds = Math.max(0, Number(env.CUTOVER_DRAIN_SECONDS ?? DEFAULT_DRAIN_SECONDS) || 0);
+  const stableSeconds = Math.max(0, Number(env.CUTOVER_STABLE_SECONDS ?? DEFAULT_STABLE_SECONDS) || 0);
 
   if (phase === 'fence') {
     const action = String(body?.action ?? '');
@@ -719,7 +844,8 @@ export async function handleMigration(request, env, storage) {
     // route documented as counts-only.
     const out = {};
     for (const name of ['phase:users', 'phase:sessions', 'phase:bot_markers',
-      'phase:reconcile', 'phase:verify', 'phase:stabilize', 'phase:reverse_users']) {
+      'phase:reconcile', 'phase:verify', 'phase:stabilize', 'phase:postcheck',
+      'phase:reverse_users']) {
       const state = await readCheckpoint(session, name);
       out[name] = state ? publicState(state) : null;
     }
@@ -789,6 +915,17 @@ export async function handleMigration(request, env, storage) {
         stabilized_epoch: stabilized.data_epoch ?? null,
       }, 409);
     }
+    // The parity proof and the stabilization proof must describe the same source.
+    // Without this, a late legacy write is stable (both scans see it) and the
+    // earlier verify is stale, while finalize would still accept the pair.
+    if (!verified.source_digest || verified.source_digest !== stabilized.source_digest) {
+      return json({
+        error: 'parity was proven against a different source snapshot than stabilization',
+        verified_source_digest: verified.source_digest ?? null,
+        stabilized_source_digest: stabilized.source_digest ?? null,
+        repair: 're-run users, sessions and markers, then reconcile, verify and stabilize',
+      }, 409);
+    }
     const total = mismatchTotal(verified) + (users?.conflicts ?? 0) + (sessions?.conflicts ?? 0)
       + (users?.d1_ahead ?? 0);
     if (total > 0 || stabilized.error) {
@@ -803,7 +940,11 @@ export async function handleMigration(request, env, storage) {
       drain_seconds: drainSeconds,
       users: users.scanned, sessions: sessions.scanned, markers: markers.scanned,
       deleted: reconciled.deleted ?? 0, mismatch_total: 0,
-      kv_digest: stabilized.digest ?? null,
+      kv_digest: stabilized.source_digest ?? null,
+      source_digest: stabilized.source_digest ?? null,
+      stable_since: stabilized.stable_since ?? null,
+      stable_at: stabilized.stable_at ?? null,
+      stable_seconds: stableSeconds,
       stabilize_passes: stabilized.pass ?? 0,
       data_epoch: dataEpoch,
     };
@@ -905,12 +1046,15 @@ export async function handleMigration(request, env, storage) {
     processed = await verify(session, legacy, state, budget);
     state.data_epoch = await readDataEpoch(session);
   }
-  else if (phase === 'stabilize') processed = await stabilize(session, legacy, state, budget, drainSeconds);
+  else if (phase === 'stabilize') {
+    processed = await stabilize(session, legacy, state, budget, drainSeconds, stableSeconds);
+  }
+  else if (phase === 'postcheck') processed = await postcheck(session, legacy, state, budget);
 
   // Any productive write/deletion invalidates an earlier verify/stabilize.
   if ((state.written ?? 0) + (state.deleted ?? 0) > wroteBefore) {
     state.data_epoch = await bumpDataEpoch(session);
-  } else if (phase !== 'verify' && phase !== 'stabilize') {
+  } else if (phase !== 'verify' && phase !== 'stabilize' && phase !== 'postcheck') {
     state.data_epoch = await readDataEpoch(session);
   }
 
