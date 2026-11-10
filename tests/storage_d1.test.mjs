@@ -181,5 +181,5 @@ test('the schema is created idempotently', () => {
   const d1 = new FakeD1();
   d1.db.exec(FakeD1.schemaSql());
   d1.db.exec(FakeD1.schemaSql());   // deploy-time re-run must not fail
-  assert.equal(d1.raw("SELECT name FROM sqlite_master WHERE type='table'").length, 4);
+  assert.equal(d1.raw("SELECT name FROM sqlite_master WHERE type='table'").length, 5);
 });

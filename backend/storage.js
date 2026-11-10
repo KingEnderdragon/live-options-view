@@ -235,19 +235,22 @@ export function createLegacyKvSource(env) {
   if (!env.USERS || !env.SESSIONS) {
     throw new StorageUnavailable('legacy KV namespaces are not bound');
   }
+  // Workers KV pages by an opaque cursor. The migration needs to resume inside
+  // a page as well, so the contract here exposes the page token and lets the
+  // caller carry a per-page offset; `null` nextToken means the prefix is done.
+  async function page(namespace, prefix, pageToken) {
+    const result = await namespace.list({
+      prefix, limit: 100, ...(pageToken ? { cursor: pageToken } : {}),
+    });
+    return {
+      keys: (result.keys ?? []).map(k => k.name),
+      nextToken: result.list_complete === true ? null : (result.cursor ?? null),
+    };
+  }
   return {
-    async listUsers(cursor) {
-      const page = await env.USERS.list({ prefix: 'user:', limit: 100, ...(cursor ? { cursor } : {}) });
-      return { keys: page.keys.map(k => k.name), cursor: page.list_complete ? null : page.cursor };
-    },
-    async listSessions(cursor) {
-      const page = await env.SESSIONS.list({ prefix: 'sess:', limit: 100, ...(cursor ? { cursor } : {}) });
-      return { keys: page.keys.map(k => k.name), cursor: page.list_complete ? null : page.cursor };
-    },
-    async listBotMarkers(cursor) {
-      const page = await env.USERS.list({ prefix: 'bot:', limit: 100, ...(cursor ? { cursor } : {}) });
-      return { keys: page.keys.map(k => k.name), cursor: page.list_complete ? null : page.cursor };
-    },
+    listUsers: ({ pageToken } = {}) => page(env.USERS, 'user:', pageToken),
+    listSessions: ({ pageToken } = {}) => page(env.SESSIONS, 'sess:', pageToken),
+    listBotMarkers: ({ pageToken } = {}) => page(env.USERS, 'bot:', pageToken),
     async getUser(username) {
       return env.USERS.get(userKey(username));
     },
@@ -262,9 +265,6 @@ export function createLegacyKvSource(env) {
     },
     async putRaw(key, value) {
       await env.USERS.put(key, value);
-    },
-    async putSession(token, value, ttlSeconds) {
-      await env.SESSIONS.put(`sess:${token}`, JSON.stringify(value), { expirationTtl: ttlSeconds });
     },
   };
 }

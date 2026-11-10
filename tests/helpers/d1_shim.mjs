@@ -14,17 +14,22 @@ import { fileURLToPath } from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
 class Statement {
-  constructor(db, sql, params) {
+  constructor(db, sql, params, flags) {
     this.db = db;
     this.sql = sql;
     this.params = params;
+    this.flags = flags ?? { failNextAll: false, failAfterRuns: null };
   }
 
   bind(...params) {
-    return new Statement(this.db, this.sql, params);
+    return new Statement(this.db, this.sql, params, this.flags);
   }
 
   async run() {
+    if (this.flags.failAfterRuns !== null && this.flags.failAfterRuns !== undefined) {
+      if (this.flags.failAfterRuns <= 0) throw new Error('simulated D1 run failure');
+      this.flags.failAfterRuns -= 1;
+    }
     const prepared = this.db.prepare(this.sql);
     const result = prepared.run(...this.params);
     return { success: true, meta: { changes: result.changes, last_row_id: result.lastInsertRowid } };
@@ -36,6 +41,10 @@ class Statement {
   }
 
   async all() {
+    if (this.flags.failNextAll) {
+      this.flags.failNextAll = false;
+      throw new Error('simulated D1 scan failure');
+    }
     const results = this.db.prepare(this.sql).all(...this.params);
     return { results, success: true, meta: {} };
   }
@@ -45,17 +54,18 @@ export class FakeD1 {
   constructor() {
     this.db = new DatabaseSync(':memory:');
     this.queries = [];
+    this.flags = { failNextAll: false, failAfterRuns: null };
   }
 
   static schemaSql() {
-    return fs.readFileSync(
-      path.join(ROOT, 'backend', 'migrations', '0001_accounts_sessions.sql'), 'utf8',
-    );
+    return ['0001_accounts_sessions.sql', '0002_cutover_support.sql']
+      .map(name => fs.readFileSync(path.join(ROOT, 'backend', 'migrations', name), 'utf8'))
+      .join('\n');
   }
 
   prepare(sql) {
     this.queries.push(sql);
-    return new Statement(this.db, sql, []);
+    return new Statement(this.db, sql, [], this.flags);
   }
 
   async exec(sql) {
