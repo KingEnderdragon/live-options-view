@@ -219,15 +219,23 @@ adding KV reads to an already strained quota. The classification is now:
 
 | Login result | Handling |
 | --- | --- |
-| 408, 425, 429, 500, 502, 503, 504 | `TransportError`; retried on a later cycle; **never** registers |
-| 401 | the only status that can mean "no such account"; one bounded provisioning attempt |
+| any 5xx, plus 408/425/429 | `TransportError`; retried on a later cycle; **never** registers |
+| a connection failure or timeout | same as transient; never registers |
+| 401 | the only status that can mean "no such account"; one rate-bounded provisioning attempt |
 | other 4xx | `ConfigError`; retrying cannot help |
 | 2xx | sync bot metadata, then read `/api/me` |
 
-Provisioning is bounded rather than disabled. A transient `register` failure
-spaces the next attempt by 300 s, then 900 s, then 1800 s (one runner cycle, then
-three, then six), and the attempt count resets on success — so a Worker that
-recovers is picked up, and nothing here sleeps or spins. If a 401 is followed by
+The 5xx rule is applied as a class, not an enumerated list: 501 and 505 are as
+transient as 503, and a proxy fault is never read as a provisioning signal.
+
+Provisioning is rate-bounded rather than disabled. A transient `register`
+failure — an HTTP 5xx **or** a connection failure/timeout on the POST, which
+used to escape before any accounting — spaces the next attempt by 300 s, then
+900 s, then 1800 s, and stays at 1800 s after that. There is no attempt cap and
+no permanent give-up: the delay resets on success and retries continue at the
+ceiling, so a Worker that recovers is eventually picked up. Nothing here sleeps
+or spins. A timeout is ambiguous (the account may have been created); the next
+cycle's login resolves it. If a 401 is followed by
 a 409, the account exists and the configured password is wrong: that is reported
 as a credential mismatch, registration is not retried for an hour (a login still
 happens each cycle, so fixing the credential is picked up), and the message says

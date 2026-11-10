@@ -39,8 +39,10 @@ from crassus.client import (  # noqa: E402
     CREDENTIAL_MISMATCH_COOLDOWN_S,
     PROVISION_BACKOFF_S,
     AccountSession,
+    AmbiguousExecution,
     ConfigError,
     TransportError,
+    is_transient,
 )
 from crassus.config import Account  # noqa: E402
 
@@ -90,13 +92,23 @@ class ScriptedSession(AccountSession):
 
 class LoginClassificationTests(unittest.TestCase):
     def test_transient_login_never_registers(self):
-        for status in (408, 425, 429, 500, 502, 503, 504):
+        for status in (408, 425, 429, 500, 501, 502, 503, 504, 505, 599):
             with self.subTest(status=status):
                 session = ScriptedSession({("POST", "/api/login"): [FakeResponse(status)]})
                 with self.assertRaises(TransportError):
                     session.ensure_session()
                 self.assertEqual(session.count("POST", "/api/register"), 0)
                 self.assertEqual(session.count("POST", "/api/login"), 1)
+
+    def test_every_5xx_is_transient_by_class(self):
+        # The documented policy is "5xx is the server's fault"; this pins the
+        # class rather than an enumerated list, so 501/505/599 behave like 503.
+        for status in range(500, 600, 7):
+            with self.subTest(status=status):
+                self.assertTrue(is_transient(status))
+        for status in (400, 401, 403, 404, 409, 422):
+            with self.subTest(status=status):
+                self.assertFalse(is_transient(status))
 
     def test_transient_login_recovers_on_a_later_cycle(self):
         session = ScriptedSession({
@@ -191,6 +203,60 @@ class ProvisionBackoffTests(unittest.TestCase):
             self.assertIn(f"{expected:.0f}s", str(failure.exception))
             now[0] += expected
         self.assertEqual(session.count("POST", "/api/register"), 3)
+
+    def test_register_transport_exception_uses_the_same_backoff(self):
+        # A connection failure or timeout on the registration POST used to
+        # escape before any accounting, so a refused connection could be
+        # retried every cycle with no spacing. It now takes the same schedule.
+        now = [700.0]
+        session = ScriptedSession({
+            ("POST", "/api/login"): [FakeResponse(401)] * 4,
+            ("POST", "/api/register"): [TransportError("connection refused"), _ok(201)],
+            ("POST", "/api/bot-metadata"): [_ok()],
+            ("GET", "/api/me"): [_ok()],
+        }, now=lambda: now[0])
+
+        with self.assertRaises(TransportError) as first:
+            session.ensure_session()
+        self.assertIn(f"{PROVISION_BACKOFF_S[0]:.0f}s", str(first.exception))
+        self.assertEqual(session.count("POST", "/api/register"), 1)
+
+        now[0] += 10  # inside backoff: login only
+        with self.assertRaises(TransportError):
+            session.ensure_session()
+        self.assertEqual(session.count("POST", "/api/register"), 1)
+
+        now[0] += PROVISION_BACKOFF_S[0]  # elapsed: retry succeeds
+        state = session.ensure_session()
+        self.assertEqual(state.username, "crassus_a")
+        self.assertEqual(session.count("POST", "/api/register"), 2)
+
+    def test_register_timeout_is_ambiguous_but_still_backed_off(self):
+        # A timeout may mean the account was created. Recovery is the next
+        # cycle's login; meanwhile the attempt is spaced like any transient.
+        now = [900.0]
+        session = ScriptedSession({
+            ("POST", "/api/login"): [FakeResponse(401), FakeResponse(401), _ok()],
+            ("POST", "/api/register"): [AmbiguousExecution("POST /api/register timed out")],
+            ("POST", "/api/bot-metadata"): [_ok()],
+            ("GET", "/api/me"): [_ok()],
+        }, now=lambda: now[0])
+
+        with self.assertRaises(TransportError) as first:
+            session.ensure_session()
+        self.assertIn("AmbiguousExecution", str(first.exception))
+        self.assertEqual(session.count("POST", "/api/register"), 1)
+
+        now[0] += 5
+        with self.assertRaises(TransportError):
+            session.ensure_session()
+        self.assertEqual(session.count("POST", "/api/register"), 1)
+
+        now[0] += PROVISION_BACKOFF_S[0]
+        # The account exists now (the timed-out POST landed): login succeeds.
+        state = session.ensure_session()
+        self.assertEqual(state.username, "crassus_a")
+        self.assertEqual(session.count("POST", "/api/register"), 1)
 
     def test_register_key_mismatch_and_validation_are_config_errors(self):
         cases = [

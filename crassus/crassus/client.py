@@ -82,17 +82,19 @@ class AmbiguousExecution(CrassusError):
     outcome_class = Outcome.AMBIGUOUS
 
 
-#: Statuses that mean "the Worker could not answer right now" rather than "the
-#: credentials or the account are wrong". A transient answer must never be read
-#: as "this account does not exist yet": doing so turns a Worker hiccup into a
-#: registration attempt that cannot succeed, which is what doubled request
-#: volume and KV reads during the November 9 incident.
-TRANSIENT_HTTP = frozenset({408, 425, 429, 500, 502, 503, 504})
+#: Non-5xx statuses that mean "the Worker could not answer right now" rather
+#: than "the credentials or the account are wrong". Every 5xx is transient too
+#: (see `is_transient`): a 501 or 505 from an intermediary is no more a
+#: provisioning signal than a 503, and treating it as a configuration error
+#: would stop an account on a proxy fault.
+TRANSIENT_HTTP = frozenset({408, 425, 429})
 
-#: Bounded provisioning: a first-use registration may be retried after a
-#: recoverable transport failure, but the delay grows and the attempt count is
-#: capped per process. The runner's own cycle is five minutes, so the first
-#: backoff is one cycle; nothing here sleeps or spins.
+#: Bounded *rate*, not a capped attempt count: a first-use registration may be
+#: retried after a recoverable failure, with the delay growing 300 -> 900 ->
+#: 1800 s and then staying at 1800 s. Retries continue at that ceiling for as
+#: long as the process lives, so a Worker that recovers is eventually picked up;
+#: there is no permanent give-up and nothing here sleeps or spins. The runner's
+#: own cycle is five minutes, so the first backoff is already one cycle.
 PROVISION_BACKOFF_S = (300.0, 900.0, 1800.0)
 
 #: After a positive "the account already exists but our password was rejected",
@@ -102,7 +104,13 @@ CREDENTIAL_MISMATCH_COOLDOWN_S = 3600.0
 
 
 def is_transient(status: int) -> bool:
-    return status in TRANSIENT_HTTP
+    """Any 5xx, plus the non-5xx statuses that mean "try again later".
+
+    The documented contract is "5xx is the server's fault", and this treats it
+    as one status class rather than enumerating codes: 501 and 505 are as
+    transient as 503, and a 5xx must never be read as a provisioning signal.
+    """
+    return status in TRANSIENT_HTTP or 500 <= status <= 599
 
 
 # --------------------------------------------------------------------------
@@ -497,7 +505,23 @@ class AccountSession:
                 f"{self._next_provision_at - now:.0f}s. {self._provision_history}"
             )
 
-        reg = self.register()
+        try:
+            reg = self.register()
+        except (TransportError, AmbiguousExecution) as exc:
+            # A connection failure or a timeout on the registration POST is the
+            # same kind of recoverable event as a 5xx, and it used to bypass the
+            # backoff entirely: the exception escaped before any delay or
+            # attempt accounting, so a connection-refused Worker could be
+            # hammered once per cycle with no spacing. Route it through the
+            # identical schedule. A timeout is genuinely ambiguous -- the
+            # account may have been created -- and recovery handles that: the
+            # next cycle's login succeeds and metadata sync repairs the record.
+            self._schedule_retry(f"register transport failure: {type(exc).__name__}")
+            raise TransportError(
+                f"Provisioning {self.account.alias!r} failed in transport "
+                f"({type(exc).__name__}); next attempt in "
+                f"{self._next_provision_at - now:.0f}s. {str(exc)[:160]}"
+            ) from exc
         status = reg.status_code
         if status in (200, 201):
             self._provision_attempts = 0
@@ -528,11 +552,7 @@ class AccountSession:
             )
         if is_transient(status):
             # Recoverable: allow another attempt later, bounded and spaced.
-            index = min(self._provision_attempts, len(PROVISION_BACKOFF_S) - 1)
-            delay = PROVISION_BACKOFF_S[index]
-            self._provision_attempts += 1
-            self._next_provision_at = now + delay
-            self._provision_history = f"last register failure: HTTP {status} {reg.text[:160]}"
+            delay = self._schedule_retry(f"last register failure: HTTP {status} {reg.text[:160]}")
             raise TransportError(
                 f"Provisioning {self.account.alias!r} failed transiently "
                 f"(HTTP {status}); next attempt in {delay:.0f}s. {reg.text[:160]}"
@@ -541,6 +561,15 @@ class AccountSession:
             f"Registration for {self.account.alias!r} was rejected with HTTP "
             f"{status} and is not recoverable by retrying. {reg.text[:200]}"
         )
+
+    def _schedule_retry(self, history: str) -> float:
+        """Space the next provisioning attempt and record why. Returns the delay."""
+        index = min(self._provision_attempts, len(PROVISION_BACKOFF_S) - 1)
+        delay = PROVISION_BACKOFF_S[index]
+        self._provision_attempts += 1
+        self._next_provision_at = self._now() + delay
+        self._provision_history = history
+        return delay
 
     def me(self, *, _retry_after_reauth: bool = True) -> AccountState:
         """Authoritative account state, re-authenticating once if the session died.
