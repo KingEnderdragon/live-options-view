@@ -27,10 +27,14 @@ function userRecord(username, version, balance, extra = {}) {
   };
 }
 
-function harness() {
+function harness({ drain = '0' } = {}) {
   const d1 = makeStorage();
   const kv = new FakeKV();
-  const env = { DB: d1, USERS: kv, SESSIONS: kv, MIGRATION_TOKEN: TOKEN };
+  const env = {
+    DB: d1, USERS: kv, SESSIONS: kv, MIGRATION_TOKEN: TOKEN,
+    // Tests compress the drain window; production defaults to 75s.
+    CUTOVER_DRAIN_SECONDS: drain,
+  };
   const call = async (phase, extra = {}) => {
     const response = await handleMigration(new Request('https://worker.test/api/admin/migrate', {
       method: 'POST',
@@ -154,7 +158,7 @@ test('finalize refuses until every required phase is complete', async () => {
   // sessions, markers, reconcile and verify are missing.
   const finalized = await call('finalize');
   assert.equal(finalized.status, 409);
-  for (const phase of ['sessions', 'bot_markers', 'reconcile', 'verify']) {
+  for (const phase of ['sessions', 'bot_markers', 'reconcile', 'verify', 'stabilize']) {
     assert.ok(finalized.body.missing_phases.includes(phase), phase);
   }
 });
@@ -180,13 +184,15 @@ test('the full path finalizes only with parity and the fence armed', async () =>
   await drain(call, 'reconcile');
   const verified = await drain(call, 'verify');
   assert.equal(verified.body.mismatch_total, 0);
+  await drain(call, 'stabilize');
   const finalized = await call('finalize');
   assert.equal(finalized.status, 200);
   assert.equal(finalized.body.status, 'finalized');
   assert.equal(userCount(), 2);
 
   const status = await call('status');
-  assert.ok(status.body.checkpoints.cutover.finalized_at);
+  assert.ok(status.body.cutover.finalized_at);
+  assert.equal(status.body.cutover.epoch, status.body.fence.epoch);
   assert.equal(status.body.checkpoints['phase:verify'].mismatch_total, 0);
 });
 
@@ -307,7 +313,7 @@ test('reverse writes only when D1 is newer, once KV writes are available', async
   assert.equal(again.body.written, 0);
 });
 
-test('disarming the fence after finalize is refused', async () => {
+test('disarming after finalize is allowed but annotated', async () => {
   const { kv, call } = harness();
   await kv.put('user:alpha', JSON.stringify(userRecord('alpha', 1, 10)));
   await call('fence', { action: 'arm' });
@@ -316,8 +322,11 @@ test('disarming the fence after finalize is refused', async () => {
   await drain(call, 'bot_markers');
   await drain(call, 'reconcile');
   await drain(call, 'verify');
+  await drain(call, 'stabilize');
   assert.equal((await call('finalize')).status, 200);
-  assert.equal((await call('fence', { action: 'disarm' })).status, 409);
+  const disarmed = await call('fence', { action: 'disarm' });
+  assert.equal(disarmed.status, 200);
+  assert.match(disarmed.body.note, /switch revision is live/);
 });
 
 test('canonical digests are stable under key order and sensitive to content', async () => {
@@ -364,4 +373,180 @@ test('sessions expire: an expired legacy session is not copied', async () => {
   const copied = await call('sessions');
   assert.equal(copied.body.written, 0);
   assert.equal(sessionCount(), 0);
+});
+
+
+test('the fence fails closed when its state cannot be read', async () => {
+  const { default: worker } = await import('../backend/index.js');
+  const post = (env) => worker.fetch(new Request('https://worker.test/api/login', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: 'nobody', password: 'x' }),
+  }), env);
+
+  // A throwing binding is an outage, not a reason to reopen writes.
+  const broken = { DB: { prepare() { throw new Error('D1 unavailable'); } } };
+  assert.equal((await post(broken)).status, 503);
+
+  // A malformed fence row is equally unsafe.
+  const d1 = makeStorage();
+  d1.db.prepare('INSERT INTO migration_state (name, value) VALUES (?, ?)')
+    .run('fence', '{"armed":');
+  const malformed = { DB: d1 };
+  assert.equal((await post(malformed)).status, 503);
+
+  // An explicit disarm is the only thing that reopens writes; the request then
+  // reaches the handler (whatever it answers) instead of being fenced.
+  const open = makeStorage();
+  open.db.prepare('INSERT INTO migration_state (name, value) VALUES (?, ?)')
+    .run('fence', JSON.stringify({ armed: false, epoch: null }));
+  assert.equal((await post({ DB: open, USERS: { get: async () => null }, SESSIONS: { get: async () => null } })).status, 401,
+    'an unarmed fence does not block the route');
+});
+
+test('a pre-arm copy cannot satisfy finalize, and a new epoch invalidates old results', async () => {
+  const { kv, call } = harness();
+  await kv.put('user:alpha', JSON.stringify(userRecord('alpha', 1, 10)));
+
+  // Pre-copy before the fence exists...
+  await drain(call, 'users');
+  // ...then arm: the epoch changes and every phase result is discarded.
+  await call('fence', { action: 'arm' });
+  const stale = await call('finalize');
+  assert.equal(stale.status, 409);
+  assert.ok(stale.body.missing_phases.includes('users'));
+  assert.ok(stale.body.missing_phases.includes('sessions'));
+
+  // Build a complete, current-epoch result set.
+  await drain(call, 'users');
+  await drain(call, 'sessions');
+  await drain(call, 'bot_markers');
+  await drain(call, 'reconcile');
+  await drain(call, 'verify');
+  await drain(call, 'stabilize');
+  assert.equal((await call('finalize')).status, 200);
+
+  // Re-arm creates a new epoch; the previous verify/stabilize are stale.
+  await call('fence', { action: 'disarm' });
+  await call('fence', { action: 'arm' });
+  const rearmed = await call('finalize');
+  assert.equal(rearmed.status, 409);
+  assert.ok(rearmed.body.missing_phases.includes('verify'));
+});
+
+test('finalize refuses until the drain window has elapsed', async () => {
+  const { kv, call } = harness({ drain: '75' });
+  await kv.put('user:alpha', JSON.stringify(userRecord('alpha', 1, 10)));
+  await call('fence', { action: 'arm' });
+  await drain(call, 'users');
+  await drain(call, 'sessions');
+  await drain(call, 'bot_markers');
+  await drain(call, 'reconcile');
+  await drain(call, 'verify');
+  const early = await call('stabilize');
+  assert.ok(early.body.too_early_ms > 0, 'stabilize waits out the drain window');
+  assert.equal(early.body.done, false);
+  const finalized = await call('finalize');
+  assert.equal(finalized.status, 409);
+  assert.match(finalized.body.error, /drain window/);
+});
+
+test('stabilize detects a late legacy write between two scans', async () => {
+  const { kv, call } = harness();
+  await kv.put('user:alpha', JSON.stringify(userRecord('alpha', 1, 10)));
+  await call('fence', { action: 'arm' });
+
+  const first = await call('stabilize');
+  assert.equal(first.body.stable, false);
+  assert.ok(first.body.pass >= 1);
+
+  // A write that slipped in after the fence armed (in-flight request, or KV
+  // propagation catching up) changes the digest of the next pass.
+  await kv.put('user:alpha', JSON.stringify(userRecord('alpha', 2, 11)));
+  const second = await call('stabilize');
+  assert.equal(second.body.stable, false, 'a changed scan is not stable');
+
+  const third = await call('stabilize');
+  assert.equal(third.body.stable, true, 'two identical scans are the evidence');
+});
+
+test('status exposes counts and epochs only', async () => {
+  const { kv, call } = harness();
+  await kv.put('user:alpha', JSON.stringify(userRecord('alpha', 1, 10)));
+  await kv.put('sess:secret-token', JSON.stringify({ username: 'alpha', createdAt: new Date().toISOString() }));
+  await call('fence', { action: 'arm' });
+  await drain(call, 'users');
+  await drain(call, 'sessions');
+  await drain(call, 'verify');
+
+  const status = await call('status');
+  const text = JSON.stringify(status.body);
+  assert.ok(!text.includes('alpha'), 'no account identity in status');
+  assert.ok(!text.includes('secret-token'), 'no session token in status');
+  assert.ok(status.body.fence.epoch, 'epoch is exposed because operators need it');
+});
+
+test('reverse retries a row whose KV put failed instead of skipping it', async () => {
+  const { d1, kv, insertD1 } = harness();
+  insertD1('alpha', userRecord('alpha', 5, 500), 5);
+  insertD1('beta', userRecord('beta', 5, 600), 5);
+  await kv.put('user:alpha', JSON.stringify(userRecord('alpha', 1, 100)));
+  await kv.put('user:beta', JSON.stringify(userRecord('beta', 1, 100)));
+
+  let failAlpha = true;
+  const flaky = {
+    get: (...args) => kv.get(...args),
+    list: (...args) => kv.list(...args),
+    delete: (...args) => kv.delete(...args),
+    put: async (key, value) => {
+      if (key === 'user:alpha' && failAlpha) throw new Error('KV put() limit exceeded for the day');
+      return kv.put(key, value);
+    },
+  };
+  const env = { DB: d1, USERS: flaky, SESSIONS: flaky, MIGRATION_TOKEN: TOKEN };
+  const call = async (phase, extra = {}) => {
+    const response = await handleMigration(new Request('https://worker.test/api/admin/migrate', {
+      method: 'POST', headers: { 'X-Migration-Token': TOKEN, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ phase, ...extra }),
+    }), env);
+    return { status: response.status, body: await response.json() };
+  };
+
+  await call('reverse_preflight');
+  const failed = await call('reverse_users');
+  assert.equal(failed.status, 503);
+  assert.equal(failed.body.error, 'kv_write_failed_midway');
+  assert.equal(failed.body.written, 0, 'the failed row was not counted as written');
+  const checkpoint = JSON.parse(
+    d1.raw("SELECT value FROM migration_state WHERE name = 'phase:reverse_users'")[0].value,
+  );
+  assert.equal(checkpoint.cursor, null, 'cursor did not advance past the failed row');
+
+  failAlpha = false;
+  const resumed = await call('reverse_users');
+  assert.equal(resumed.status, 200);
+  assert.equal(JSON.parse(await kv.get('user:alpha')).version, 5, 'the failed row is retried');
+  assert.equal(JSON.parse(await kv.get('user:beta')).version, 5);
+});
+
+test('reverse honours max_records across the whole invocation', async () => {
+  const { kv, call, insertD1 } = harness();
+  for (let i = 0; i < 9; i++) {
+    insertD1(`bot_${i}`, userRecord(`bot_${i}`, 5, 500), 5);
+    await kv.put(`user:bot_${i}`, JSON.stringify(userRecord(`bot_${i}`, 1, 100)));
+  }
+  await call('reverse_preflight');
+  const first = await call('reverse_users', { max_records: 3 });
+  assert.ok(first.body.scanned <= 3, `whole-invocation bound, got ${first.body.scanned}`);
+  assert.equal(first.body.done, false);
+
+  let guard = 0;
+  let last = first;
+  while (!last.body.done && guard < 10) {
+    last = await call('reverse_users', { max_records: 3 });
+    guard += 1;
+  }
+  assert.equal(last.body.done, true);
+  for (let i = 0; i < 9; i++) {
+    assert.equal(JSON.parse(await kv.get(`user:bot_${i}`)).version, 5);
+  }
 });

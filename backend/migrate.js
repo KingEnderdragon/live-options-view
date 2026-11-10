@@ -43,10 +43,16 @@ import { createLegacyKvSource, hashSessionToken } from './storage.js';
 export const RECORD_BUDGET = 20;
 export const QUERY_BUDGET = 40;          // D1 Free: 50 queries per invocation
 const CHECKPOINT_EVERY = 5;              // records between checkpoint writes
+// KV documents up to 60s of global propagation, so a fence cannot be treated as
+// instantaneous. The drain window is the bound we actually rely on: no parity
+// claim is made until it has elapsed and two full scans agree.
+const DEFAULT_DRAIN_SECONDS = 75;
+const MAX_STABILIZE_PASSES = 8;
+const STABILIZE_ENTRY_CAP = 5000;
 
 const PHASES = new Set([
   'fence', 'status', 'users', 'sessions', 'bot_markers', 'reconcile', 'verify',
-  'finalize', 'reverse_preflight', 'reverse_users',
+  'stabilize', 'finalize', 'reverse_preflight', 'reverse_users',
 ]);
 
 function json(value, status = 200) {
@@ -133,17 +139,53 @@ async function writeCheckpoint(session, name, value) {
   );
 }
 
-/** True when the additive revision must reject writes. Fails open only if D1 is unbound. */
+/**
+ * True when writes must be rejected.
+ *
+ * Fails CLOSED whenever a DB binding exists: an unreadable migration_state, a
+ * missing table, a malformed row or a thrown query all block writes rather than
+ * silently reporting "not fenced". An armed barrier must not evaporate because
+ * the thing that stores it is briefly unavailable. The only false-by-default
+ * case is no binding at all, which means this deployment cannot be mid-cutover.
+ */
 export async function cutoverFenceActive(env) {
   if (!env?.DB) return false;
   try {
     const row = await env.DB.prepare('SELECT value FROM migration_state WHERE name = ?')
       .bind('fence').first();
     if (!row) return false;
-    return JSON.parse(row.value).armed === true;
-  } catch {
-    return false;   // no table yet: nothing has been provisioned to fence
+    const fence = JSON.parse(row.value);
+    // Anything that is not an explicit `armed: false` is treated as armed.
+    return fence?.armed !== false;
+  } catch (error) {
+    console.error(JSON.stringify({
+      event: 'cutover_fence_unreadable', fail_closed: true, error: String(error?.message ?? error),
+    }));
+    return true;
   }
+}
+
+async function sha256Hex(text) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+  return [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function fenceEpoch(session) {
+  const fence = await readCheckpoint(session, 'fence');
+  return { fence, epoch: fence?.armed === true ? (fence.epoch ?? null) : null };
+}
+
+async function readDataEpoch(session) {
+  const row = await session.first("SELECT value FROM migration_state WHERE name = 'data_epoch'");
+  if (!row) return 0;
+  try { return Number(JSON.parse(row.value)?.value ?? 0) || 0; } catch { return 0; }
+}
+
+/** Every productive copy/deletion advances the data epoch, invalidating verify. */
+async function bumpDataEpoch(session) {
+  const next = (await readDataEpoch(session)) + 1;
+  await writeCheckpoint(session, 'data_epoch', { value: next });
+  return next;
 }
 
 // ---------------------------------------------------------------------------
@@ -164,6 +206,10 @@ function freshState() {
     cursor: null, offset: 0, scanned: 0, written: 0, skipped: 0, deleted: 0,
     conflicts: 0, d1_ahead: 0, missing: 0, mismatch: 0, extra: 0,
     done: false, stage: null, cleared: false,
+    epoch: null, data_epoch: null,
+    // stabilize-only
+    entries: [], pass: 0, prev_digest: null, digest: null, stable: false,
+    count_users: 0, count_sessions: 0, count_markers: 0, error: null, too_early_ms: 0,
   };
 }
 
@@ -189,6 +235,12 @@ function publicState(state) {
     mismatch_total: mismatchTotal(state),
     stage: state.stage ?? null,
     done: state.done === true,
+    epoch: state.epoch ?? null,
+    data_epoch: state.data_epoch ?? null,
+    stable: state.stable === true,
+    pass: state.pass ?? 0,
+    too_early_ms: state.too_early_ms ?? 0,
+    error: state.error ?? null,
   };
 }
 
@@ -489,6 +541,124 @@ async function verify(session, legacy, state, budget) {
   return processed;
 }
 
+/**
+ * Bounded stabilization: prove the legacy store has stopped changing before any
+ * parity claim. The fence only stops writes at request entry, and KV may take up
+ * to ~60s to show a write globally, so equality of two full scans taken after
+ * the drain window is the evidence -- not the fence alone.
+ *
+ * Entries are hashed key digests, never account names or tokens, and the
+ * checkpoint is capped; exceeding the cap is a hard stop, not a silent truncation.
+ */
+async function stabilize(session, legacy, state, budget, drainSeconds) {
+  const fence = await readCheckpoint(session, 'fence');
+  if (!fence?.armed) return 0;
+  state.epoch = fence.epoch ?? null;
+  const readyAt = Date.parse(fence.armed_at ?? '') + drainSeconds * 1000;
+  const waitMs = readyAt - Date.now();
+  if (Number.isFinite(waitMs) && waitMs > 0) {
+    state.too_early_ms = waitMs;
+    return 0;
+  }
+  state.too_early_ms = 0;
+
+  let processed = 0;
+  while (processed < budget.records) {
+    if (session.queries >= budget.queries - 4) break;
+    const stage = state.stage ?? 'users';
+
+    const collect = async (key, recordText) => {
+      if (state.entries.length >= STABILIZE_ENTRY_CAP) {
+        state.error = 'stabilize_entry_cap_exceeded';
+        state.done = true;
+        return;
+      }
+      const keyDigest = await sha256Hex(key);
+      const valueDigest = recordText === null ? 'absent' : await sha256Hex(recordText);
+      state.entries.push(`${keyDigest}:${valueDigest}`);
+    };
+
+    if (stage === 'users' || stage === 'markers') {
+      const listFn = stage === 'users' ? legacy.listUsers : legacy.listBotMarkers;
+      const prefix = stage === 'users' ? 'user:' : 'bot:';
+      const page = await kvPage(listFn, prefix, state.cursor);
+      if (state.offset >= page.keys.length) {
+        if (page.nextToken) { state.cursor = page.nextToken; state.offset = 0; continue; }
+        state.stage = stage === 'users' ? 'sessions' : 'finish';
+        state.cursor = null; state.offset = 0;
+        continue;
+      }
+      const key = page.keys[state.offset];
+      state.offset += 1;
+      state.scanned += 1;
+      processed += 1;
+      const raw = stage === 'users' ? await legacy.getRaw(key) : await legacy.getRaw(key);
+      if (stage === 'users') state.count_users += 1; else state.count_markers += 1;
+      await collect(`${stage}:${key.slice(prefix.length).toLowerCase()}`, raw ?? null);
+      if (processed % CHECKPOINT_EVERY === 0) await writeCheckpoint(session, 'phase:stabilize', state);
+      continue;
+    }
+
+    if (stage === 'sessions') {
+      const page = await kvPage(legacy.listSessions, 'sess:', state.cursor);
+      if (state.offset >= page.keys.length) {
+        if (page.nextToken) { state.cursor = page.nextToken; state.offset = 0; continue; }
+        state.stage = 'markers';
+        state.cursor = null; state.offset = 0;
+        continue;
+      }
+      const key = page.keys[state.offset];
+      state.offset += 1;
+      state.scanned += 1;
+      processed += 1;
+      const raw = await legacy.getSessionRaw(key.slice('sess:'.length));
+      state.count_sessions += 1;
+      await collect(`sessions:${key.slice('sess:'.length)}`, raw ?? null);
+      if (processed % CHECKPOINT_EVERY === 0) await writeCheckpoint(session, 'phase:stabilize', state);
+      continue;
+    }
+
+    // finish: compare this pass with the previous one.
+    state.pass = (state.pass ?? 0) + 1;
+    const digest = await sha256Hex(state.entries.slice().sort().join('\n'));
+    state.digest = digest;
+    if (state.prev_digest && state.prev_digest === digest) {
+      state.stable = true;
+      state.done = true;
+      state.data_epoch = await readDataEpoch(session);
+    } else if (!state.prev_digest) {
+      state.prev_digest = digest;
+      state.entries = [];
+      state.stage = 'users';
+      state.cursor = null;
+      state.offset = 0;
+      state.count_users = 0;
+      state.count_sessions = 0;
+      state.count_markers = 0;
+      state.scanned = 0;
+      state.done = false;
+    } else {
+      // Two scans disagree: data moved during the window (late write or KV
+      // propagation). Start a fresh pass; after MAX passes, abort loudly.
+      state.prev_digest = digest;
+      state.entries = [];
+      state.stage = 'users';
+      state.cursor = null;
+      state.offset = 0;
+      state.count_users = 0;
+      state.count_sessions = 0;
+      state.count_markers = 0;
+      state.scanned = 0;
+      if (state.pass >= MAX_STABILIZE_PASSES) {
+        state.done = true;
+        state.error = 'stabilization_did_not_converge';
+      }
+    }
+    break;
+  }
+  return processed;
+}
+
 async function requireFence(session) {
   const fence = await readCheckpoint(session, 'fence');
   return Boolean(fence?.armed);
@@ -515,27 +685,58 @@ export async function handleMigration(request, env, storage) {
   };
   const legacy = createLegacyKvSource(env);
   const restart = body?.restart === true;
+  const drainSeconds = Math.max(0, Number(env.CUTOVER_DRAIN_SECONDS ?? DEFAULT_DRAIN_SECONDS) || 0);
 
   if (phase === 'fence') {
     const action = String(body?.action ?? '');
     if (!['arm', 'disarm'].includes(action)) return json({ error: 'action must be arm or disarm' }, 400);
     const cutover = await readCheckpoint(session, 'cutover');
-    if (action === 'disarm' && cutover?.finalized_at) {
-      return json({ error: 'refusing to disarm after finalize' }, 409);
+    let fence;
+    if (action === 'arm') {
+      // A new arm starts a new epoch: every phase result from before it is
+      // stale by construction, so it is deleted rather than left to look done.
+      fence = { armed: true, epoch: crypto.randomUUID(), armed_at: new Date().toISOString() };
+      await session.run("DELETE FROM migration_state WHERE name = 'cutover'");
+      await session.run("DELETE FROM migration_state WHERE name LIKE 'phase:%'");
+    } else {
+      fence = { armed: false, epoch: null, disarmed_at: new Date().toISOString() };
     }
-    const fence = action === 'arm'
-      ? { armed: true, armed_at: new Date().toISOString() }
-      : { armed: false, disarmed_at: new Date().toISOString() };
     await writeCheckpoint(session, 'fence', fence);
-    return json({ phase, ...fence });
+    // Disarming after finalize is the normal last step: the switch revision
+    // checks the same fence, so leaving it armed would block D1 writes too.
+    // Surface the ordering risk instead of pretending the fence is permanent.
+    return json({
+      phase, ...fence,
+      ...(action === 'disarm' && cutover?.finalized_at
+        ? { note: 'cutover already finalized; disarm only after the switch revision is live' }
+        : {}),
+    });
   }
 
   if (phase === 'status') {
-    const names = ['fence', 'cutover', 'phase:users', 'phase:sessions', 'phase:bot_markers',
-      'phase:reconcile', 'phase:verify', 'reverse_probe', 'phase:reverse_users'];
+    // Counts and flags only: phase checkpoints hold cursors, and the D1 stages
+    // advance by username. Serialising them raw would leak identities from a
+    // route documented as counts-only.
     const out = {};
-    for (const name of names) out[name] = await readCheckpoint(session, name);
-    return json({ phase, checkpoints: out });
+    for (const name of ['phase:users', 'phase:sessions', 'phase:bot_markers',
+      'phase:reconcile', 'phase:verify', 'phase:stabilize', 'phase:reverse_users']) {
+      const state = await readCheckpoint(session, name);
+      out[name] = state ? publicState(state) : null;
+    }
+    const fence = await readCheckpoint(session, 'fence');
+    const cutover = await readCheckpoint(session, 'cutover');
+    return json({
+      phase,
+      fence: fence ? { armed: fence.armed === true, epoch: fence.epoch ?? null, armed_at: fence.armed_at ?? null } : null,
+      data_epoch: await readDataEpoch(session),
+      checkpoints: out,
+      cutover: cutover ? {
+        finalized_at: cutover.finalized_at, epoch: cutover.epoch ?? null,
+        users: cutover.users, sessions: cutover.sessions, markers: cutover.markers,
+        deleted: cutover.deleted, mismatch_total: cutover.mismatch_total,
+        kv_digest: cutover.kv_digest ?? null,
+      } : null,
+    });
   }
 
   if (phase === 'finalize') {
@@ -545,25 +746,66 @@ export async function handleMigration(request, env, storage) {
     const markers = await readCheckpoint(session, 'phase:bot_markers');
     const reconciled = await readCheckpoint(session, 'phase:reconcile');
     const verified = await readCheckpoint(session, 'phase:verify');
+    const stabilized = await readCheckpoint(session, 'phase:stabilize');
+    const dataEpoch = await readDataEpoch(session);
 
     const missingPhases = [];
-    if (!fence?.armed) missingPhases.push('fence');
-    for (const [name, state] of [['users', users], ['sessions', sessions],
-      ['bot_markers', markers], ['reconcile', reconciled], ['verify', verified]]) {
-      if (!state?.done) missingPhases.push(name);
+    const stalePhases = [];
+    if (!fence?.armed || !fence.epoch) missingPhases.push('fence');
+    const required = [['users', users], ['sessions', sessions], ['bot_markers', markers],
+      ['reconcile', reconciled], ['verify', verified], ['stabilize', stabilized]];
+    for (const [name, state] of required) {
+      if (!state?.done) { missingPhases.push(name); continue; }
+      if (!fence?.epoch || state.epoch !== fence.epoch) stalePhases.push(name);
     }
-    if (missingPhases.length) {
-      return json({ error: 'required phases incomplete', missing_phases: missingPhases }, 409);
+    // A fence is not instantaneous: give in-flight requests and KV propagation
+    // the bounded drain window before accepting a parity claim.
+    const readyAt = Date.parse(fence?.armed_at ?? '') + drainSeconds * 1000;
+    if (fence?.armed_at && Number.isFinite(readyAt) && Date.now() < readyAt) {
+      return json({
+        error: 'drain window has not elapsed', wait_ms: readyAt - Date.now(),
+        drain_seconds: drainSeconds,
+      }, 409);
+    }
+    if (missingPhases.length || stalePhases.length) {
+      return json({
+        error: 'required phases incomplete for this fence epoch',
+        missing_phases: missingPhases,
+        stale_phases: stalePhases,
+        epoch: fence?.epoch ?? null,
+      }, 409);
+    }
+    if (stabilized.stable !== true) {
+      return json({
+        error: 'legacy store has not stabilized',
+        stabilize_error: stabilized.error ?? null,
+        passes: stabilized.pass ?? 0,
+      }, 409);
+    }
+    if (verified.data_epoch !== dataEpoch || stabilized.data_epoch !== dataEpoch) {
+      return json({
+        error: 'data changed after verification; re-run verify and stabilize',
+        data_epoch: dataEpoch, verified_epoch: verified.data_epoch ?? null,
+        stabilized_epoch: stabilized.data_epoch ?? null,
+      }, 409);
     }
     const total = mismatchTotal(verified) + (users?.conflicts ?? 0) + (sessions?.conflicts ?? 0)
       + (users?.d1_ahead ?? 0);
-    if (total > 0) return json({ error: 'parity not established', mismatch_total: total }, 409);
+    if (total > 0 || stabilized.error) {
+      return json({ error: 'parity not established', mismatch_total: total,
+        stabilize_error: stabilized.error ?? null }, 409);
+    }
 
     const cutover = {
       finalized_at: new Date().toISOString(),
+      epoch: fence.epoch,
       fence_armed_at: fence.armed_at ?? null,
+      drain_seconds: drainSeconds,
       users: users.scanned, sessions: sessions.scanned, markers: markers.scanned,
       deleted: reconciled.deleted ?? 0, mismatch_total: 0,
+      kv_digest: stabilized.digest ?? null,
+      stabilize_passes: stabilized.pass ?? 0,
+      data_epoch: dataEpoch,
     };
     await writeCheckpoint(session, 'cutover', cutover);
     return json({ phase, status: 'finalized', ...cutover });
@@ -597,30 +839,42 @@ export async function handleMigration(request, env, storage) {
     const stateName = 'phase:reverse_users';
     const state = restart ? freshState() : (await readCheckpoint(session, stateName)) ?? freshState();
     if (state.done) return json({ phase, ...publicState(state) });
-    while (session.queries < budget.queries - 1) {
+    let processed = 0;
+    while (processed < budget.records && session.queries < budget.queries - 2) {
       const page = await session.all(
         'SELECT username, record, version FROM users WHERE username > ? ORDER BY username LIMIT ?',
-        state.cursor ?? '', Math.min(budget.records, 10),
+        state.cursor ?? '', Math.min(budget.records - processed, 10),
       );
       const rows = page.results ?? [];
       if (!rows.length) { state.done = true; break; }
       for (const row of rows) {
+        if (processed >= budget.records) break;
+        processed += 1;
         state.scanned += 1;
-        state.cursor = row.username;
-        const raw = await legacy.getUser(row.username);
+        const username = row.username;
+        const raw = await legacy.getUser(username);
         const legacyVersion = raw ? (Number(JSON.parse(raw).version) || 0) : -1;
-        if (Number(row.version) <= legacyVersion) { state.skipped += 1; continue; }
+        if (Number(row.version) <= legacyVersion) {
+          // Examined and skipped: safe to move past it.
+          state.skipped += 1;
+          state.cursor = username;
+          continue;
+        }
         try {
-          await legacy.putUser(row.username, JSON.parse(row.record));
+          await legacy.putUser(username, JSON.parse(row.record));
           state.written += 1;
-        } catch {
+          // Commit the cursor only after the write landed. A failed row must be
+          // retried on resume, not skipped as if it had succeeded.
+          state.cursor = username;
+        } catch (error) {
+          state.error = 'kv_write_failed_midway';
           await writeCheckpoint(session, stateName, state);
           return json({ phase, error: 'kv_write_failed_midway', ...publicState(state) }, 503);
         }
       }
       await writeCheckpoint(session, stateName, state);
     }
-    return json({ phase, ...publicState(state) });
+    return json({ phase, processed_this_call: processed, ...publicState(state) });
   }
 
   // Copy/reconcile/verify phases.
@@ -632,16 +886,33 @@ export async function handleMigration(request, env, storage) {
   }
   if (state.done) return json({ phase, ...publicState(state), checkpoint: stateName });
 
-  if ((phase === 'reconcile' || phase === 'verify') && !(await requireFence(session))) {
-    return json({ error: 'fence must be armed before absence can be treated as deletion', phase }, 409);
+  if ((phase === 'reconcile' || phase === 'verify' || phase === 'stabilize') &&
+      !(await requireFence(session))) {
+    return json({ error: 'fence must be armed before reconcile/verify/stabilize', phase }, 409);
   }
+
+  const { fence, epoch } = await fenceEpoch(session);
+  state.epoch = epoch;
+  const wroteBefore = (state.written ?? 0) + (state.deleted ?? 0);
 
   let processed = 0;
   if (phase === 'users') processed = await copyUsers(session, legacy, state, budget);
   else if (phase === 'sessions') processed = await copySessions(session, legacy, state, budget);
   else if (phase === 'bot_markers') processed = await copyMarkers(session, legacy, state, budget);
   else if (phase === 'reconcile') processed = await reconcile(session, legacy, state, budget);
-  else if (phase === 'verify') processed = await verify(session, legacy, state, budget);
+  else if (phase === 'verify') {
+    state.data_epoch = await readDataEpoch(session);
+    processed = await verify(session, legacy, state, budget);
+    state.data_epoch = await readDataEpoch(session);
+  }
+  else if (phase === 'stabilize') processed = await stabilize(session, legacy, state, budget, drainSeconds);
+
+  // Any productive write/deletion invalidates an earlier verify/stabilize.
+  if ((state.written ?? 0) + (state.deleted ?? 0) > wroteBefore) {
+    state.data_epoch = await bumpDataEpoch(session);
+  } else if (phase !== 'verify' && phase !== 'stabilize') {
+    state.data_epoch = await readDataEpoch(session);
+  }
 
   await writeCheckpoint(session, stateName, state);
   return json({
