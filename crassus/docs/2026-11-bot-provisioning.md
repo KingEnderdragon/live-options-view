@@ -147,24 +147,28 @@ and reports state changes through the normal structured log as
 `key_health_ok`, `key_health_rejected`, `key_health_unreachable` and
 `key_health_recovered`.
 
-Defaults: a check every 900 seconds with a 15 second probe timeout, run from
+Defaults: a check every 900 seconds with a 15 second request timeout, run from
 inside the runner cycle. That last part matters and used to be misreported: the
 check is not on its own clock, so the time between a real key change and
 detection is the interval, plus however long it takes the loop to reach the
 next cycle, plus the probe. With the deployed 300-second nominal cycle the
-derived bound is `900 + 300 + 15 = 1215` seconds — **conditional** on each cycle
-finishing inside its period. A cycle that overruns adds its overrun directly,
-and a cycle that hangs (a blocked HTTP call, a stuck supervisor pipe) never
-reaches the check at all, which makes detection unbounded for as long as the
-hang lasts.
+derived estimate is `900 + 300 + 15 = 1215` seconds — and it is an estimate,
+not a bound, for three reasons. A cycle that overruns its period adds the
+overrun directly; a cycle that hangs (a blocked call, a stuck supervisor pipe)
+never reaches the check at all, so detection is unbounded for as long as the
+hang lasts; and the `requests` timeout is applied per phase rather than as a
+wall-clock deadline, so DNS resolution, redirects and multiple reads can make a
+probe outlast the 15 seconds the request was given.
 
 The event therefore reports scheduling rather than a false maximum:
 `check_interval_s`, `cycle_interval_s`, `observed_interval_s` (the actual gap
 between the last two probes), `last_lateness_s` and `max_lateness_s`,
-`conditional_detection_bound_s` with `detection_bound_condition` spelling out
-the dependency, and `within_conditional_bound` for whether the last observed
-gap respected it. If a deployment ever needs a strict guarantee, that requires a
-separate supervised checker; the runner loop cannot provide one. Repeated
+`conditional_detection_estimate_s` with `detection_estimate_condition` spelling
+out the dependency, and `within_detection_estimate` for whether the last observed
+gap respected the estimate. There is no `max_probe_duration_s`: the request
+timeout is reported as `request_timeout_s` for what it is. If a deployment ever
+needs a strict guarantee, that requires a separate supervised checker; the
+runner loop cannot provide one. Repeated
 identical states are not re-logged every cycle: an event fires on a state
 change, on recovery, or on a four-hour heartbeat, and the emitted state is
 persisted in `state/key_health.json` so a restart does not re-announce a known
@@ -176,7 +180,7 @@ changes rather than code changes:
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `CRASSUS_KEY_HEALTH_INTERVAL_S` | `900` | Seconds between probes; `0` disables the periodic check |
-| `CRASSUS_KEY_HEALTH_TIMEOUT_S` | `15` | Probe timeout; added to the interval for the detection bound |
+| `CRASSUS_KEY_HEALTH_TIMEOUT_S` | `15` | Per-phase `requests` timeout; contributes to the detection estimate but does not bound a probe |
 | `CRASSUS_KEY_HEALTH_HEARTBEAT_S` | `14400` | Re-announce an unchanged state at most this often |
 
 A malformed or negative interval falls back to the default rather than
