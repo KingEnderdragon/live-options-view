@@ -85,6 +85,19 @@ function d1Users(db) {
       return result.meta.changes === 1 ? 'created' : 'exists';
     },
 
+    // Unconditional administrative write (tests, migration tooling). Request
+    // handling must use insert/mutate so uniqueness and compare-and-swap are
+    // not bypassed.
+    async put(username, record) {
+      const id = accountId(username);
+      await db.prepare(
+        'INSERT INTO users (username, record, version, updated_at) VALUES (?, ?, ?, ?) ' +
+        'ON CONFLICT(username) DO UPDATE SET record = excluded.record, ' +
+        'version = excluded.version, updated_at = excluded.updated_at',
+      ).bind(id, JSON.stringify(record), Number(record.version) || 0,
+             new Date().toISOString()).run();
+    },
+
     // Apply `mutate(record)` atomically. Same outcome contract as the old
     // withUserRecord: {error} rejects without a write, {result} without a
     // record is a no-op, {record, result} writes a bumped version.
@@ -206,6 +219,10 @@ function d1BotMarkers(db) {
     },
     async delete(username) {
       await db.prepare('DELETE FROM bot_markers WHERE username = ?').bind(accountId(username)).run();
+    },
+    async listUsernames() {
+      const page = await db.prepare('SELECT username FROM bot_markers ORDER BY username').all();
+      return (page.results ?? []).map(row => row.username);
     },
   };
 }

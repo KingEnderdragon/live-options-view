@@ -56,6 +56,10 @@ jobs:
         env:
           NODE_OPTIONS: --experimental-sqlite
         run: node tests/kv_page_cache.test.mjs
+      - name: Auth logout regression (#208)
+        env:
+          NODE_OPTIONS: --experimental-sqlite
+        run: node tests/auth_logout.test.mjs
       - name: Verify stays within the CPU budget (#208)
         env:
           NODE_OPTIONS: --experimental-sqlite

@@ -7,10 +7,11 @@
 
 import {
   ISO_DATE, R2_ORIGIN,
-  botKey, checkOrigin, clearedSessionCookieHeader, computeBookFromTrades,
-  jsonResponse, readJsonBody, requireSession, sessionKey, userKey,
+  checkOrigin, clearedSessionCookieHeader, computeBookFromTrades,
+  jsonResponse, readJsonBody, requireSession,
   withUserRecord,
 } from './common.js';
+import { createStorage } from './storage.js';
 import { botUsernames } from './bots.js';
 
 const SETTLEMENT_ID_PREFIX = 'settle';
@@ -126,8 +127,9 @@ async function settleAccount(env, username, as_of, spot_marks) {
 // that token in hand, so SESSIONS.delete on a token that was never passed
 // is a harmless no-op rather than an attempt to clear a specific session.
 async function liquidateAccount(env, username, token) {
-  const raw = await env.USERS.get(userKey(username));
-  if (raw && JSON.parse(raw).is_bot) {
+  const store = createStorage(env);
+  const record = await store.users.get(username);
+  if (record && record.is_bot) {
     const outcome = await withUserRecord(env, username, (record) => ({
       record: { ...record, account_closed: true, closed_at: record.closed_at ?? new Date().toISOString(),
         closure_reason: record.closure_reason ?? 'insolvent_settlement' }, result: { closed: true },
@@ -135,12 +137,12 @@ async function liquidateAccount(env, username, token) {
     if (outcome.error) throw new Error('Bot closure could not be persisted');
     return; // Retain identity and history; never auto-provision a wiped bot.
   }
-  await env.USERS.delete(userKey(username));
+  await store.users.delete(username);
   // Drop the roster index entry too, or a liquidated bot leaves a pointer to
   // an account that no longer exists. handleBots tolerates the dangling case,
   // but leaving one behind would slowly turn the roster into a graveyard.
-  await env.USERS.delete(botKey(username));
-  if (token) await env.SESSIONS.delete(sessionKey(token));
+  await store.botMarkers.delete(username);
+  if (token) await store.sessions.delete(token);
 }
 // Exclusive upper bound for expired contracts. Before 16:15 ET it is today's
 // date, so today's contracts remain live. At/after 16:15 ET it advances by one
@@ -232,9 +234,8 @@ export async function settleAllBots(env, now = new Date()) {
   const neededExpirations = new Set();
 
   for (const username of usernames) {
-    const raw = await env.USERS.get(userKey(username));
-    if (!raw) throw new Error('Indexed settlement account unavailable');
-    const record = JSON.parse(raw);
+    const record = await createStorage(env).users.get(username);
+    if (!record) throw new Error('Indexed settlement account unavailable');
     if (!record.is_bot || record.account_closed) continue;
     const book = computeBookFromTrades(record.trades);
     const expired = Object.entries(book).filter(([, b]) =>
