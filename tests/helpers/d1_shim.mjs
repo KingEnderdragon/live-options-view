@@ -105,6 +105,7 @@ export class FakeKV {
     this.complete = true;
     this.listCalls = 0;
     this.failOnPage = null;
+    this.failNextList = false;
   }
 
   async get(key) {
@@ -122,6 +123,10 @@ export class FakeKV {
 
   async list({ prefix = '', limit = 1000, cursor } = {}) {
     this.listCalls += 1;
+    if (this.failNextList) {
+      this.failNextList = false;
+      throw new Error('simulated KV list failure');
+    }
     if (this.failOnPage && this.listCalls === this.failOnPage) {
       throw new Error('simulated KV list failure');
     }

@@ -156,6 +156,17 @@ revoked session cannot be resurrected because an earlier pass remembered it.
 
 ## Bounded, resumable phases
 
+KV's Free plan also bills `list` requests separately — 1,000 per day, a much
+smaller allowance than the read/write budgets — and the copy walks a page one
+record at a time. A naive adapter therefore issues one `list` per record, which a
+275-session copy would exhaust in minutes. `createLegacyKvSource` memoises page
+key lists for its own lifetime: it is constructed inside each `handleMigration`
+call, so the cache is request-scoped and a new request always lists afresh; the
+key is the binding, prefix and page token; only key names are held, never values;
+and a failed list is evicted rather than remembered, so a retry can succeed.
+Cursors, offsets and the source digest are unchanged — the cache changes how many
+`list` calls a request makes, not what it observes.
+
 D1 Free allows 50 queries per Worker invocation, so no phase may scan an
 unbounded store in one request. Every phase processes at most `max_records`
 (default 20) and stops at a query budget below 50, then returns
@@ -302,6 +313,11 @@ Each item is checkable without exposing an account, a record or a secret.
    is a separate decision.
 
 ## Evidence
+
+`tests/kv_page_cache.test.mjs` (5 checks): one list for repeated reads of the
+same page, prefix and token isolation, a new adapter seeing a fresh listing while
+the old one keeps its cache, a failed list being retried, and the real migration
+copy issuing one list per page per request.
 
 `tests/storage_d1.test.mjs` (12 checks): unique registration under concurrent
 inserts, byte-exact legacy record round-trip, no lost update, stale-version
