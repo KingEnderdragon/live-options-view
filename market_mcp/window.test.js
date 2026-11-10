@@ -270,6 +270,12 @@ test('window detail pins paths to the published pointer', async () => {
   const detail = await f.consumer.call('result_detail', { reference: first.rows[0].detail_reference });
   assert.equal(detail.status, 'available');
   assert.equal(detail.paths.verified, 'matches_published_pointer');
+  assert.ok(!first.warnings.some(w => w.includes('no live window artifacts') || w.includes('unapproved')));
+  const rankingsSource = first.sources.find(s => s.locator.endsWith('/rankings.csv'));
+  const pointerSource = first.sources.find(s => s.locator.endsWith('/latest.json'));
+  assert.equal(first.actual.rankings_sha256, rankingsSource.retrieved_sha256);
+  assert.notEqual(first.actual.rankings_sha256, pointerSource.retrieved_sha256);
+  assert.equal(detail.actual.rankings_sha256, rankingsSource.retrieved_sha256);
   // Same paths text plus a trailing blank line, re-gzipped: the pinned row
   // still matches, but the bytes are no longer the published revision's.
   const g = setup();
@@ -293,7 +299,7 @@ test('window discovery advertises the fixed contract without an index', async ()
   assert.deepEqual(win.kinds, ['weekly_cheapest', 'weekly_fixed', 'weekly_cheapest_best_exit', 'overnight', 'sessions_2', 'sessions_3']);
   assert.deepEqual(win.bases, ['mid', 'exec', 'qualified']);
   assert.ok(win.filters.includes('window_id'));
-  assert.equal(win.publication, 'not_published_to_R2');
+  assert.equal(win.publication, 'query_explicit_window');
   assert.equal(out.capabilities.at(-1).dataset, 'options_active');
   assert.equal(out.capabilities[2].availability, 'available');
 });

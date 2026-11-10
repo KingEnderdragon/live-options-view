@@ -245,7 +245,7 @@ const warnings = {
   scheduled_squeeze: ['Scores are experimental screens, not squeeze probabilities.', 'first_seen_at/is_new describe producer shortlist publication history; unknown values remain unknown.', 'Provider source times can be absent; acquisition and publication times are distinct.'],
   options_returns: ['Sampled returns miss between-sample extremes. Trade-bar backfill covers only already-ranked contracts.', 'Midpoint and ask-entry/bid-exit comparisons describe observations, not achievable fills.', 'Qualified ask-to-later-bid is a hindsight quote comparison; sizes and spreads do not establish obtainable fills.', 'All/clean coverage is the old top 200 all OR clean; qualified coverage is its separate full-universe top 200.', 'Session artifacts may be rebuilt in place; detail detects summary/shortlist changes and asks for a new query.'],
 };
-warnings.options_windows = ['Sampled quotes (~5-minute sweeps); between-sample moves are missed.', 'Quote comparisons, not executed fills; spread/size qualification does not establish fills, fees or capacity.', 'Ranks are cut only after a full-universe ranking; the shortlist holds at most 200 rows per basis.', 'Window publication under oa203/windows/ is a separate, unapproved step; no live window artifacts are published.', 'In-progress windows have no final exit; no ranking is served for them.'];
+warnings.options_windows = ['Sampled quotes (~5-minute sweeps); between-sample moves are missed.', 'Quote comparisons, not executed fills; spread/size qualification does not establish fills, fees or capacity.', 'Ranks are cut only after a full-universe ranking; the shortlist holds at most 200 rows per basis.', 'Window availability is determined for the requested window; partial replay coverage is not full-universe coverage.', 'In-progress windows have no final exit; no ranking is served for them.'];
 warnings.spy_snapshot = [...warnings.qqq_snapshot,
   'SPY RVOL reports insufficient_history/no_data until its own baseline has five completed collection sessions; QQQ baselines are never used for SPY.',
   'SPY is collected 0DTE only (no nearest-weekly archive). Live SPY collection must be observed before it is treated as supported in production.'];
@@ -342,7 +342,7 @@ class Consumer {
       filters:['window_id','kind','basis','underlying','type','limit','offset'],
       kinds:WINDOW_KINDS,bases:WINDOW_BASES,states:WINDOW_STATES,shortlist_per_basis:WINDOW_SHORTLIST,
       units:units.options_windows,warnings:warnings.options_windows,
-      publication:'not_published_to_R2',historical_index:'explicit window only; no index or latest pointer'});
+      publication:'query_explicit_window',historical_index:'explicit window only; no global index'});
     const activeSession=a.session??exchangeDate(this.now());
     const activeKey=`oa203/scanner/${activeSession}/inprogress/latest.json`;
     const activeProbe=await q.optionalJson(activeKey);
@@ -808,7 +808,7 @@ class Consumer {
         pointer.value.members['summary.json']===baseline[0] && pointer.value.members['rankings.csv']===baseline[1],
         'Published window pointer disagrees with the flat summary/rankings just read; the window is being republished.','source_changed');
     } else out.warnings.push('No published window pointer for this window; the flat members are not revision-pinned.');
-    out.actual.rankings_sha256=q.evidence.at(-1).retrieved_sha256;
+    out.actual.rankings_sha256=baseline[1];
     out.warnings.push('Matching before/after summary/rankings digests detect observed rebuilds; the published pointer pins the read to one revision when present.');
     const filtered=rows.filter(r=>r.basis===basis && (!a.underlying||r.underlying===a.underlying) && (!a.type||r.option_type===a.type));
     filtered.sort((x,y)=>Number(x.rank)-Number(y.rank)); // producer rank, never re-score
