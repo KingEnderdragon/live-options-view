@@ -90,7 +90,7 @@ test('the normal Worker still authenticates on D1 with no KV bound', async () =>
   assert.equal(me.status, 200);
 });
 
-test('the recovery entry mounts the migration route and delegates the rest', async () => {
+test('the recovery entry mounts only the authenticated migration route', async () => {
   const d1 = makeStorage();
   const kv = new FakeKV();
   const env = {
@@ -108,7 +108,7 @@ test('the recovery entry mounts the migration route and delegates the rest', asy
   assert.ok((await status.json()).checkpoints, 'recovery exposes the migration phases');
 
   const me = await recovery.fetch(new Request('https://worker.test/api/me'), env);
-  assert.equal(me.status, 401, 'non-migration routes delegate to the production handler');
+  assert.equal(me.status, 404, 'ordinary user routes are unavailable on recovery');
 });
 
 test('the recovery config is the only place KV namespaces are bound', () => {

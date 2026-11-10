@@ -38,4 +38,4 @@ id = "2b996344769e4e679d9f307196a76b84"
 [[d1_databases]]
 binding = "DB"
 database_name = "live-options"
-database_id = "REPLACE_WITH_D1_DATABASE_ID"
+database_id = "94c7c9ad-228b-471b-b760-48cd18c58d1b"
