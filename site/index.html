@@ -50,6 +50,13 @@
   #underlying-select:focus-visible { outline: 2px solid #4a90d9; outline-offset: 1px; }
   .chain-note { font-size: 0.72rem; color: var(--dim); }
   #price { font-size: 1.6rem; font-weight: 700; color: var(--bright); letter-spacing: -0.02em; }
+  /* #178: the chain header's price is a snapshot spot, not a live quote. This
+     line carries its time, session and age, and dims once the value is a
+     retained historical reading rather than a current one. */
+  .chain-snapshot { font-size: 0.72rem; color: var(--dim); }
+  .chain-snapshot[data-state="live"] { color: #00a844; }
+  .chain-snapshot[data-state="retained"], .chain-snapshot[data-state="untimed"] { color: #d49a00; }
+  #price[data-state="retained"], #price[data-state="untimed"] { opacity: 0.72; }
   #tier-badge {
     font-size: 0.72rem; font-weight: 600;
     padding: 2px 8px; border-radius: 4px;
@@ -1008,6 +1015,7 @@
   </select>
   <span id="title">QQQ 0DTE Live OI</span>
   <span id="price">—</span>
+  <span id="price-age" class="chain-snapshot" role="status"></span>
   <span id="tier-badge" style="display:none"></span>
   <span id="vwap-rvol" class="vwap-rvol"></span>
   <span id="momentum" class="momentum"></span>
@@ -1237,9 +1245,9 @@
 
 <script src="shared.js?v=050c96a265673ac3"></script>
 <script src="shared/csv-ranges.js?v=2037c69afbe5d94b"></script>
-<script src="shared/heatmap.js?v=c4a883a5bc99b558"></script>
+<script src="shared/heatmap.js?v=0024b54ff710eff6"></script>
 <script src="shared/quotes.js?v=734ed3e60dc3333c"></script>
-<script src="shared/format.js?v=132e6deb03cda939"></script>
+<script src="shared/format.js?v=3443e4a7b83f1c13"></script>
 <script src="shared/instruments.js?v=860821b9e03c4a08"></script>
 <script src="shared/quote-panel.js?v=3806793be069e8a7"></script>
 <script src="shared/chain.js?v=477ee1ce1d6f08f2"></script>
@@ -1312,7 +1320,7 @@ let timerHandle = null;
 // so the page's script order is unchanged. No test slices up to this banner;
 // it stays here as the section's marker.
 </script>
-<script src="js/render-heatmap.js?v=749be5273663fc72"></script>
+<script src="js/render-heatmap.js?v=857d77740c1f5c31"></script>
 <script>
 
 // ── paper trading ─────────────────────────────────────────────────────────────
@@ -1345,7 +1353,7 @@ let timerHandle = null;
 // loads the module instead of slicing up to the countdown banner; the banner
 // stays here as the section's marker.
 </script>
-<script src="js/data-fetch-cycle.js?v=80a9bb163ca7c436"></script>
+<script src="js/data-fetch-cycle.js?v=61430ae31487fa9d"></script>
 <script>
 
 // ── countdown timer ───────────────────────────────────────────────────────────

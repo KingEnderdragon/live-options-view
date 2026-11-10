@@ -84,7 +84,17 @@ function clearChain(message) {
   noData.textContent = message;
   noData.classList.remove('hidden');
   for (const id of ['vwap-rvol', 'momentum', 'chain-note']) document.getElementById(id).textContent = '';
-  document.getElementById('price').textContent = '—';
+  const price = document.getElementById('price');
+  price.textContent = '—';
+  price.title = '';
+  price.dataset.state = '';
+  // The snapshot line belongs to the snapshot that just went away; leaving it
+  // behind would label the NEXT underlying's empty chain with the old one's
+  // time and age.
+  const priceAge = document.getElementById('price-age');
+  priceAge.textContent = '';
+  priceAge.title = '';
+  priceAge.dataset.state = '';
   document.getElementById('tier-badge').style.display = 'none';
 }
 
@@ -116,11 +126,13 @@ function renderSelectedChain() {
   }
   renderHeatmap(data, symbol);
   if (!data.underlying_price) return;  // renderHeatmap already marked it stale
-  const snapAge = Math.round((Date.now() - new Date(data.timestamp).getTime()) / 1000 / 60);
   const hasBids = data.rows.some(r => r.Bid != null);
   // Dot color carries live/stale; text is just a small timestamp note —
-  // deeper diagnosis lives in diag.html, not the main view.
-  setStatus(!Number.isFinite(snapAge) || snapAge < -1 || snapAge > 2 || !hasBids || state.error ? 'stale' : 'live', data.snapshot_time);
+  // deeper diagnosis lives in diag.html, not the main view. The freshness
+  // judgment is the same call the header's snapshot line uses (#178), so the
+  // dot and the age text can never disagree about a chain that has stopped.
+  const freshness = formatChainSnapshot(data);
+  setStatus(freshness.state === 'live' && hasBids && !state.error ? 'live' : 'stale', data.snapshot_time);
 }
 
 function selectUnderlying(symbol) {

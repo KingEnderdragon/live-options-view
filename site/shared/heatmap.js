@@ -78,14 +78,40 @@ function flowHtml(delta) {
 // Shared by buildHeatmapRows (what's rendered) and the live app's quote
 // interest tracking (what LiveQuoteService keeps around), so the two windows
 // can't drift out of sync with each other.
+//
+// The window is selected along the snapshot's OWN strike ladder (#219). It
+// used to be synthesized as `atm + offset`, which silently assumed a
+// contiguous $1 ladder. QQQ and SPY happen to be $1 apart, so nothing showed;
+// IBIT publishes whole-dollar strikes at 30–39 and 51–59 and half-dollar
+// strikes at 39.5–50, so a synthetic grid invented strikes that were never
+// published. Those cells rendered empty — a 19:38Z render centered on 41.5
+// produced 30 phantom strikes out of 41 — and the quote request asked for the
+// invented contracts while skipping real ones. Selecting by ladder position
+// keeps `strikes` a subset of what the producer actually published, and
+// `offset` becomes the distance in ladder steps from the ATM strike (identical
+// to the old dollar offset on a $1 ladder, so OI calibration is unchanged).
 function computeAtmWindow(rows, spot, display = DISPLAY) {
   const strikeValues = [...new Set((rows || []).map(r => +r.Strike).filter(Number.isFinite))].sort((a, b) => a - b);
-  if (!strikeValues.length || spot == null) return { atm: null, offsets: [], strikes: new Set() };
-  const atm = strikeValues.reduce((best, s) => Math.abs(s - spot) < Math.abs(best - spot) ? s : best, strikeValues[0]);
-  const offsets = [];
-  for (let o = display; o >= -display; o--) offsets.push(o);
-  const strikes = new Set(offsets.map(o => atm + o));
-  return { atm, offsets, strikes };
+  if (!strikeValues.length || spot == null) {
+    return { atm: null, atmIndex: -1, offsets: [], strikes: new Set(), window: [] };
+  }
+  let atmIndex = 0;
+  for (let i = 1; i < strikeValues.length; i++) {
+    if (Math.abs(strikeValues[i] - spot) < Math.abs(strikeValues[atmIndex] - spot)) atmIndex = i;
+  }
+  const window = [];
+  for (let o = display; o >= -display; o--) {
+    const i = atmIndex + o;
+    if (i < 0 || i >= strikeValues.length) continue;
+    window.push({ strike: strikeValues[i], offset: o });
+  }
+  return {
+    atm: strikeValues[atmIndex],
+    atmIndex,
+    offsets: window.map(entry => entry.offset),
+    strikes: new Set(window.map(entry => entry.strike)),
+    window,
+  };
 }
 
 // ── shared heatmap row builder ─────────────────────────────────────────────────
@@ -109,11 +135,13 @@ function buildHeatmapRows(tbody, data, ranges, opts = {}) {
     byStrike[key][r.Type] = r;
   }
 
-  const { atm, offsets } = computeAtmWindow(rows, spot);
+  const { atm, window } = computeAtmWindow(rows, spot);
   if (atm == null) return false;
 
-  for (const offset of offsets) {
-    const strike = atm + offset;
+  // One row per PUBLISHED strike in the window, highest first. No row is
+  // emitted for a strike the snapshot never carried (#219), so the table can
+  // no longer show a strike with two empty cells beside it.
+  for (const { strike, offset } of window) {
     const strKey = `${strike}`;
     const callRow = byStrike[strKey]?.call;
     const putRow  = byStrike[strKey]?.put;
@@ -159,7 +187,10 @@ function buildHeatmapRows(tbody, data, ranges, opts = {}) {
     const strikeTd = document.createElement('td');
     strikeTd.className = 'strike-cell' + (isAtm ? ' atm' : '');
     strikeTd.textContent = isAtm ? `${strike} ★` : `${strike}`;
-    strikeTd.title = `${offset > 0 ? '+' : ''}${offset} from ATM`;
+    // Ladder steps, not dollars: on a mixed ladder (IBIT) neighbouring rows can
+    // be $0.50 or $1 apart, so a dollar claim here would be a guess.
+    strikeTd.title = isAtm ? 'ATM strike'
+      : `${Math.abs(offset)} ${Math.abs(offset) === 1 ? 'strike' : 'strikes'} ${offset > 0 ? 'above' : 'below'} ATM`;
     tr.appendChild(strikeTd);
 
     // Put cell
