@@ -56,6 +56,10 @@ jobs:
         env:
           NODE_OPTIONS: --experimental-sqlite
         run: node tests/kv_page_cache.test.mjs
+      - name: Verify stays within the CPU budget (#208)
+        env:
+          NODE_OPTIONS: --experimental-sqlite
+        run: node tests/verify_bounded.test.mjs
       - name: bot registration probe contract
         run: node tests/preflight_worker_contract.test.js
       - name: bot account closure and identity compatibility

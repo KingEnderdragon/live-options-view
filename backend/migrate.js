@@ -52,7 +52,6 @@ const DEFAULT_DRAIN_SECONDS = 75;
 // writes drained; the digest must also stay identical across this quiet window.
 const DEFAULT_STABLE_SECONDS = 120;
 const MAX_STABILIZE_PASSES = 8;
-const STABILIZE_ENTRY_CAP = 5000;
 
 const PHASES = new Set([
   'fence', 'status', 'users', 'sessions', 'bot_markers', 'reconcile', 'verify',
@@ -211,8 +210,10 @@ function freshState() {
     conflicts: 0, d1_ahead: 0, missing: 0, mismatch: 0, extra: 0,
     done: false, stage: null, cleared: false,
     epoch: null, data_epoch: null,
-    // source snapshot shared by verify, stabilize and postcheck
-    source_entries: [], source_digest: null,
+    // source snapshot shared by verify, stabilize and postcheck: a hash chain
+    // over the scan, so the persisted state stays constant-size regardless of
+    // how many accounts/sessions/markers the source has.
+    source_chain: null, source_count: 0, source_digest: null,
     // stabilize-only
     pass: 0, prev_digest: null, digest: null, stable: false,
     stable_since: null, stable_at: null, stable_wait_ms: 0,
@@ -453,27 +454,28 @@ async function reconcile(session, legacy, state, budget) {
  * Parity verification, one record per loop iteration, stage-advancing. Steps:
  * users compared KV -> D1 by digest, D1 -> KV for extras, sessions, markers.
  */
-/** One entry in the source snapshot: a hash of the key and a hash of the value.
+/** Extend the source snapshot chain with one key/value pair.
  *
- * The same scheme is used by verify, stabilize and postcheck, which is what lets
- * finalize compare them. Neither the key nor the record is stored, and a key that
- * is absent from a scan still contributes a deterministic "absent" entry.
+ * The chain is a SHA-256 over the previous link, the key kind and identity, and
+ * the raw value (or a literal "absent"). Constant-size state is the point: the
+ * previous implementation kept every entry in the checkpoint, which grew to
+ * hundreds of kilobytes and exceeded the Workers CPU budget on a 1,484-session
+ * source. A chain commits to the same information in 64 hex characters. The
+ * scan order is deterministic (KV lists lexicographically within a prefix, and
+ * the phases walk users, then sessions, then markers), so verify, stabilize and
+ * postcheck produce the same chain for the same source. A set that only changes
+ * order would fail closed, which is a safe false negative, not an acceptance.
  */
-async function sourceEntry(kind, identifier, raw) {
-  const keyDigest = await sha256Hex(`crassus-source:${kind}:${identifier}`);
-  const valueDigest = await sha256Hex(raw === null || raw === undefined ? 'absent' : raw);
-  return `${keyDigest}:${valueDigest}`;
-}
-
-function sourceCapExceeded(state) {
-  if (state.source_entries.length < STABILIZE_ENTRY_CAP) return false;
-  state.error = 'source_snapshot_cap_exceeded';
-  state.done = true;
-  return true;
+async function chainSource(state, kind, identifier, raw) {
+  state.source_chain = await sha256Hex(
+    `${state.source_chain ?? 'genesis'}|${kind}|${identifier}|${raw === null || raw === undefined ? 'absent' : raw}`,
+  );
+  state.source_count = (state.source_count ?? 0) + 1;
+  return state.source_chain;
 }
 
 async function finishSourceDigest(state) {
-  state.source_digest = await sha256Hex(state.source_entries.slice().sort().join('\n'));
+  state.source_digest = await sha256Hex(`${state.source_chain ?? 'empty'}:${state.source_count ?? 0}`);
   return state.source_digest;
 }
 
@@ -515,8 +517,7 @@ async function verify(session, legacy, state, budget) {
       if (useKv) {
         const username = String(key.slice('user:'.length)).toLowerCase();
         const raw = await legacy.getRaw(key);
-        state.source_entries.push(await sourceEntry('users', username, raw));
-        if (sourceCapExceeded(state)) break;
+        await chainSource(state, 'users', username, raw);
         if (!raw) { state.missing += 1; continue; }
         let record;
         try { record = JSON.parse(raw); } catch { state.mismatch += 1; continue; }
@@ -526,7 +527,11 @@ async function verify(session, legacy, state, budget) {
         const kvVersion = Number(record.version) || 0;
         if (d1Version > kvVersion) { state.d1_ahead += 1; continue; }
         if (d1Version < kvVersion) { state.mismatch += 1; continue; }
-        if (await recordDigest(JSON.parse(row.record)) !== await recordDigest(record)) state.mismatch += 1;
+        // Exact-byte equality is a valid fast path: identical serialized records
+        // cannot differ in content, so the canonical-JSON digests are skipped.
+        if (raw !== row.record) {
+          if (await recordDigest(JSON.parse(row.record)) !== await recordDigest(record)) state.mismatch += 1;
+        }
       } else {
         const username = String(key.slice('user:'.length));
         state.cursor = username;
@@ -550,8 +555,7 @@ async function verify(session, legacy, state, budget) {
       processed += 1;
       const token = key.slice('sess:'.length);
       const raw = await legacy.getSessionRaw(token);
-      state.source_entries.push(await sourceEntry('sessions', token, raw));
-      if (sourceCapExceeded(state)) break;
+      await chainSource(state, 'sessions', token, raw);
       if (!raw) { state.missing += 1; continue; }
       let payload;
       try { payload = JSON.parse(raw); } catch { state.mismatch += 1; continue; }
@@ -583,8 +587,7 @@ async function verify(session, legacy, state, budget) {
     processed += 1;
     const username = key.slice('bot:'.length).toLowerCase();
     const raw = await legacy.getRaw(key);
-    state.source_entries.push(await sourceEntry('markers', username, raw));
-    if (sourceCapExceeded(state)) break;
+    await chainSource(state, 'markers', username, raw);
     const row = await session.first('SELECT 1 AS present FROM bot_markers WHERE username = ?', username);
     if (!row) state.missing += 1;
   }
@@ -618,8 +621,7 @@ async function stabilize(session, legacy, state, budget, drainSeconds, stableSec
     const stage = state.stage ?? 'users';
 
     const collect = async (kind, identifier, raw) => {
-      state.source_entries.push(await sourceEntry(kind, identifier, raw));
-      return sourceCapExceeded(state);
+      await chainSource(state, kind, identifier, raw);
     };
 
     if (stage === 'users' || stage === 'markers') {
@@ -638,8 +640,8 @@ async function stabilize(session, legacy, state, budget, drainSeconds, stableSec
       processed += 1;
       const raw = await legacy.getRaw(key);
       if (stage === 'users') state.count_users += 1; else state.count_markers += 1;
-      if (await collect(stage === 'users' ? 'users' : 'markers',
-        key.slice(prefix.length).toLowerCase(), raw)) break;
+      await collect(stage === 'users' ? 'users' : 'markers',
+        key.slice(prefix.length).toLowerCase(), raw);
       if (processed % CHECKPOINT_EVERY === 0) await writeCheckpoint(session, 'phase:stabilize', state);
       continue;
     }
@@ -659,7 +661,7 @@ async function stabilize(session, legacy, state, budget, drainSeconds, stableSec
       const token = key.slice('sess:'.length);
       const raw = await legacy.getSessionRaw(token);
       state.count_sessions += 1;
-      if (await collect('sessions', token, raw)) break;
+      await collect('sessions', token, raw);
       if (processed % CHECKPOINT_EVERY === 0) await writeCheckpoint(session, 'phase:stabilize', state);
       continue;
     }
@@ -672,7 +674,8 @@ async function stabilize(session, legacy, state, budget, drainSeconds, stableSec
     if (!state.prev_digest) {
       state.prev_digest = digest;
       state.stable_since = new Date().toISOString();
-      state.source_entries = [];
+      state.source_chain = null;
+      state.source_count = 0;
       state.stage = 'users';
       state.cursor = null; state.offset = 0;
       state.count_users = 0; state.count_sessions = 0; state.count_markers = 0;
@@ -695,7 +698,8 @@ async function stabilize(session, legacy, state, budget, drainSeconds, stableSec
         // Same digest, but the quiet window has not elapsed: not proof yet.
         state.stable_wait_ms = required - elapsed;
         state.done = false;
-        state.source_entries = [];
+        state.source_chain = null;
+        state.source_count = 0;
         state.stage = 'users';
         state.cursor = null; state.offset = 0;
         state.count_users = 0; state.count_sessions = 0; state.count_markers = 0;
@@ -708,7 +712,8 @@ async function stabilize(session, legacy, state, budget, drainSeconds, stableSec
     state.prev_digest = digest;
     state.stable_since = new Date().toISOString();
     state.stable = false;
-    state.source_entries = [];
+    state.source_chain = null;
+    state.source_count = 0;
     state.stage = 'users';
     state.cursor = null; state.offset = 0;
     state.count_users = 0; state.count_sessions = 0; state.count_markers = 0;
@@ -751,9 +756,8 @@ async function postcheck(session, legacy, state, budget) {
       state.scanned += 1;
       processed += 1;
       const raw = await legacy.getRaw(key);
-      state.source_entries.push(await sourceEntry(
-        stage === 'users' ? 'users' : 'markers', key.slice(prefix.length).toLowerCase(), raw));
-      if (sourceCapExceeded(state)) break;
+      await chainSource(state, stage === 'users' ? 'users' : 'markers',
+        key.slice(prefix.length).toLowerCase(), raw);
       continue;
     }
     if (stage === 'sessions') {
@@ -769,8 +773,7 @@ async function postcheck(session, legacy, state, budget) {
       state.scanned += 1;
       processed += 1;
       const token = key.slice('sess:'.length);
-      state.source_entries.push(await sourceEntry('sessions', token, await legacy.getSessionRaw(token)));
-      if (sourceCapExceeded(state)) break;
+      await chainSource(state, 'sessions', token, await legacy.getSessionRaw(token));
       continue;
     }
     const digest = await finishSourceDigest(state);
