@@ -68,13 +68,18 @@ deployment, no publication, no activation. Chej owns review/release.
    artifact/expanded/query byte limits: a full-universe `paths.csv.gz`
    larger than the 24 MiB expanded ceiling fails closed with
    `excessive_response` instead of returning a partial path.
-8. **No window index.** There is no latest pointer or index for windows,
-   so `discover_sources` advertises the fixed contract with availability
-   `explicit_window_required` and never claims live data.
-9. **No R2 publisher was built.** Publication under `oa203/windows/` is a
-   separate, unapproved step (`windows_outputs.py` is local-only). This
-   consumer reads whatever a future publisher writes; it does not publish,
-   set any env flag, start a collector, or deploy.
+8. **No window index.** There is no latest pointer or index for windows
+   that the consumer reads, so `discover_sources` advertises the fixed
+   contract with availability `explicit_window_required` and never claims
+   live data. (The publisher's per-window `latest.json` is an
+   operator/audit pointer only; the consumer never reads it.)
+9. **Publisher exists offline only.** `market_data/options_scanner/windows_publish.py`
+   validates and publishes windows to a pluggable backend (fake and
+   local-filesystem backends tested; see `docs/130-window-publisher.md`),
+   but live R2 publication is a separate, unapproved step
+   (`windows_outputs.py` is local-only). This consumer reads whatever a
+   future approved publisher writes; it does not publish, set any env
+   flag, start a collector, or deploy.
 
 ## Supported-window matrix (implemented)
 
@@ -97,10 +102,14 @@ producer contract exists).
 
 ## What remains for deployed retrieval (not done here)
 
-1. **Publisher**: a reviewed, approved publisher that writes
+1. **Publisher**: implemented offline in
+   `market_data/options_scanner/windows_publish.py` (see
+   `docs/130-window-publisher.md`); it writes
    `oa203/windows/<policy>/<kind>/<window_id>/{summary.json,rankings.csv,paths.csv.gz}`
-   to R2 (plus retention/budget policy and a latest-pointer/index decision).
-   Unapproved; do not build it from this branch.
+   to a pluggable backend, with retention/budget policy and a
+   per-window `latest.json` pointer (no index). Live R2 publication is
+   still unapproved -- Chej/Owen approval plus the release gate in
+   `docs/130-window-publisher.md` is required before any live write.
 2. **Live R2**: verify the published keys are readable at the public origin
    and that a real complete week exists (the inspected Oct 5–9 week is not
    complete: Oct 8 is `partial`).
