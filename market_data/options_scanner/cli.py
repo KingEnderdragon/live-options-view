@@ -28,6 +28,7 @@ from .runtime import ET, Config, on_stop
 from .session import build_universe_for, finalize, run_day
 from .sweep import run_sweep, select_universe
 from .tradier import Tradier, load_token
+from .windows_combine import combine_emit
 from .windows_live import build_windows, publish_windows
 from .windows_publish import LocalFilesystemBackend
 
@@ -65,9 +66,13 @@ def main(argv: list[str] | None = None) -> int:
     rd.add_argument("--all", action="store_true", help="use all ranks, not only clean rows")
     wb = sub.add_parser("windows-build", help="build #130 windows from local finalized day archives (no provider, no R2)")
     wb.add_argument("--dir", type=Path, action="append", required=True, help="one finalized day directory per session")
-    wb.add_argument("--underlyings", nargs="+", required=True, help="bounded set of underlyings (at most 50)")
+    wb.add_argument("--underlyings", nargs="+", required=True, help="underlyings (at most 50; 500 with --full-universe)")
     wb.add_argument("--emit-root", type=Path, required=True)
     wb.add_argument("--top", type=int, default=15)
+    wb.add_argument("--full-universe", action="store_true", help="load the complete selected universe (at most 500 underlyings); the set must cover every selected underlying of every day, or the build fails closed")
+    wc = sub.add_parser("windows-combine", help="combine per-batch window emits into one full-universe emit (local only, no provider, no R2)")
+    wc.add_argument("--emit-root", type=Path, action="append", required=True, help="one batch emit root per batch (distinct roots, same window set)")
+    wc.add_argument("--out", type=Path, required=True, help="combined emit root")
     wp = sub.add_parser("windows-publish", help="publish a local windows emit root to a local backend (no R2)")
     wp.add_argument("--emit-root", type=Path, required=True)
     wp.add_argument("--out", type=Path, required=True, help="local backend root directory")
@@ -151,9 +156,14 @@ def main(argv: list[str] | None = None) -> int:
         print(readout(args.dir, args.top, clean_only=not args.all))
         return 0
     if args.command == "windows-build":
-        # Dormant wiring: local build only. No provider, no R2, no schedule.
+        # Local build only. No provider, no R2, no schedule.
         report = build_windows(args.dir, {u.strip() for u in args.underlyings},
-                               args.emit_root, top=args.top)
+                               args.emit_root, top=args.top, full_universe=args.full_universe)
+        print(json.dumps(report, indent=2, default=str))
+        return 0
+    if args.command == "windows-combine":
+        # Local combine only. No provider, no R2, no schedule.
+        report = combine_emit(args.emit_root, args.out)
         print(json.dumps(report, indent=2, default=str))
         return 0
     if args.command == "windows-publish":
