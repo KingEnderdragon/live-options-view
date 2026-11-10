@@ -18,10 +18,12 @@ This is the producer-to-publisher link for live window products:
 * ``build_windows`` defaults to a bounded 50-underlying subset
   (``universe_scope: bounded_subset`` — always served partial, never
   final). ``full_universe=True`` loads the complete selected universe
-  (at most 500 underlyings, the live universe size) and combines it
-  before ranking (see ``windows_combine``); the passed underlyings must
-  cover every selected underlying of every loaded day, or the build
-  fails closed.
+  (at most 500 underlyings PER DAY — the cap is daily, not on the
+  union: the per-day selected set may change day to day, so the union
+  over the window may exceed 500; the union is bounded by 10 sessions
+  x 500) and combines it before ranking (see ``windows_combine``); the
+  passed underlyings must cover every selected underlying of every
+  loaded day, or the build fails closed.
 
 The loader reuses ``windows_replay.load_session`` exactly (same manifest,
 calendar, row and contract-identity validation) by pointing its ``fetch``
@@ -177,10 +179,13 @@ def build_windows(day_dirs: list[Path] | tuple[Path, ...], underlyings: set[str]
     at most 10 sessions); ``underlyings`` is an explicit set of
     underlyings. By default at most 50 (a bounded subset, served
     partial as ``bounded_universe_subset`` — it never claims
-    full-universe completion). With ``full_universe=True`` at most 500
-    (the live universe size) and the passed set must cover every
-    selected underlying of every loaded day; the combined full universe
-    is ranked before the shortlist is cut (see ``windows_combine``).
+    full-universe completion). With ``full_universe=True`` the cap is
+    per day, not on the union: each loaded day selects at most 500
+    underlyings (the live universe size) and the passed set must cover
+    every selected underlying of every loaded day; the per-day set may
+    rotate, so the union over the window may exceed 500 (bounded by 10
+    sessions x 500). The combined full universe is ranked before the
+    shortlist is cut (see ``windows_combine``).
     Writes the ``oa203/windows/`` tree under ``emit_root`` with scope
     ``live_archive``. A full-universe build keeps a genuinely final
     window final; a bounded-subset build is served partial as
@@ -191,12 +196,27 @@ def build_windows(day_dirs: list[Path] | tuple[Path, ...], underlyings: set[str]
     dirs = [Path(d) for d in day_dirs]
     if not 1 <= len(dirs) <= MAX_SESSIONS:
         raise ValueError(f"bounded build: 1..{MAX_SESSIONS} sessions, got {len(dirs)}")
-    max_under = MAX_UNDERLYINGS_FULL if full_universe else MAX_UNDERLYINGS
-    if not 1 <= len(underlyings) <= max_under:
-        raise ValueError(f"bounded build: 1..{max_under} underlyings, got {len(underlyings)}")
+    unders = set(underlyings)
+    if full_universe:
+        # Per-day cap, not a union cap: MAX_UNDERLYINGS_FULL is the live
+        # universe size for ONE day. The per-day selected set may rotate
+        # (a replacement underlying enters on a later day), so the union
+        # over the window may exceed 500 — 500 + one replacement is 501
+        # and must NOT fail. The union is bounded by 10 sessions x 500.
+        if not unders:
+            raise ValueError("bounded build: at least 1 underlying")
+        if len(unders) > MAX_SESSIONS * MAX_UNDERLYINGS_FULL:
+            raise ValueError(f"bounded build: union over at most {MAX_SESSIONS} sessions x "
+                             f"{MAX_UNDERLYINGS_FULL} underlyings, got {len(unders)}")
+        for d in dirs:
+            selected = len(selected_underlyings([d]))
+            if selected > MAX_UNDERLYINGS_FULL:
+                raise ValueError(f"full_universe: {d.name} selects {selected} underlyings, "
+                                 f"over the per-day cap {MAX_UNDERLYINGS_FULL}")
+    elif not 1 <= len(underlyings) <= MAX_UNDERLYINGS:
+        raise ValueError(f"bounded build: 1..{MAX_UNDERLYINGS} underlyings, got {len(underlyings)}")
     if [d.name for d in dirs] != sorted(d.name for d in dirs) or len({d.name for d in dirs}) != len(dirs):
         raise ValueError("day directories must be unique and sorted by date")
-    unders = set(underlyings)
     rows_by_symbol: dict[str, list] = defaultdict(list)
     sampled: dict[str, set] = defaultdict(set)
     sessions_meta = [load_local_session(d, unders, rows_by_symbol, sampled) for d in dirs]

@@ -96,6 +96,74 @@ def _write_day(root: Path, day: str, *, assessment: str = "complete") -> Path:
     return day_dir
 
 
+def _write_rotation_day(root: Path, day: str, underlyings, mids) -> Path:
+    """One synthetic finalized day with one contract per underlying.
+
+    Symbol is <underlying> + 261009C00100000 (root == underlying,
+    call, strike 100, expiration 2026-10-09); ``mids`` maps each
+    underlying to its mid-price for both sweeps of the day.
+    """
+    open_ms, close_ms = BOUNDS[day]
+    day_dir = root / day
+    (day_dir / "sweeps").mkdir(parents=True)
+    (day_dir / "summary.json").write_text(json.dumps({
+        "final": True, "trade_date": day, "session_open_ms": open_ms,
+        "session_close_ms": close_ms, "assessment": {"status": "complete"},
+    }) + "\n", encoding="utf-8")
+    (day_dir / "universe.json").write_text(json.dumps({
+        "trade_date": day,
+        "selected": [{"underlying": u, "expiration": "2026-10-09",
+                      "additional_expiration": None} for u in underlyings],
+    }) + "\n", encoding="utf-8")
+    manifest = []
+    for sweep in (1, 2):
+        t = open_ms + 600000 if sweep == 1 else close_ms - 600000
+        rows = []
+        chains = {}
+        for u in underlyings:
+            mid = mids[u]
+            rows.append({
+                "underlying": u, "symbol": f"{u}261009C00100000",
+                "expiration": "2026-10-09",
+                "t": t, "sweep": sweep, "bid": round(mid - 0.01, 4),
+                "ask": round(mid + 0.01, 4), "bid_ms": t, "ask_ms": t,
+                "spot": 100.0, "bid_size": 10, "ask_size": 10,
+                "volume": 5, "oi": 100, "root": u, "type": "call",
+                "strike": 100, "contract_size": 100,
+            })
+            chains[u] = {"status": "ok", "fetched_ms": t, "rows": 1,
+                         "expiration": "2026-10-09"}
+        buf = io.BytesIO()
+        with gzip.GzipFile(fileobj=buf, mode="wb", mtime=0) as gz:
+            for row in rows:
+                gz.write((json.dumps(row) + "\n").encode())
+        (day_dir / "sweeps" / f"sweep_{sweep:04d}.jsonl.gz").write_bytes(buf.getvalue())
+        manifest.append({"sweep": sweep, "file": f"sweep_{sweep:04d}.jsonl.gz",
+                         "started_ms": open_ms if sweep == 1 else close_ms - 7200000,
+                         "ended_ms": open_ms + 7200000 if sweep == 1 else close_ms,
+                         "rows": len(rows), "chains": chains, "truncated": False})
+    (day_dir / "sweeps" / "manifest.jsonl").write_text(
+        "".join(json.dumps(m) + "\n" for m in manifest), encoding="utf-8")
+    return day_dir
+
+
+def _write_overcap_day(root: Path, day: str) -> Path:
+    """A day directory whose universe selects 501 underlyings (over the per-day cap)."""
+    day_dir = root / day
+    day_dir.mkdir(parents=True, exist_ok=True)
+    open_ms, close_ms = BOUNDS[day]
+    (day_dir / "summary.json").write_text(json.dumps({
+        "final": True, "trade_date": day, "session_open_ms": open_ms,
+        "session_close_ms": close_ms, "assessment": {"status": "complete"},
+    }) + "\n", encoding="utf-8")
+    (day_dir / "universe.json").write_text(json.dumps({
+        "trade_date": day,
+        "selected": [{"underlying": f"U{i:03d}", "expiration": "2026-10-09",
+                      "additional_expiration": None} for i in range(501)],
+    }) + "\n", encoding="utf-8")
+    return day_dir
+
+
 def _window_ids(report):
     return {(w["kind"], w["window_id"]) for w in report["windows"]}
 
@@ -287,15 +355,56 @@ class LiveBuildTests(unittest.TestCase):
             live.build_windows(self.days, {f"U{i:02d}" for i in range(51)}, self.emit)
         with self.assertRaises(ValueError):
             live.build_windows(self.days * 3, {"AAA"}, self.emit)
-        # Full-universe cap is the live universe size, 500.
-        with self.assertRaises(ValueError):
-            live.build_windows(self.days, {f"U{i:03d}" for i in range(501)},
-                               self.emit, full_universe=True)
+        # Full-universe cap is per day, not on the union: a 501-underlying
+        # union over days that select only 3 each succeeds.
+        report501 = live.build_windows(
+            self.days, {f"U{i:03d}" for i in range(498)} | {"AAA", "BBB", "CCC"},
+            self.root / "emit-501", full_universe=True)
+        self.assertEqual(len(report501["underlyings"]), 501)
         # 51 underlyings are fine in full-universe mode (the loaded days
         # select only AAA/BBB/CCC, which the set covers).
         report = live.build_windows(self.days, {"AAA", "BBB", "CCC"} | {f"U{i:02d}" for i in range(48)},
                                     self.root / "emit-51", full_universe=True)
         self.assertEqual(len(report["windows"]), 14)
+
+    def test_per_day_cap_still_enforced(self):
+        over = _write_overcap_day(self.root / "overcap", "2026-10-05")
+        with self.assertRaises(ValueError):
+            live.build_windows([over], {f"U{i:03d}" for i in range(501)},
+                               self.root / "emit-overcap", full_universe=True)
+
+    def test_rotation_500_plus_1_union_succeeds(self):
+        # Blocker (3): 500 underlyings day 1 + 1 new underlying day 2 is a
+        # 501-union and must NOT fail — the 500 cap is per day.
+        import csv as _csv
+        day1 = _write_rotation_day(
+            self.root / "rot", "2026-10-05",
+            [f"U{i:03d}" for i in range(500)],
+            {f"U{i:03d}": (1.00 if i == 0 else 0.15 if i == 1 else 0.50)
+             for i in range(500)})
+        day2 = _write_rotation_day(
+            self.root / "rot", "2026-10-06", ["NEW1", "U000", "U001"],
+            {"NEW1": 0.20, "U000": 1.50, "U001": 0.48})
+        union = {f"U{i:03d}" for i in range(500)} | {"NEW1"}
+        report = live.build_windows([day1, day2], union, self.root / "emit-rot",
+                                    full_universe=True)
+        self.assertEqual(len(report["underlyings"]), 501)
+        self.assertEqual(report["universe_scope"], "full_universe")
+        self.assertEqual(len(report["windows"]), 2)  # overnight + sessions_2; no complete week
+        # Ranking is over the combined 501-universe: U001 (+220%) tops U000 (+50%).
+        rankings = (self.root / "emit-rot" / "oa203" / "windows" / "oa203-windows-v1"
+                    / "overnight" / "overnight-2026-10-05_2026-10-06" / "rankings.csv")
+        with open(rankings, newline="", encoding="utf-8") as f:
+            mids = [r for r in _csv.DictReader(f) if r["basis"] == "mid"]
+        self.assertEqual(mids[0]["symbol"], "U001261009C00100000")
+        self.assertEqual(mids[0]["rank"], "1")
+        self.assertEqual(mids[1]["symbol"], "U000261009C00100000")
+        # The rotated-in underlying has no entry-day observation, so it is
+        # excluded from the overnight window, not invented.
+        self.assertNotIn("NEW1261009C00100000", {r["symbol"] for r in mids})
+        summary = json.loads((rankings.parent / "summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(summary["state"], "final")
+        self.assertEqual(summary["scope"]["universe_scope"], "full_universe")
 
     def test_publish_all_local_then_idempotent(self):
         live.build_windows(self.days, {"AAA", "BBB", "CCC"}, self.emit)
