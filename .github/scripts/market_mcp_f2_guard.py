@@ -1,7 +1,7 @@
 """Exact-source guard for the F2 live-windows release.
 
-Pins integrated source efa4c65f on production base3b6b8e1b and exactly
-25 reviewed paths. Requires clean checkout and merged ancestry.
+Pins integrated source 044139d3 on production base3b6b8e1b and exactly
+28 reviewed paths. Requires clean checkout and merged ancestry.
 The prior Renaissance guard remains unchanged for rollback provenance.
 """
 
@@ -10,11 +10,14 @@ import re
 import subprocess
 import sys
 
-ACCEPTED_SOURCE_SHA = "efa4c65f990536422c7516870e5203e2979625f4"
+ACCEPTED_SOURCE_SHA = "044139d38f268d800c1c7e72c00f413ab199ece4"
 REVIEWED_BASE_SHA = "3b6b8e1b5a978e85de39d7db42496ee0bd37e2a3"
 
 # Exact reviewed production-base to integrated-source diff.
 REVIEWED_PATHS = frozenset({
+    '.github/scripts/market_mcp_f2_guard.py',
+    '.github/scripts/test_market_mcp_f2_guard.py',
+    '.github/workflows/publish-market-mcp-f2.yml',
     'docs/130-first-window-publication-plan.md',
     'docs/130-live-window-wiring.md',
     'docs/130-window-publisher.md',

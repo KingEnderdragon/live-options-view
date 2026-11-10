@@ -1,6 +1,6 @@
 name: Publish reviewed F2 live windows market MCP image
 
-# Builds only reviewed integrated source efa4c65f from master after merge.
+# Builds only reviewed integrated source 044139d3 from master after merge.
 # No push/merge auto-publication. Historical release workflows are preserved.
 on:
   pull_request:
@@ -18,7 +18,7 @@ on:
         description: Exact reviewed Renaissance commit (must equal ACCEPTED_SOURCE_SHA)
         required: true
         type: string
-        default: efa4c65f990536422c7516870e5203e2979625f4
+        default: 044139d38f268d800c1c7e72c00f413ab199ece4
 
 permissions: {}
 
@@ -27,7 +27,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  ACCEPTED_SOURCE_SHA: efa4c65f990536422c7516870e5203e2979625f4
+  ACCEPTED_SOURCE_SHA: 044139d38f268d800c1c7e72c00f413ab199ece4
   REVIEWED_BASE_SHA: 3b6b8e1b5a978e85de39d7db42496ee0bd37e2a3
 
 jobs:
@@ -56,7 +56,7 @@ jobs:
     env:
       SOURCE_SHA: ${{ inputs.source_sha }}
       IMAGE: ghcr.io/owentanzer/market-mcp-read-only
-      RELEASE_TAG: efa4c65f990536422c7516870e5203e2979625f4-run-${{ github.run_id }}-${{ github.run_attempt }}
+      RELEASE_TAG: 044139d38f268d800c1c7e72c00f413ab199ece4-run-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - name: Require the pinned accepted source SHA
         shell: bash

@@ -159,10 +159,10 @@ class ReleaseGuardTests(unittest.TestCase):
 
     def test_pinned_constants_are_the_reviewed_revisions(self):
         self.assertEqual(ACCEPTED_SOURCE_SHA,
-                         "efa4c65f990536422c7516870e5203e2979625f4")
+                         "044139d38f268d800c1c7e72c00f413ab199ece4")
         self.assertEqual(REVIEWED_BASE_SHA,
                          "3b6b8e1b5a978e85de39d7db42496ee0bd37e2a3")
-        self.assertEqual(len(REVIEWED_PATHS), 25)
+        self.assertEqual(len(REVIEWED_PATHS), 28)
 
 
 if __name__ == "__main__":
