@@ -1,11 +1,14 @@
 # First real-archive window publication plan — #130 / F2 (bounded, unapproved)
 
-Status: PLAN ONLY. No publication, no budget approval, no activation,
-no live R2 write, no deployment has happened under this plan. Chej owns
-review/release; Owen owns the approval gates. This document is the
-preparation Chej asked for; every step below that touches R2, a flag, or
-a deployment is Chej's release step, not Nova's, and must not be run
-until the gates in "Pre-checks" pass and Chej/Owen approve them.
+Status: PLAN ONLY. No publication, no activation, no live R2 write,
+no deployment has happened under this plan. Chej owns review/release and
+real publication: Chej states tonight's reviewed release/activation is
+already authorized and he owns release and real publication (Chej's
+statement, recorded here as his; not Owen-verified in this chat). This
+document is the preparation Chej asked for; every step below that touches
+R2, a flag, or a deployment is Chej's release step, not Nova's, and must
+not be run until the technical gates in "Pre-checks" pass. The
+budget/retention numbers remain unapproved proposals.
 
 Reviewed source for the code this plan publishes with:
 `c8fcf529698bc57b930495f8c0272b5c1b16b2f4` on branch
@@ -138,7 +141,7 @@ Acceptance of the builder run (fail closed, all must hold):
 ## 3. Caps (proposed, NOT approved)
 
 Exactly the publisher's proposed numbers (`docs/130-window-publisher.md`).
-Nothing here approves them; Chej/Owen own that gate.
+Nothing here approves them; Chej/Owen own that gate. Note: measured full-universe window members (rankings ~8 MB per window) exceed the proposed 4 MiB caps; see the retention/headroom section in `docs/130-live-window-wiring.md`. The caps remain proposals.
 
 | Bound | Value |
 | --- | --- |
@@ -227,7 +230,7 @@ print(result["status"], result["state"], result["revision"])
 ```
 
 `r2_backend()` is never used in tests and must not be called before
-pre-checks 1–6 pass and Chej/Owen approve. A validation refusal
+pre-checks 1–6 pass. Release/activation authority is Chej's (he states tonight's reviewed release/activation is already authorized); the pre-checks are technical gates, not an approval wait. A validation refusal
 uploads nothing at all, including no ledger entry; a readback digest
 mismatch fails closed with no pointer written.
 
@@ -281,8 +284,7 @@ service (Chej-owned release, deploy by the workflow digest):
 
 ## 8. What this plan does NOT do
 
-- It does NOT approve publication, the budget/retention numbers, or
-  activation. Those gates belong to Chej/Owen.
+- It does NOT approve the budget/retention numbers: those remain unapproved proposals. Publication and activation are Chej's release step (Chej states tonight's reviewed release/activation is already authorized and he owns release and real publication; Chej's statement, not Owen-verified in this chat), gated by the technical pre-checks, not by an approval wait.
 - It does NOT publish a full-universe window: the preserved combined
   CSVs cannot be published as a window (no paths, qualified basis
   only). The full-universe first publication needs the combine-emit
@@ -295,11 +297,7 @@ service (Chej-owned release, deploy by the workflow digest):
   not what it reads; a window with no `latest.json`, or any reader
   that reads flat keys without the pointer, can be served or can
   misread a mixed revision.
-- It does NOT bypass formal review. The claim that Owen authorized a
-  formal-review bypass and all seven activations arrived signed by
-  Chej and is relayed, not Owen-verified; the PR #202 one-off bypass
-  is explicitly not a general waiver. This plan is preparation for
-  review, not a substitute for it.
+- It does NOT claim Owen authorized a formal-review bypass: no Owen-verified bypass is recorded in this chat, and the PR #202 one-off bypass is explicitly not a general waiver. Chej states tonight's reviewed release/activation is already authorized and he owns release and real publication (Chej's statement, recorded here as his). This plan remains preparation; Chej executes the release.
 
 ## Release-path return sheet
 

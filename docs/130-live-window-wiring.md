@@ -152,7 +152,73 @@ other windows. If the backend's pointers are lost, re-publication
 re-uploads everything (no `already_published` shortcut) and retention
 accounting restarts from the visible inventory. If a cycle emit root is lost, the cycle rebuilds from the spool instead -- same result while the spool matches (the cycle wall-clock timestamp no longer enters any window summary), but the on-disk `cycle.json` record is gone.
 
-## Remaining implementation (live-builder work done; release gates remain)
+## Local-output retention / disk headroom
+
+Evidence (Chej, 2026-11-09, not independently verified by Nova -- do
+not start collection to inspect it; the Railway volume SFTP inventory
+timed out): the scanner's persistent `/data` volume is 5000 MB with
+4190 MB used, so about 810 MB (~773 MiB) is free. Default spool is
+`/data/oa203`; the hook reads up to ten finalized sessions and writes
+one per-cycle emit root per finalized day, and no bounded emit cleanup
+was found. The scanner is a scheduled/build-only service.
+
+### How fast the emit grows (measured + capped)
+
+- Worst case per the publisher's own member caps: 14 windows x
+  (summary <=1 MiB + rankings <=4 MiB + paths <=4 MiB compressed) =
+  126 MiB per cycle. At that size the ~810 MB free holds about 6 cycles.
+- Bounded/batch scale, measured: the preserved batch-01 emit (5946
+  contracts, 5 windows) holds 5 ranked CSVs totalling ~3.5 MB, about
+  0.7 MB per window for rankings. A bounded 14-window cycle is then
+  about 10 MB of rankings plus a similar amount of compressed paths,
+  roughly 20 MB per cycle, so the free headroom holds roughly 30-40
+  cycles (about 6-8 weeks of daily cycles).
+- Full-universe scale, measured: the preserved combined ranked CSVs
+  are 8.0-8.6 MB per window (71,710 contracts), so a full-universe
+  cycle is roughly 230 MB of emit -- about 3 cycles in the free
+  headroom. AND the proposed 4 MiB per-member caps would refuse such
+  windows today (rankings alone are ~8 MB, over the 4 MiB cap), so
+  full-universe publication needs a cap decision by Chej/Owen first;
+  the caps are proposals and are NOT changed here.
+
+### The retention policy (local output only)
+
+- Keep the newest 10 per-cycle emit roots (the 10-session window)
+  within a 512 MiB total emit budget (`DEFAULT_KEEP_CYCLES = 10`,
+  `DEFAULT_MAX_EMIT_BYTES = 512 MiB` in `windows_live.py`).
+- A per-cycle emit root may be pruned ONLY after every window in it
+  is published or superseded: the backend pointer revision equals the
+  revision that cycle built, or the pointer's `published_at` is later
+  than the cycle's `generated_at` (a newer cycle republished the
+  window). Anything unverified -- no pointer, a damaged pointer, an
+  older pointer revision -- is skipped with a reason and left in place.
+- Prune deletes ONLY derived emit dirs (`<emit_root>/<YYYY-MM-DD>/`
+  holding `cycle.json`). It NEVER deletes the finalized day archives,
+  source history, or live/published data; the archives live in the
+  spool, not under the emit root, and the prune never looks there.
+- The prune is dry-run by default (`prune_windows_emit(..., dry_run=True)`
+  / `windows-prune-emit` without `--confirm`): it lists what would be
+  deleted, verifies published state first, deletes only the verified
+  dirs, and re-lists to confirm each one is gone. Tests in
+  `tests/test_oa203_windows_retention.py` prove the dry-run, the
+  delete, the keep-cycles floor, the unpublished-cycle skip, and that
+  non-cycle entries are never touched.
+
+### Headroom pre-check (fail closed before a build)
+
+- `build_windows` (and therefore the `run_after_finalize` hook and the
+  `windows-build` CLI) requires at least `MIN_EMIT_FREE_BYTES`
+  (256 MiB = 2x the worst-case per-cycle 126 MiB) free on the emit
+  volume before building, and raises `ValueError` naming free/required
+  bytes otherwise. The operator then prunes older per-cycle emit roots;
+  the build never starts on a volume too full to finish it.
+- Spool-missing behaviour is already fail-closed and is now tested:
+  an empty spool raises `ValueError` (`no finalized day archives`), a
+  missing spool directory raises `FileNotFoundError`; a torn or
+  non-final day is still refused by the loader. No spool backup,
+  replication, or R2 read-back of day archives exists.
+
+## Remaining implementation (live-builder work done; release gates remain) (live-builder work done; release gates remain)
 
 1. **Live trigger — IMPLEMENTED offline (live-builder); owner Chej
    (release), gate: Owen/Chej activation approval.** `finalize` now
