@@ -630,6 +630,69 @@ class FeedEventEvidence(unittest.TestCase):
                                  flags=0x02, tradeId=50))   # CANCEL, no VT, no price
         self.assertNotIn("ts_price", feed.get_state()["QQQ"])
 
+    def test_large_index_identities_do_not_collide_through_float(self):
+        feed = self._feed()
+        feed._ingest(self._print(price=100, time=1794260000000,
+                                 index=9007199254740992, validTick=True))
+        self.assertEqual(feed.get_state()["QQQ"]["ts_price"], 100)
+        feed._ingest(self._print(time=1794260000000, index=9007199254740993,
+                                 type="CANCEL"))
+        self.assertEqual(feed.get_state()["QQQ"]["ts_price"], 100,
+                         "2**53+1 must not match 2**53")
+        self.assertEqual(feed.get_health()["timesale"]["counts"]["unmatched"], 1)
+
+    def test_large_trade_id_identities_do_not_collide_through_float(self):
+        feed = self._feed()
+        feed._ingest(self._print(price=100, time=1794260000000,
+                                 tradeId=9007199254740992, validTick=True))
+        feed._ingest(self._print(time=1794260000000, tradeId=9007199254740993,
+                                 type="CANCEL"))
+        self.assertEqual(feed.get_state()["QQQ"]["ts_price"], 100)
+        self.assertEqual(feed.get_health()["timesale"]["counts"]["unmatched"], 1)
+
+    def test_fractional_identities_are_rejected(self):
+        feed = self._feed()
+        feed._ingest(self._print(price=100, time=1794260000000, index=1.5,
+                                 tradeId=2.5, validTick=True))
+        state = feed.get_state()["QQQ"]
+        self.assertIsNone(state["ts_index"])
+        self.assertIsNone(state["ts_trade_id"])
+        feed._ingest(self._print(price=101, time=1794260000000, index=1.5,
+                                 type="CORRECTION"))
+        self.assertEqual(feed.get_state()["QQQ"]["ts_price"], 100,
+                         "a fractional id cannot identify the stored print")
+        self.assertEqual(feed.get_health()["timesale"]["counts"]["unmatched"], 1)
+
+    def test_matching_correction_with_a_nonvalid_tick_invalidates_the_print(self):
+        feed = self._feed()
+        feed._ingest(self._print(price=100, time=1794261100000, index=77,
+                                 validTick=True))
+        feed._ingest(self._print(price=100, time=1794261100000, index=77,
+                                 type="CORRECTION", validTick=False))
+        self.assertNotIn("ts_price", feed.get_state()["QQQ"],
+                         "superseded evidence must not stay selected")
+        self.assertEqual(feed.get_health()["timesale"]["counts"]["invalidated"], 1)
+
+    def test_matching_correction_to_a_spread_leg_invalidates_the_print(self):
+        feed = self._feed()
+        feed._ingest(self._print(price=100, time=1794261200000, index=78,
+                                 validTick=True))
+        feed._ingest(self._print(price=100, time=1794261200000, index=78,
+                                 type="CORRECTION", spreadLeg=True))
+        self.assertNotIn("ts_price", feed.get_state()["QQQ"])
+        self.assertEqual(feed.get_health()["timesale"]["counts"]["invalidated"], 1)
+
+    def test_matching_correction_to_a_bad_price_invalidates_the_print(self):
+        for bad_price in (0, -5, "NaN", None):
+            feed = self._feed()
+            feed._ingest(self._print(price=100, time=1794261300000, index=79,
+                                     validTick=True))
+            feed._ingest(self._print(price=bad_price, time=1794261300000, index=79,
+                                     type="CORRECTION"))
+            self.assertNotIn("ts_price", feed.get_state()["QQQ"], bad_price)
+            self.assertEqual(
+                feed.get_health()["timesale"]["counts"]["invalidated"], 1, bad_price)
+
 
 class ExtendedPrintSelection(unittest.TestCase):
     """A provider-timed extended print replaces the unknown-time midpoint."""

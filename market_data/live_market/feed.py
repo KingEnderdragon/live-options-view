@@ -9,6 +9,7 @@ the shared log, so it moves out with no import churn elsewhere.
 
 import json
 import math
+import re
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -51,7 +52,7 @@ class DXLinkFeed:
         self._ts_error: Optional[str] = None
         self._ts_counts = {"received": 0, "accepted": 0, "corrected": 0,
                            "cancelled": 0, "out_of_order": 0, "invalid": 0,
-                           "unmatched": 0}
+                           "unmatched": 0, "invalidated": 0}
         self._data_logged         = False
         # lifecycle telemetry
         self._connected           = False
@@ -364,6 +365,33 @@ class DXLinkFeed:
             return None
 
     @staticmethod
+    def _to_exact_int(val):
+        """Exact integer identity: no float round-trip, no fractional ids.
+
+        DXLink identity fields (index, sequence, tradeId) can exceed 2**53, where
+        a float round-trip silently merges adjacent events. Integers and integer
+        strings are preserved exactly; a float that is fractional or too large to
+        be exact is rejected rather than rounded into another event's identity.
+        """
+        if isinstance(val, bool):
+            return None
+        if isinstance(val, int):
+            return val
+        if isinstance(val, float):
+            if not math.isfinite(val) or not val.is_integer():
+                return None
+            if abs(val) > 9_007_199_254_740_992:  # 2**53, exclusive
+                return None
+            return int(val)
+        text = str(val).strip()
+        if not text or not re.fullmatch(r"[+-]?\d+", text):
+            return None
+        try:
+            return int(text)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
     def _to_float(val):
         """Convert val to float, returning None for NaN / non-numeric strings."""
         try:
@@ -445,7 +473,7 @@ class DXLinkFeed:
         types are rejected; the receipt clock is never substituted.
         """
         self._ts_counts["received"] += 1
-        flags = self._to_int(event.get("flags"))
+        flags = self._to_exact_int(event.get("flags"))
         if flags is not None and flags < 0:
             flags = None
         explicit_type = str(event.get("type") or "").strip().upper()
@@ -463,9 +491,9 @@ class DXLinkFeed:
         else:
             kind = "NEW"
         observed = self._event_time(event.get("time"))
-        sequence = self._to_int(event.get("sequence"))
-        index = self._to_int(event.get("index"))
-        trade_id = self._to_int(event.get("tradeId"))
+        sequence = self._to_exact_int(event.get("sequence"))
+        index = self._to_exact_int(event.get("index"))
+        trade_id = self._to_exact_int(event.get("tradeId"))
         if trade_id is not None and trade_id <= 0:
             trade_id = None  # 0 means unavailable, not an identity
         price = self._to_float(event.get("price"))
@@ -488,29 +516,32 @@ class DXLinkFeed:
         if kind == "CANCEL":
             self._ts_counts["cancelled"] += 1
             if key is not None and key == stored_key:
-                for name in ("ts_price", "ts_time", "ts_size", "ts_trade_id",
-                             "ts_index", "ts_key", "ts_sequence", "ts_extended",
-                             "ts_valid", "ts_received_at"):
-                    s.pop(name, None)
+                self._remove_print(s)
             else:
                 self._ts_counts["unmatched"] += 1
-            return
-
-        if observed is None or price is None:
-            self._ts_counts["invalid"] += 1
-            return
-        if valid is False or spread_leg:
-            self._ts_counts["invalid"] += 1
             return
 
         if kind == "CORRECTION":
             if key is None or stored_key is None or key != stored_key:
                 self._ts_counts["unmatched"] += 1
                 return
+            if (observed is None or price is None or price <= 0
+                    or valid is False or spread_leg):
+                # A correction we cannot accept still supersedes the print it
+                # identifies. Keeping the old price would present superseded
+                # evidence, so the print is invalidated instead.
+                self._remove_print(s)
+                self._ts_counts["invalidated"] += 1
+                return
             self._ts_counts["corrected"] += 1
             self._store_print(s, price=price, observed=observed, size=size,
                               trade_id=trade_id, index=index, key=key,
                               sequence=sequence, extended=extended, valid=valid)
+            return
+
+        if (observed is None or price is None or price <= 0
+                or valid is False or spread_leg):
+            self._ts_counts["invalid"] += 1
             return
 
         # NEW: only a genuinely newer print may replace the latest.
@@ -532,6 +563,13 @@ class DXLinkFeed:
         self._store_print(s, price=price, observed=observed, size=size,
                           trade_id=trade_id, index=index, key=key,
                           sequence=sequence, extended=extended, valid=valid)
+
+    @staticmethod
+    def _remove_print(s):
+        for name in ("ts_price", "ts_time", "ts_size", "ts_trade_id",
+                     "ts_index", "ts_key", "ts_sequence", "ts_extended",
+                     "ts_valid", "ts_received_at"):
+            s.pop(name, None)
 
     def _store_print(self, s, *, price, observed, size, trade_id, index, key,
                      sequence, extended, valid):
