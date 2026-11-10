@@ -26,6 +26,7 @@ from market_data.options_scanner.runtime import Config  # noqa: E402
 from test_oa203_windows_live import DAYS, _write_day  # noqa: E402
 
 NOW = datetime(2026, 10, 9, 21, 0, tzinfo=timezone.utc)
+NOW_PLUS_5 = datetime(2026, 10, 9, 21, 5, tzinfo=timezone.utc)
 
 
 class _FakeArchive:
@@ -166,14 +167,17 @@ class RunAfterFinalizeTests(unittest.TestCase):
         self.assertEqual(manifest["cycle"], "2026-10-09")
         self.assertEqual(manifest["days"], DAYS)
         self.assertEqual(len(manifest["windows"]), 14)
-        # Re-running the same cycle with unchanged inputs is idempotent:
-        # the rebuild is byte-identical (same cycle timestamp), so the
-        # publisher returns already_published with the same revisions —
-        # no fresh revisions, no re-upload.
+        # Re-running the same cycle with unchanged inputs is idempotent
+        # even when the wall clock advances: each window's summary bytes
+        # are a function of that window's own inputs only (stable
+        # per-window generated_at from its exit-session close, plus
+        # window-scoped scope and rows), so the rebuild is byte-identical
+        # and the publisher returns already_published with the same
+        # revisions -- no fresh revisions, no re-upload.
         again = live.run_after_finalize(
             self.spool, "2026-10-09", self.universe,
             backend=pub.LocalFilesystemBackend(backend_root),
-            emit_root=self.root / "emit", now=NOW)
+            emit_root=self.root / "emit", now=NOW_PLUS_5)
         self.assertTrue(all(r["status"] == "already_published" for r in again["publish"]))
         self.assertEqual(len(again["publish"]), 14)
         self.assertEqual({r["window_id"]: r["revision"] for r in again["publish"]},

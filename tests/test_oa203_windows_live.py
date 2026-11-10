@@ -262,7 +262,13 @@ class LiveBuildTests(unittest.TestCase):
             self.assertEqual(summary["state_reasons"], ["bounded_universe_subset"], window_id)
             self.assertEqual(summary["scope"]["mode"], "live_archive", window_id)
             self.assertEqual(summary["scope"]["universe_scope"], "bounded_subset", window_id)
-            self.assertEqual(summary["contracts_evaluated"], 3)
+            # Rows are window-scoped: a contract counts only if it has
+            # in-session observations in this window's own sessions.
+            # CCC is sampled Oct 5-6 only, so windows not touching those
+            # days evaluate 2 contracts, the rest 3.
+            win_days = {s["day"] for s in summary["sessions"]}
+            expected = 3 if win_days & {"2026-10-05", "2026-10-06"} else 2
+            self.assertEqual(summary["contracts_evaluated"], expected, window_id)
         overnight = by_id[("overnight", "overnight-2026-10-05_2026-10-06")]
         self.assertEqual(overnight["qualified"]["top"][0]["symbol"], "AAA261009C00100000")
 
@@ -271,7 +277,7 @@ class LiveBuildTests(unittest.TestCase):
         report = live.build_windows(self.days, {"AAA", "BBB", "CCC"}, emit,
                                     full_universe=True)
         self.assertEqual(report["universe_scope"], "full_universe")
-        self.assertEqual(report["contracts_kept"], 42)  # 3 contracts x 14 windows
+        self.assertEqual(report["contracts_kept"], 37)  # 9 windows touching Oct 5/6 x 3 contracts + 5 windows x 2 (CCC sampled Oct 5-6 only; rows are window-scoped)
         self.assertEqual(report["conflicting_symbols"], 0)
         for kind, window_id in _window_ids(report):
             d = emit / "oa203" / "windows" / "oa203-windows-v1" / kind / window_id
@@ -322,7 +328,7 @@ class LiveBuildTests(unittest.TestCase):
         s78 = summary_for("overnight", "overnight-2026-10-07_2026-10-08")
         self.assertEqual(s78["state"], "partial")
         self.assertIn("session_partial:2026-10-08", s78["state_reasons"])
-        self.assertEqual(s78["contracts_evaluated"], 3)
+        self.assertEqual(s78["contracts_evaluated"], 2)  # CCC has no observations Oct 7-8; rows are window-scoped
         # Windows that do not touch it stay final.
         s56 = summary_for("overnight", "overnight-2026-10-05_2026-10-06")
         self.assertEqual(s56["state"], "final")
