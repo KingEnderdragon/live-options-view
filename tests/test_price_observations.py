@@ -494,72 +494,141 @@ class FeedEventEvidence(unittest.TestCase):
         self.assertEqual(fields["TradeETH"], ["price", "time"],
                          "the first observed TradeETH sample is preserved")
 
-    def test_timesale_uses_its_own_channel_setup_and_subscription(self):
+
+    def test_timesale_uses_its_own_odd_channel_setup_and_subscription(self):
         feed = DXLinkFeed("unused", "unused")
         sent = []
         feed._send = sent.append
         feed.set_subscriptions([], ["QQQ"], ["QQQ", "SPY"])
+        self.assertEqual(DXLinkFeed._TIMESALE_CHANNEL % 2, 1,
+                         "DXLink requires odd numbers for service channels")
         for message in (
             {"type": "CHANNEL_OPENED", "channel": 1},
-            {"type": "CHANNEL_OPENED", "channel": 2},
+            {"type": "CHANNEL_OPENED", "channel": DXLinkFeed._TIMESALE_CHANNEL},
             {"type": "FEED_CONFIG", "channel": 1},
-            {"type": "FEED_CONFIG", "channel": 2},
+            {"type": "FEED_CONFIG", "channel": DXLinkFeed._TIMESALE_CHANNEL},
         ):
             feed._on_message(None, json.dumps(message))
-        base_setup = [m for m in sent if m.get("type") == "FEED_SETUP" and m.get("channel") == 1]
+        base_setup = [m for m in sent if m.get("type") == "FEED_SETUP"
+                      and m.get("channel") == 1]
         self.assertIn("Quote", base_setup[0]["acceptEventFields"])
         self.assertNotIn("TimeAndSale", base_setup[0]["acceptEventFields"])
-        ts_setup = [m for m in sent if m.get("type") == "FEED_SETUP" and m.get("channel") == 2]
-        self.assertEqual(ts_setup[0]["acceptEventFields"]["TimeAndSale"][:2],
-                         ["eventType", "eventSymbol"])
-        self.assertIn("extendedTradingHours", ts_setup[0]["acceptEventFields"]["TimeAndSale"])
+        ts_setup = [m for m in sent if m.get("type") == "FEED_SETUP"
+                    and m.get("channel") == DXLinkFeed._TIMESALE_CHANNEL]
+        fields = ts_setup[0]["acceptEventFields"]["TimeAndSale"]
+        for name in ("time", "sequence", "price", "size", "tradeId", "flags"):
+            self.assertIn(name, fields)
         ts_subs = [m for m in sent if m.get("type") == "FEED_SUBSCRIPTION"
-                   and m.get("channel") == 2]
+                   and m.get("channel") == DXLinkFeed._TIMESALE_CHANNEL]
         self.assertTrue(ts_subs[0]["reset"])
         self.assertEqual([entry["symbol"] for entry in ts_subs[0]["add"]], ["QQQ", "SPY"])
         base_subs = [m for m in sent if m.get("type") == "FEED_SUBSCRIPTION"
                      and m.get("channel") == 1]
         self.assertEqual([entry["type"] for entry in base_subs[0]["add"]][:4],
                          ["Quote", "Trade", "TradeETH", "Summary"])
+        for message in sent:
+            self.assertIn(message.get("channel"), (0, 1, DXLinkFeed._TIMESALE_CHANNEL))
         self.assertTrue(feed.get_health()["timesale"]["subscribed"])
 
     def test_timesale_channel_error_does_not_touch_the_market_feed(self):
         feed = DXLinkFeed("unused", "unused")
-        sent = []
-        feed._send = sent.append
+        feed._send = [].append
         feed.set_subscriptions([], ["QQQ"], ["QQQ"])
-        feed._on_message(None, json.dumps({"type": "CHANNEL_OPENED", "channel": 2}))
-        feed._on_message(None, json.dumps({"type": "ERROR", "channel": 2,
-                                           "error": "unknown event type"}))
+        feed._on_message(None, json.dumps({"type": "ERROR",
+                                           "channel": DXLinkFeed._TIMESALE_CHANNEL,
+                                           "error": "BAD_ACTION"}))
         health = feed.get_health()["timesale"]
-        self.assertEqual(health["error"], "unknown event type")
+        self.assertEqual(health["error"], "BAD_ACTION")
         self.assertFalse(feed.needs_reauth())
-        self.assertEqual(feed.get_health()["connected"], False)
+        self.assertFalse(feed.get_health()["connected"])
 
-    def test_timesale_print_correction_cancellation_and_ordering(self):
-        feed = DXLinkFeed("unused", "unused")
-        millis = int(datetime.fromisoformat("2026-11-09T22:00:00+00:00").timestamp() * 1000)
-        feed._ingest([{"eventType": "TimeAndSale", "eventSymbol": "QQQ", "price": 680.1,
-                       "size": 100, "time": millis, "tradeId": 7,
-                       "extendedTradingHours": True, "type": "NEW"}])
-        print_state = feed.get_state()["QQQ"]
-        self.assertEqual((print_state["ts_price"], print_state["ts_extended"],
-                          print_state["ts_trade_id"]), (680.1, True, 7))
-        feed._ingest([{"eventType": "TimeAndSale", "eventSymbol": "QQQ", "price": 679.0,
-                       "size": 10, "time": millis - 5000, "tradeId": 8,
-                       "extendedTradingHours": True, "type": "NEW"}])
-        self.assertEqual(feed.get_state()["QQQ"]["ts_price"], 680.1)
+    def _feed(self):
+        return DXLinkFeed("unused", "unused")
+
+    def _print(self, **kw):
+        event = {"eventType": "TimeAndSale", "eventSymbol": "QQQ"}
+        event.update(kw)
+        return [event]
+
+    def test_trade_id_zero_is_unavailable_and_never_an_identity(self):
+        feed = self._feed()
+        feed._ingest(self._print(price=100, size=10, time=1794260000000,
+                                 tradeId=0, type="NEW"))
+        feed._ingest(self._print(price=90, size=10, time=1794259900000,
+                                 tradeId=0, type="NEW"))
+        state = feed.get_state()["QQQ"]
+        self.assertEqual(state["ts_price"], 100)
+        self.assertIsNone(state["ts_trade_id"], "tradeId 0 means unavailable")
         self.assertEqual(feed.get_health()["timesale"]["counts"]["out_of_order"], 1)
-        feed._ingest([{"eventType": "TimeAndSale", "eventSymbol": "QQQ", "price": 680.2,
-                       "size": 100, "time": millis, "tradeId": 7,
-                       "extendedTradingHours": True, "type": "CORRECTION"}])
-        self.assertEqual(feed.get_state()["QQQ"]["ts_price"], 680.2)
-        self.assertEqual(feed.get_health()["timesale"]["counts"]["corrected"], 1)
-        feed._ingest([{"eventType": "TimeAndSale", "eventSymbol": "QQQ", "price": 0,
-                       "size": 0, "time": millis, "tradeId": 7,
-                       "extendedTradingHours": True, "type": "CANCEL"}])
+
+    def test_an_unrelated_correction_cannot_rewind_the_latest(self):
+        feed = self._feed()
+        feed._ingest(self._print(price=110, size=10, time=1794260100000,
+                                 tradeId=10, type="NEW"))
+        feed._ingest(self._print(price=80, size=5, time=1794259800000,
+                                 tradeId=5, type="CORRECTION"))
+        self.assertEqual(feed.get_state()["QQQ"]["ts_price"], 110)
+        self.assertEqual(feed.get_health()["timesale"]["counts"]["unmatched"], 1)
+
+    def test_cancellation_without_a_price_removes_the_print(self):
+        feed = self._feed()
+        feed._ingest(self._print(price=120, size=10, time=1794260200000,
+                                 tradeId=20, type="NEW"))
+        feed._ingest(self._print(time=1794260200000, tradeId=20, type="CANCEL"))
         self.assertNotIn("ts_price", feed.get_state()["QQQ"])
         self.assertEqual(feed.get_health()["timesale"]["counts"]["cancelled"], 1)
+
+    def test_index_identity_matches_a_correction_without_a_trade_id(self):
+        feed = self._feed()
+        feed._ingest(self._print(price=130, size=10, time=1794260300000, index=555))
+        feed._ingest(self._print(price=131, size=10, time=1794260300000, index=555,
+                                 type="CORRECTION"))
+        self.assertEqual(feed.get_state()["QQQ"]["ts_price"], 131)
+        self.assertEqual(feed.get_health()["timesale"]["counts"]["corrected"], 1)
+
+    def test_a_correction_without_identity_is_rejected(self):
+        feed = self._feed()
+        feed._ingest(self._print(price=140, size=10, time=1794260400000, type="NEW"))
+        feed._ingest(self._print(price=141, size=10, time=1794260400000,
+                                 type="CORRECTION"))
+        self.assertEqual(feed.get_state()["QQQ"]["ts_price"], 140)
+        self.assertEqual(feed.get_health()["timesale"]["counts"]["unmatched"], 1)
+
+    def test_flags_supply_type_session_and_valid_tick(self):
+        feed = self._feed()
+        # NEW | VALID_TICK | ETH
+        feed._ingest(self._print(price=150, time=1794260500000, tradeId=30, flags=0x0C))
+        state = feed.get_state()["QQQ"]
+        self.assertEqual(state["ts_price"], 150)
+        self.assertTrue(state["ts_extended"])
+        # NEW | ETH but no VALID_TICK: a non-valid tick is rejected.
+        feed._ingest(self._print(price=151, time=1794260600000, tradeId=31, flags=0x08))
+        self.assertEqual(feed.get_state()["QQQ"]["ts_price"], 150)
+        self.assertEqual(feed.get_health()["timesale"]["counts"]["invalid"], 1)
+
+    def test_a_spread_leg_tick_is_rejected(self):
+        feed = self._feed()
+        feed._ingest(self._print(price=170, time=1794260700000, tradeId=40, flags=0x14))
+        self.assertNotIn("ts_price", feed.get_state()["QQQ"])
+        self.assertEqual(feed.get_health()["timesale"]["counts"]["invalid"], 1)
+
+    def test_an_unknown_transactional_type_is_rejected(self):
+        feed = self._feed()
+        feed._ingest(self._print(price=160, time=1794260800000, type="NEW"))
+        feed._ingest(self._print(price=161, time=1794260900000, type="BOGUS"))
+        self.assertEqual(feed.get_state()["QQQ"]["ts_price"], 160)
+        self.assertEqual(feed.get_health()["timesale"]["counts"]["invalid"], 1)
+
+    def test_correction_and_cancellation_match_index_and_sequence(self):
+        feed = self._feed()
+        feed._ingest(self._print(price=180, time=1794261000000, sequence=3,
+                                 flags=0x04, tradeId=50))   # NEW | VALID_TICK
+        feed._ingest(self._print(price=181, time=1794261000000, sequence=3,
+                                 flags=0x05, tradeId=50))   # CORRECTION | VALID_TICK
+        self.assertEqual(feed.get_state()["QQQ"]["ts_price"], 181)
+        feed._ingest(self._print(time=1794261000000, sequence=3,
+                                 flags=0x02, tradeId=50))   # CANCEL, no VT, no price
+        self.assertNotIn("ts_price", feed.get_state()["QQQ"])
 
 
 class ExtendedPrintSelection(unittest.TestCase):

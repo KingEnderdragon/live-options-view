@@ -24,8 +24,16 @@ class DXLinkFeed:
     _DXLINK_VERSION = "0.1-js/1.0.0"
     # Channel 1 carries the existing quote/trade/greeks events. Time and sale
     # gets its own channel and its own FEED_SETUP so a field or event-type
-    # rejection there cannot disturb the accepted market feed.
-    _TIMESALE_CHANNEL = 2
+    # rejection there cannot disturb the accepted market feed. DXLink requires
+    # *odd* numbers for service channels, so the second feed channel is 3.
+    _TIMESALE_CHANNEL = 3
+    # TimeAndSale flags bit layout (dxFeed): type in bits 0-1 (NEW=0,
+    # CORRECTION=1, CANCEL=2), a valid-intraday-tick bit, an extended-hours bit
+    # and a spread-leg bit.
+    _TS_FLAG_TYPE_MASK = 0x3
+    _TS_FLAG_VALID_TICK = 1 << 2
+    _TS_FLAG_ETH = 1 << 3
+    _TS_FLAG_SPREAD_LEG = 1 << 4
 
     def __init__(self, url: str, token: str):
         self._url   = url
@@ -42,7 +50,8 @@ class DXLinkFeed:
         self._ts_subscribed       = False
         self._ts_error: Optional[str] = None
         self._ts_counts = {"received": 0, "accepted": 0, "corrected": 0,
-                           "cancelled": 0, "out_of_order": 0, "invalid": 0}
+                           "cancelled": 0, "out_of_order": 0, "invalid": 0,
+                           "unmatched": 0}
         self._data_logged         = False
         # lifecycle telemetry
         self._connected           = False
@@ -220,8 +229,9 @@ class DXLinkFeed:
             "type": "FEED_SETUP", "channel": self._TIMESALE_CHANNEL,
             "acceptDataFormat": "FULL",
             "acceptEventFields": {
-                "TimeAndSale": ["eventType", "eventSymbol", "time", "price", "size",
-                                "tradeId", "extendedTradingHours", "type"],
+                "TimeAndSale": ["eventType", "eventSymbol", "time", "sequence", "price",
+                                "size", "tradeId", "flags", "extendedTradingHours",
+                                "validTick", "spreadLeg", "type"],
             },
         })
 
@@ -406,56 +416,135 @@ class DXLinkFeed:
             return False
         return None
 
-    def _ingest_time_and_sale(self, s, event):
-        """One trade print with documented correction/cancellation semantics.
+    @staticmethod
+    def _print_key(*, index, observed, sequence, trade_id):
+        """Provider identity for correction/cancellation matching.
 
-        dxFeed's TimeAndSale carries each execution with its own provider time,
-        an `extendedTradingHours` flag, and a `type` that marks a new event, a
-        correction or a cancellation against the same `tradeId`. Only a
-        positive, provider-timed print is stored; the receipt clock is never
-        substituted. A correction replaces the stored print for its tradeId, a
-        cancellation removes that print, and an older unattributed print is
-        ignored rather than allowed to move the price backwards.
+        dxFeed's unique per-symbol index is time plus sequence, and `tradeId` is
+        0 when unavailable. An event with no index, no sequence and no trade id
+        has no identity, so a correction or cancellation for it cannot be
+        matched to anything we track.
+        """
+        if index is not None:
+            return f"i:{index}"
+        if observed is not None and sequence is not None:
+            return f"t:{observed}:{sequence}"
+        if trade_id is not None:
+            return f"id:{trade_id}"
+        return None
+
+    def _ingest_time_and_sale(self, s, event):
+        """One trade print with documented transaction semantics.
+
+        Identity is dxFeed's unique per-symbol index (time plus sequence) or a
+        non-zero tradeId; tradeId 0 means unavailable and never matches. A NEW
+        print moves the price only forward. A CORRECTION applies only to the
+        print it identifies, so an unrelated or older correction cannot rewind
+        the latest. A CANCEL removes the print it identifies even when it
+        carries no price. Non-valid ticks, spread legs and unknown transactional
+        types are rejected; the receipt clock is never substituted.
         """
         self._ts_counts["received"] += 1
+        flags = self._to_int(event.get("flags"))
+        if flags is not None and flags < 0:
+            flags = None
+        explicit_type = str(event.get("type") or "").strip().upper()
+        if explicit_type:
+            if explicit_type not in ("NEW", "CORRECTION", "CANCEL"):
+                self._ts_counts["invalid"] += 1
+                return
+            kind = explicit_type
+        elif flags is not None:
+            kind = {0: "NEW", 1: "CORRECTION", 2: "CANCEL"}.get(
+                flags & self._TS_FLAG_TYPE_MASK)
+            if kind is None:
+                self._ts_counts["invalid"] += 1
+                return
+        else:
+            kind = "NEW"
+        observed = self._event_time(event.get("time"))
+        sequence = self._to_int(event.get("sequence"))
+        index = self._to_int(event.get("index"))
+        trade_id = self._to_int(event.get("tradeId"))
+        if trade_id is not None and trade_id <= 0:
+            trade_id = None  # 0 means unavailable, not an identity
         price = self._to_float(event.get("price"))
         size = self._to_float(event.get("size"))
-        observed = self._event_time(event.get("time"))
-        trade_id = self._to_int(event.get("tradeId"))
-        kind = str(event.get("type") or "").strip().upper()
         extended = self._to_bool(event.get("extendedTradingHours"))
+        if extended is None and flags is not None:
+            extended = bool(flags & self._TS_FLAG_ETH)
+        valid = self._to_bool(event.get("validTick"))
+        if valid is None and flags is not None:
+            valid = bool(flags & self._TS_FLAG_VALID_TICK)
+        spread_leg = self._to_bool(event.get("spreadLeg"))
+        if spread_leg is None and flags is not None:
+            spread_leg = bool(flags & self._TS_FLAG_SPREAD_LEG)
+        key = self._print_key(index=index, observed=observed,
+                              sequence=sequence, trade_id=trade_id)
+        stored_key = s.get("ts_key")
+        stored_time = s.get("ts_time")
+        stored_sequence = s.get("ts_sequence")
+
+        if kind == "CANCEL":
+            self._ts_counts["cancelled"] += 1
+            if key is not None and key == stored_key:
+                for name in ("ts_price", "ts_time", "ts_size", "ts_trade_id",
+                             "ts_index", "ts_key", "ts_sequence", "ts_extended",
+                             "ts_valid", "ts_received_at"):
+                    s.pop(name, None)
+            else:
+                self._ts_counts["unmatched"] += 1
+            return
+
         if observed is None or price is None:
             self._ts_counts["invalid"] += 1
             return
-        stored_id = s.get("ts_trade_id")
-        cancelled = (kind.startswith("CANCEL") or price <= 0
-                     or (size is not None and size <= 0))
-        if cancelled:
-            self._ts_counts["cancelled"] += 1
-            if trade_id is not None and trade_id == stored_id:
-                for key in ("ts_price", "ts_time", "ts_size", "ts_trade_id",
-                            "ts_extended", "ts_received_at"):
-                    s.pop(key, None)
+        if valid is False or spread_leg:
+            self._ts_counts["invalid"] += 1
             return
-        observed_dt = datetime.fromisoformat(observed)
-        previous_dt = None
-        if s.get("ts_time"):
+
+        if kind == "CORRECTION":
+            if key is None or stored_key is None or key != stored_key:
+                self._ts_counts["unmatched"] += 1
+                return
+            self._ts_counts["corrected"] += 1
+            self._store_print(s, price=price, observed=observed, size=size,
+                              trade_id=trade_id, index=index, key=key,
+                              sequence=sequence, extended=extended, valid=valid)
+            return
+
+        # NEW: only a genuinely newer print may replace the latest.
+        if stored_key is not None and key is not None and key == stored_key:
+            self._ts_counts["corrected"] += 1
+            self._store_print(s, price=price, observed=observed, size=size,
+                              trade_id=trade_id, index=index, key=key,
+                              sequence=sequence, extended=extended, valid=valid)
+            return
+        if stored_time is not None:
             try:
-                previous_dt = datetime.fromisoformat(s["ts_time"])
+                newer = datetime.fromisoformat(observed) > datetime.fromisoformat(stored_time)
             except (TypeError, ValueError):
-                previous_dt = None
-        correction = (kind.startswith("CORRECTION")
-                      or (trade_id is not None and trade_id == stored_id))
-        if previous_dt is not None and observed_dt < previous_dt and not correction:
-            self._ts_counts["out_of_order"] += 1
-            return
-        self._ts_counts["corrected" if correction else "accepted"] += 1
+                newer = True
+            if not newer:
+                self._ts_counts["out_of_order"] += 1
+                return
+        self._ts_counts["accepted"] += 1
+        self._store_print(s, price=price, observed=observed, size=size,
+                          trade_id=trade_id, index=index, key=key,
+                          sequence=sequence, extended=extended, valid=valid)
+
+    def _store_print(self, s, *, price, observed, size, trade_id, index, key,
+                     sequence, extended, valid):
         s["ts_price"] = price
         s["ts_time"] = observed
         if size is not None:
             s["ts_size"] = size
         s["ts_trade_id"] = trade_id
+        s["ts_index"] = index
+        s["ts_key"] = key
+        s["ts_sequence"] = sequence
         s["ts_extended"] = extended
+        s["ts_valid"] = valid
         s["ts_received_at"] = datetime.now(timezone.utc).isoformat()
 
     def _ingest(self, data):

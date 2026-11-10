@@ -163,14 +163,22 @@ The lane also probes the documented same-feed `TimeAndSale` route rather than
 declaring the provider incapable. It subscribes trade prints for US equity/ETF
 symbols only, on a **separate DXLink channel with its own `FEED_SETUP`**, so a
 field or event-type rejection there cannot disturb the accepted quote/trade
-feed. `PRICE_LANE_TIMESALE=0` disables the probe without reverting the release.
+feed. The channel number is **3**: dxLink requires odd numbers for service
+channels. `PRICE_LANE_TIMESALE=0` disables the probe without reverting the
+release.
 
 A print is usable only when it carries its own provider `time` and a positive
-price. The parser applies dxFeed's documented transaction semantics: `type`
-NEW accepts, CORRECTION replaces the stored print for the same `tradeId`,
-CANCEL removes it, and an older print without a matching id is ignored as
-out-of-order. The collector receipt is stored beside the print but never
-substitutes for the provider time.
+price. Identity is dxFeed's unique per-symbol index (time plus sequence) or a
+non-zero `tradeId`; `tradeId` 0 means unavailable and never matches. The flags
+word supplies the transactional type (NEW, CORRECTION, CANCEL), the
+extended-hours bit, the valid-intraday-tick bit and the spread-leg bit; the
+explicit derived fields are accepted when present. Non-valid ticks, spread
+legs, unknown transactional types and corrections/cancellations without an
+identity are rejected. A NEW print moves the price only forward, a CORRECTION
+applies only to the print it identifies (an unrelated or older correction
+cannot rewind the latest), and a CANCEL removes the print it identifies even
+when it carries no price. The collector receipt is stored beside the print but
+never substitutes for the provider time.
 
 Selection uses a print only in premarket/after-hours, only when the print's
 provider time is inside the active session, only when the provider did not mark
