@@ -238,19 +238,41 @@ export function createLegacyKvSource(env) {
   // Workers KV pages by an opaque cursor. The migration needs to resume inside
   // a page as well, so the contract here exposes the page token and lets the
   // caller carry a per-page offset; `null` nextToken means the prefix is done.
-  async function page(namespace, prefix, pageToken) {
-    const result = await namespace.list({
-      prefix, limit: 100, ...(pageToken ? { cursor: pageToken } : {}),
-    });
-    return {
-      keys: (result.keys ?? []).map(k => k.name),
-      nextToken: result.list_complete === true ? null : (result.cursor ?? null),
-    };
+  //
+  // The migration walks a page one record at a time, so a naive adapter issues
+  // one KV `list` per record -- on the Free plan list requests are a separate,
+  // small daily allowance (1,000/day), and a 275-session copy would spend it in
+  // minutes. This adapter therefore memoises *page key lists* for its own
+  // lifetime. It is created inside each `handleMigration` call, so the cache is
+  // request-scoped: a new request gets a new adapter and a fresh listing. Only
+  // key names are cached (never values), keys include the binding, prefix and
+  // page token, and a failed list is evicted rather than remembered.
+  const pageCache = new Map();
+
+  function page(binding, namespace, prefix, pageToken) {
+    const cacheKey = `${binding}\u0000${prefix}\u0000${pageToken ?? ''}`;
+    const cached = pageCache.get(cacheKey);
+    if (cached) return cached;
+
+    const pending = (async () => {
+      const result = await namespace.list({
+        prefix, limit: 100, ...(pageToken ? { cursor: pageToken } : {}),
+      });
+      return {
+        keys: (result.keys ?? []).map(k => k.name),
+        nextToken: result.list_complete === true ? null : (result.cursor ?? null),
+      };
+    })();
+    pageCache.set(cacheKey, pending);
+    // A rejection must not pin the failure for the rest of the request: drop it
+    // so the next call re-lists (and so a retry can succeed).
+    pending.catch(() => pageCache.delete(cacheKey));
+    return pending;
   }
   return {
-    listUsers: ({ pageToken } = {}) => page(env.USERS, 'user:', pageToken),
-    listSessions: ({ pageToken } = {}) => page(env.SESSIONS, 'sess:', pageToken),
-    listBotMarkers: ({ pageToken } = {}) => page(env.USERS, 'bot:', pageToken),
+    listUsers: ({ pageToken } = {}) => page('USERS', env.USERS, 'user:', pageToken),
+    listSessions: ({ pageToken } = {}) => page('SESSIONS', env.SESSIONS, 'sess:', pageToken),
+    listBotMarkers: ({ pageToken } = {}) => page('USERS', env.USERS, 'bot:', pageToken),
     async getUser(username) {
       return env.USERS.get(userKey(username));
     },
