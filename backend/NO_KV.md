@@ -298,6 +298,62 @@ Nothing in this migration deletes a legacy key. Retiring the namespaces is a
 separate operation after the cutover has been observed for long enough that the
 reverse path is no longer wanted.
 
+## Post-cutover cleanup: retiring KV and the migration route
+
+This section describes the revision that follows a successful cutover
+(verify + stabilize + finalize, switch deployed, postcheck matched, auth and
+logout verified). It is preparation, not part of the cutover itself.
+
+**What the cleanup revision changes.** The normal Worker no longer binds
+`USERS` or `SESSIONS`, and it no longer mounts `POST /api/admin/migrate`. The
+fence check moves to `backend/fence.js`, which the normal entry keeps as a
+safety interlock; the migration machinery (`backend/migrate.js`) is reachable
+only through the separate `backend/recovery.js` entry. A static test asserts the
+production config has no KV namespace block, the normal entry imports neither
+`migrate.js` nor the route, and no runtime module outside the recovery path
+references `env.USERS`/`env.SESSIONS`.
+
+**Legacy data is preserved.** Removing a binding does not delete a namespace.
+The KV data stays in the account as a cold archive. It is not a serving target
+and not a rollback promise: the incident that motivated this work was exhausted
+KV writes, and a stale archive cannot be trusted with post-cutover writes. D1 is
+the serving rollback floor — a code rollback means deploying a previous
+D1-reading revision, not re-pointing at KV.
+
+**Offline recovery procedure.** If the legacy archive is ever needed (for
+example, to recover an account that only exists there), deploy the recovery
+Worker deliberately:
+
+```
+wrangler deploy --config wrangler.recovery.toml
+wrangler secret put MIGRATION_TOKEN --config wrangler.recovery.toml
+# arm the fence, run the phases, verify, reconcile; then remove it
+wrangler delete live-options-recovery
+```
+
+`wrangler.recovery.toml` binds the legacy namespaces, points at the same D1
+database, mounts only the recovery entry, and has no cron triggers or asset
+routes. It must never receive user traffic. Because it shares D1, recovery
+writes land in the same accounts production serves; that is why recovery work
+runs under the fence, exactly like the original copy.
+
+**Deployment order.**
+
+1. Cutover complete: `verify` and `stabilize` agree, `finalize` returned 200,
+   the switch revision is live, `postcheck` reports `matches: true`, and login,
+   read, logout and re-read have been exercised against the switch.
+2. Deploy this cleanup revision to the normal Worker. Expect 404 on
+   `/api/admin/migrate`; expect normal auth, roster and trading to keep working
+   with no KV binding present.
+3. Optionally delete the recovery Worker if one was deployed for the cutover;
+   the namespaces themselves stay untouched.
+4. Retiring the namespaces (deleting the data) is a separate, later decision that
+   this work does not make.
+
+**Recovery implications in one line.** After cleanup, recovery is an explicit
+offline deployment with KV bindings and the migration token, not a runtime mode,
+and the only always-on rollback floor is D1.
+
 ## Redacted acceptance criteria
 
 Each item is checkable without exposing an account, a record or a secret.

@@ -1,8 +1,8 @@
 // backend/common.js (B4) -- shared foundation for the Worker modules: the
 // constants and helpers more than one route group needs (response/body
-// helpers, KV key helpers, session-cookie helpers, the optimistic-concurrency
-// account writer, and the position-book primitive). worker.js re-exports the
-// public names so the Worker's 32-export API is unchanged. Moved verbatim
+// helpers, legacy key helpers kept for the offline recovery path, session-cookie
+// helpers, the D1 account writer, and the position-book primitive). worker.js
+// re-exports the public names so the Worker's 32-export API is unchanged. Moved verbatim
 // from worker.js; only the file changed, not the code.
 
 import { createStorage } from './storage.js';

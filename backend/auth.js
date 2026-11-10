@@ -1,7 +1,8 @@
 // backend/auth.js (B4) -- auth: password hashing, session start, and the
 // /api/register, /api/login, /api/logout, /api/me routes. Moved verbatim
-// from worker.js; the entry re-exports the public names. The session-cookie
-// and KV helpers live in backend/common.js; bot-membership sync (retried on
+// from worker.js; the entry re-exports the public names. Session-cookie
+// helpers live in backend/common.js, accounts and sessions are stored in D1
+// through backend/storage.js, and bot-membership sync (retried on
 // register/login) lives in backend/bots.js.
 
 import {
