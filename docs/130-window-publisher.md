@@ -213,6 +213,14 @@ new publications until cleanup or an approved raise — it never silently
 deletes live data. There is no legacy data under `oa203/windows/`, so no
 policy-start floor is needed (unlike the scanner prefix).
 
+Retention timing (decision): cleanup runs inside `clean_and_reserve`
+during a publish — expired objects are deleted and the deletion
+re-verified before the new revision is charged — so the NEXT PUBLISH is
+the next cleanup. There is no standalone janitor, no timer, and no
+background expiry run. If publications stop, expired objects simply
+stay until the next publish; the cap and the per-revision reservation
+still bound every publish.
+
 ## What remains for live publication (release gate, unapproved)
 
 1. **Chej/Owen approval** of this publisher, its state decisions, and the

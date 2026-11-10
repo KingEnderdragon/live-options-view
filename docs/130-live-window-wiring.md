@@ -1,7 +1,7 @@
 # Live window producer / publication wiring — #130 / F2 inventory
 
-Status: INVENTORY + DORMANT WIRING. Nothing in this document activates,
-deploys, or publishes anything. The first bounded batch publication
+Status: INVENTORY + DORMANT WIRING (live-builder implemented offline, flag off).
+Nothing in this document activates, deploys, or publishes anything. The first bounded batch publication
 remains an acceptance probe (docs/130-first-window-publication-plan.md);
 this doc answers what has to exist for window products to be produced
 and published continuously, not just once.
@@ -27,10 +27,10 @@ published windows found.
 | 8 | Publisher (validate → budget → readback → pointer) | `market_data/options_scanner/windows_publish.py:publish_window` (line 912); `WindowBudget` (line 734: 90 days, 8 GiB, 20 MiB reserve, 3 attempts, 16 revisions); `R2Backend` + `r2_backend()` (line 714, reuses `market_data.tradier.probe` `r2_client`) | PRESENT as code, offline only |
 | 9 | Publish-all driver (emit root → backend) | `windows_live.py:publish_windows`; CLI `windows-publish` (local backend only) | IMPLEMENTED, offline |
 | 10 | Consumer (window_rankings + pointer check) | `market_mcp/consumer.js:window()`, `server.js:window_rankings`; image pinned to exact `c8fcf529` in `.github/workflows/publish-market-mcp-renaissance.yml` | PRESENT as code; deployment is Chej's release step |
-| 11 | Live trigger (build + publish after finalize / on cadence) | — no caller — | MISSING, out of scope (see below) |
-| 12 | Partial-day admission (final but assessment ≠ complete) | `windows_replay.validate_manifest` refuses any non-complete day; `windows_live` inherits the refusal | MISSING, out of scope (see below) |
-| 13 | Full-universe combine-emit (14 batches → one emit) | — no such step — (plan doc records the same gap) | MISSING, out of scope (see below) |
-| 14 | Retention janitor (standalone expiry deletion) | `WindowBudget` retention is enforced only inside `clean_and_reserve` during a publish; no independent expiry runner exists | PARTIAL — runs only when a publish happens |
+| 11 | Live trigger (build + publish after finalize) | `session.py:finalize` → `maybe_run_windows_after_finalize` → `windows_live.run_after_finalize`, gated by env `OA203_WINDOWS_LIVE_ENABLED == "1"` (default off; enabling is Chej's activation step) | IMPLEMENTED, offline, disabled by default |
+| 12 | Partial-day admission (final but assessment ≠ complete) | `windows_replay.validate_manifest` admits assessment `complete` or `partial`; `load_session` carries `assessment_reasons`; `windows_outputs.window_state` propagates `session_partial:<day>`; torn/invalid manifests still refused | IMPLEMENTED, offline |
+| 13 | Full-universe combine-emit (14 batches → one emit) | `market_data/options_scanner/windows_combine.py` (`combine_rows` / `combine_csv_rows` / `combine_emit` / `rows_from_paths`); `windows_live.build_windows(full_universe=True)` ranks the combined universe before the shortlist; CLI `windows-build --full-universe` + `windows-combine` | IMPLEMENTED, offline |
+| 14 | Retention janitor (standalone expiry deletion) | `WindowBudget` retention is enforced only inside `clean_and_reserve` during a publish; no independent expiry runner exists — by decision, publish-time cleanup is sufficient (next publish is the next cleanup); no standalone janitor is added | DECIDED — publish-time cleanup only |
 | 15 | Intraday `in_progress` windows | Publisher refuses `in_progress` outright; consumer serves summary-only | NOT SUPPORTED BY DESIGN (scope disposition, not a gap) |
 
 ## What the offline chain proves
@@ -38,12 +38,20 @@ published windows found.
 `windows_live` closes pieces 6–9 with the same evidence standard as
 the parity work: the real producer (`windows.evaluate` +
 `windows_outputs.write_window`) over local finalized archives, the
-real publisher over a local backend, all 6 kinds × 3 bases, final
-state preserved (`live_archive` scope — unlike replay emits, which
-`write_window` forces to `partial`/`bounded_universe_replay`). Tests:
-`tests/test_oa203_windows_live.py` (build all kinds final; partial-day
-refusal; bounds; publish-all + idempotent re-publish; CLI build +
-publish). The chain is callable today, by hand, offline:
+real publisher over a local backend, all 6 kinds × 3 bases. State is
+truthful about scope: a bounded-subset build is served `partial` with
+`bounded_universe_subset` (`live_archive` scope, never full-universe
+final); a full-universe build keeps a genuinely final window final
+(replay emits stay forced `partial`/`bounded_universe_replay`). Tests:
+`tests/test_oa203_windows_live.py` (subset build is partial;
+full-universe build final; partial-day admitted with reasons; torn
+manifest refused; shared-symbol conflict excluded; bounds;
+publish-all + idempotent re-publish; CLI build + publish),
+`tests/test_oa203_windows_combine.py` (combine conflict/duplicate/
+rank-after-combine + the real 14-batch replay counts) and
+`tests/test_oa203_windows_trigger.py` (flag off no-op; flag on
+build + publish over a local backend). The chain is callable today, by
+hand, offline:
 
 ```sh
 python -m market_data.options_scanner windows-build \
@@ -54,37 +62,34 @@ python -m market_data.options_scanner windows-publish \
   --emit-root <emit-root> --out <local-backend-root>
 ```
 
-## Remaining implementation (not in this commit)
+## Remaining implementation (live-builder work done; release gates remain)
 
-1. **Live trigger — owner Chej (release) / Brian (scanner lane),
-   gate: Owen/Chej activation approval.** What is needed: a call to
-   `build_windows` + `publish_windows` (with `r2_backend()`) after
-   `finalize` in `run_day`, or a second scheduled step on the scanner
-   service, gated by a new env flag in the shape of
-   `OA203_ACTIVE_SNAPSHOTS_ENABLED` (`session.py:299`). This was NOT
-   implemented here because it needs a new flag and a live activation,
-   which are outside the approved scope for this commit. Until it
-   exists, windows are produced only by the manual commands above or
-   by the one-off batch in the first-window plan.
-2. **Partial-day admission — owner Chej/Brian, gate: design decision.**
-   Today a day whose summary is `final` but whose assessment is not
-   `complete` (e.g. real Oct 8, 2026: partial) is refused outright by
-   `validate_manifest`, so no window covering that day can be built at
-   all — fail-closed, but no windows for that week. The decision
-   needed: is a final-but-partially-assessed day trustworthy evidence,
-   with `session_partial:<day>` reasons propagated (the parity work
-   already proves the consumer serves such partial windows correctly)?
-   Until decided, live weeks containing a partial day produce nothing.
-3. **Full-universe combine-emit — owner Chej/Brian.** `build_windows`
-   is bounded to 50 underlyings / 10 sessions (mirroring the replay
-   bound); the preserved #130 full universe is 661 underlyings in 14
-   batches. A combine step merging batch emits with the same conflict
-   semantics as `combine-full-universe.py` does not exist yet.
-4. **Retention janitor — owner Chej.** Expired revisions are deleted
-   only when a later publish runs `clean_and_reserve`. If publications
-   stop, expired data is not deleted until the next publish. A
-   standalone expiry run (or an explicit decision that publish-time
-   cleanup is sufficient) is still owed.
+1. **Live trigger — IMPLEMENTED offline (live-builder); owner Chej
+   (release), gate: Owen/Chej activation approval.** `finalize` now
+   calls `maybe_run_windows_after_finalize` (flag
+   `OA203_WINDOWS_LIVE_ENABLED`, default off); when enabled it runs
+   `windows_live.run_after_finalize` (full-universe build + publish
+   with `r2_backend()`). Enabling the flag is live activation and is
+   NOT done here — Chej alone enables it after review. Until then,
+   windows are produced only by the manual commands above or by the
+   one-off batch in the first-window plan.
+2. **Partial-day admission — IMPLEMENTED offline (live-builder).**
+   A day whose summary is `final` but whose assessment is `partial`
+   (e.g. real Oct 8, 2026) is admitted with explicit
+   `session_partial:<day>` reasons propagated into the window summary
+   (partial, never final); torn/invalid manifests are still refused
+   fail-closed. The parity work already proves the consumer serves
+   such partial windows correctly.
+3. **Full-universe combine-emit — IMPLEMENTED offline (live-builder).**
+   `market_data/options_scanner/windows_combine.py` merges batch emits
+   with the same conflict semantics as `combine-full-universe.py`
+   (conflicting attributions excluded fail-closed with a conflict
+   report; pure duplicates deduped); `build_windows(full_universe=True)`
+   combines and ranks the full universe before the shortlist is cut.
+4. **Retention janitor — DECIDED, no janitor added.** Publish-time
+   cleanup inside `clean_and_reserve` is sufficient within the 8 GiB
+   cap: the next publish is the next cleanup (see
+   `docs/130-window-publisher.md`). No standalone expiry run.
 5. **Live R2 publication + attached-client verification — owner Chej.**
    Covered by the first-window plan's pre-checks (bounded builder,
    conditional reservation/readback/delete of a trial window, verified
