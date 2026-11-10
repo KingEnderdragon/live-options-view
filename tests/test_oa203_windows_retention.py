@@ -390,6 +390,7 @@ class PruneValidationTests(unittest.TestCase):
         self.assertTrue(outside.exists())
         self.assertTrue((self.spool / "2026-10-09" / "summary.json").is_file())
 
+    @unittest.skipUnless(os.name == "nt", "Windows junction test")
     def test_prune_refuses_junction_escape(self):
         # Windows junctions (mklink /J) are directory links that
         # os.path.is_symlink does not see; _is_link must catch them.
