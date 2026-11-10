@@ -35,14 +35,25 @@ report (one record per attribution). A symbol whose rows are identical
 in evidence is a pure duplicate and is deduped to one row. Nothing is
 silently chosen.
 
-Batch validation (fail closed): every batch emit root must exist and
-hold the same set of windows with the same kind, window id, policy
-version and sessions; a missing, unexpected or duplicate batch, or
-windows whose session sets disagree, FAILS instead of producing a
-partial result. Ranks are cut only after the combined universe is
-ranked (``windows_outputs.rankings_csv`` ranks the full row set, then
-cuts the shortlist); the combined emit carries all bases and the full
-paths evidence for every kept row.
+Coverage contract (fail closed): :func:`combine_emit` requires an
+explicit :class:`CombineCoverage` — the expected underlyings, batch
+names and source locks, plus whether the contract claims the full
+universe or a bounded subset. Nothing is inferred from whatever inputs
+happen to arrive: a missing batch, an unexpected batch, an aliased
+duplicate batch (same batch content under two names, or the same
+underlying in two batches), underlyings that do not match the contract
+exactly, or source locks that do not match the contract exactly all
+FAIL. Every batch summary is validated, including the first (no
+first-summary-is-trusted shortcut): kind/window id, policy version,
+sessions and session status must agree across all batches, and every
+summary must carry sources. A subset/partial input comes out as
+``bounded_subset``/``partial`` (or is refused), with the reason
+recorded; only a contract that claims ``full_universe`` AND matches the
+actual inputs exactly may produce ``full_universe``/``final``. Ranks
+are cut only after the combined universe is ranked
+(``windows_outputs.rankings_csv`` ranks the full row set, then cuts the
+shortlist); the combined emit carries all bases and the full paths
+evidence for every kept row.
 
 This module only reads local emit trees and writes a local emit tree.
 Publishing the combined emit is ``windows_publish`` (offline-tested
@@ -56,6 +67,7 @@ import gzip
 import io
 import json
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -97,6 +109,45 @@ CONFLICT_COLUMNS = ["window", "symbol", "batch", "underlying", "option_type",
 # entry/exit ms, option_type, strike, expiration, flags) and extends it
 # from the flat CSV row to the evaluated row's full per-basis evidence;
 # nothing in that list is narrowed.
+@dataclass(frozen=True)
+class CombineCoverage:
+    """Explicit expected universe/batch coverage contract for combine_emit.
+
+    ``expected_underlyings`` is the complete set of underlyings the
+    combined emit must cover — no more, no fewer. ``expected_batches``
+    is the exact set of batch names (one emit root per batch).
+    ``expected_sources`` is the exact set of ``(key, sha256)`` source
+    locks the batch summaries must jointly carry. ``scope`` states what
+    the caller claims the inputs are: ``"full_universe"`` (the contract
+    is the complete evidence for a full-universe emit) or
+    ``"bounded_subset"`` (a subset, served partial, never final).
+    """
+
+    expected_underlyings: frozenset
+    expected_batches: tuple
+    expected_sources: frozenset
+    scope: str = "full_universe"
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"scope": self.scope,
+                "expected_batches": sorted(self.expected_batches),
+                "expected_underlyings": sorted(self.expected_underlyings),
+                "expected_sources": sorted(f"{k}:{v}" for k, v in self.expected_sources)}
+
+
+def combine_coverage_from_dict(data: Mapping[str, Any]) -> CombineCoverage:
+    """Build a CombineCoverage from a JSON mapping (CLI --coverage file)."""
+    try:
+        scope = data.get("scope", "full_universe")
+        return CombineCoverage(
+            frozenset(data["expected_underlyings"]),
+            tuple(data["expected_batches"]),
+            frozenset((k, v) for k, v in data["expected_sources"]),
+            scope)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"invalid coverage contract: {exc}") from exc
+
+
 def _row_evidence(row: Mapping[str, Any]) -> tuple:
     """Hashable evidence for one evaluated row (all bases + identity)."""
     parts: list[Any] = []
@@ -333,22 +384,70 @@ def _window_from_summary(summary: Mapping[str, Any]) -> w.Window:
                     entry, by_day[summary["exit_session"]])
 
 
-def combine_emit(batch_emit_roots: Sequence[Path | str], out_root: Path | str,
-                 *, policy: w.WindowPolicy | None = None) -> dict[str, Any]:
-    """Combine per-batch emit trees into one full-universe emit tree.
+def _validate_summaries(window_id: str, summaries: Sequence[Mapping[str, Any]]) -> None:
+    """Validate EVERY batch summary for one window, including the first.
 
-    ``batch_emit_roots`` are distinct local emit roots (one per batch);
-    the same root twice, a missing root, or roots whose window sets
-    disagree all fail closed. Writes the combined ``oa203/windows/``
-    tree under ``out_root`` plus ``conflicts.csv`` and
-    ``combine_report.json`` at the root. Returns the report.
+    Kind/window id, policy version, sessions and session status must
+    agree across all batches; every summary must carry sources. There
+    is no first-summary-is-trusted shortcut: a tampered or invalid
+    first summary is a refusal, not a silent basis for the combine.
+    """
+    first = summaries[0]
+    for s in summaries:
+        if s.get("policy", {}).get("version") != POLICY:
+            raise ValueError(f"{window_id}: batch policy version disagrees "
+                             f"(expected {POLICY})")
+        if (s.get("kind"), s.get("window_id")) != (first.get("kind"), first.get("window_id")):
+            raise ValueError(f"{window_id}: batch summaries disagree on kind/window_id")
+        if s.get("sessions") != first.get("sessions"):
+            raise ValueError(f"{window_id}: batch session sets disagree")
+        if not s.get("sources"):
+            raise ValueError(f"{window_id}: batch summary carries no sources")
+
+
+def combine_emit(batch_emit_roots: Sequence[Path | str], out_root: Path | str,
+                 *, coverage: CombineCoverage | None = None,
+                 policy: w.WindowPolicy | None = None) -> dict[str, Any]:
+    """Combine per-batch emit trees into one emit tree.
+
+    ``batch_emit_roots`` are distinct local emit roots (one per batch).
+    ``coverage`` is REQUIRED: an explicit :class:`CombineCoverage`
+    naming the expected underlyings, batches and source locks and
+    whether they claim the full universe or a bounded subset. A missing,
+    unexpected or aliased duplicate batch, underlyings or source locks
+    that do not match the contract exactly, or summaries that disagree
+    all fail closed. A subset/partial input comes out as
+    ``bounded_subset``/``partial`` (or is refused); only a
+    ``full_universe`` contract that matches the actual inputs exactly
+    may produce ``full_universe``/``final``. Writes the combined
+    ``oa203/windows/`` tree under ``out_root`` plus ``conflicts.csv``
+    and ``combine_report.json`` at the root. Returns the report.
     """
     policy = policy or w.WindowPolicy()
     if policy.as_dict()["version"] != POLICY:
         raise ValueError(f"combine requires policy {POLICY}")
+    if coverage is None:
+        raise ValueError("combine_emit requires an explicit coverage contract "
+                         "(CombineCoverage: expected underlyings, batches and source locks); "
+                         "a subset must never be promoted to full_universe/final from "
+                         "whatever inputs happen to arrive")
+    if coverage.scope not in ("full_universe", "bounded_subset"):
+        raise ValueError(f"unknown coverage scope {coverage.scope!r}")
+    if not coverage.expected_underlyings or not coverage.expected_batches \
+            or not coverage.expected_sources:
+        raise ValueError("coverage contract must name expected underlyings, "
+                         "batches and source locks")
     roots = [Path(r) for r in batch_emit_roots]
+    if not roots:
+        raise ValueError("no batch emit roots")
     if len({str(r) for r in roots}) != len(roots):
         raise ValueError("duplicate batch emit root")
+    if len(roots) != len(coverage.expected_batches):
+        raise ValueError(f"coverage expects {len(coverage.expected_batches)} batches "
+                         f"({sorted(coverage.expected_batches)}), got {len(roots)} roots")
+    if {r.name for r in roots} != set(coverage.expected_batches):
+        raise ValueError(f"batch roots {sorted(r.name for r in roots)} do not match "
+                         f"coverage expected batches {sorted(coverage.expected_batches)}")
     trees = [_read_emit_tree(r) for r in roots]
     window_set = {(kind, wid) for kind in trees[0] for wid in trees[0][kind]}
     for root, tree in zip(roots, trees):
@@ -361,41 +460,82 @@ def combine_emit(batch_emit_roots: Sequence[Path | str], out_root: Path | str,
     generated_at = datetime.now(timezone.utc).isoformat()
     report: dict[str, Any] = {"combine": "windows_combine", "policy": POLICY,
                               "batches": [str(r) for r in roots],
+                              "coverage": coverage.as_dict(),
                               "generated_at": generated_at, "windows": {},
                               "conflicts": {"symbols": 0, "rows": 0, "report": "conflicts.csv"}}
     all_conflicts: list[dict] = []
+    provenance: dict[str, Any] = {}
     for kind, window_id in sorted(window_set):
         summaries = []
         for root, tree in zip(roots, trees):
             summaries.append(json.loads((tree[kind][window_id] / "summary.json").read_text(encoding="utf-8")))
+        _validate_summaries(window_id, summaries)
         first = summaries[0]
-        for s in summaries[1:]:
-            if (s["kind"], s["window_id"]) != (first["kind"], first["window_id"]):
-                raise ValueError(f"{window_id}: batch summaries disagree on kind/window_id")
-            if s.get("policy", {}).get("version") != POLICY:
-                raise ValueError(f"{window_id}: batch policy version disagrees")
-            if s["sessions"] != first["sessions"]:
-                raise ValueError(f"{window_id}: batch session sets disagree")
+        provenance[f"{kind}/{window_id}"] = {
+            r.name: (s.get("scope") or {}) for r, s in zip(roots, summaries)}
+        for root, s in zip(roots, summaries):
+            if (s.get("scope") or {}).get("universe_scope") == "bounded_subset" \
+                    and coverage.scope == "full_universe":
+                raise ValueError(f"{window_id}: batch {root.name} declares bounded_subset "
+                                 "but the coverage contract claims full_universe")
         window = _window_from_summary(first)
         session_status = {s["day"]: {"final": s.get("final"), "assessment": s.get("assessment"),
                                      "sweeps": s.get("sweeps")} for s in first["sessions"]}
         attributions = []
         sources: list[dict] = []
         seen_sources: set = set()
+        paths_by_root: dict[Path, bytes] = {}
         for root, tree in zip(roots, trees):
             win_dir = tree[kind][window_id]
-            attributions.append((root.name, rows_from_paths(
-                (win_dir / "paths.csv.gz").read_bytes(), window, policy)))
-            for src in json.loads((win_dir / "summary.json").read_text(encoding="utf-8")).get("sources", []):
+            data = (win_dir / "paths.csv.gz").read_bytes()
+            for other_root, other_data in paths_by_root.items():
+                if data == other_data:
+                    raise ValueError(f"{window_id}: batches {other_root.name} and {root.name} "
+                                     "hold identical window content (aliased duplicate batch)")
+            paths_by_root[root] = data
+            attributions.append((root.name, rows_from_paths(data, window, policy)))
+        for s in summaries:
+            for src in s.get("sources", []):
                 key = (src.get("key"), src.get("sha256"))
                 if key not in seen_sources:
                     seen_sources.add(key)
                     sources.append(src)
+        if seen_sources != set(coverage.expected_sources):
+            raise ValueError(f"{window_id}: source locks do not match the coverage contract "
+                             f"(missing {sorted(set(coverage.expected_sources) - seen_sources)}, "
+                             f"unexpected {sorted(seen_sources - set(coverage.expected_sources))})")
+        per_batch_underlyings = [{r["underlying"] for r in rows} for _, rows in attributions]
+        for i, under in enumerate(per_batch_underlyings):
+            for j, other in enumerate(per_batch_underlyings):
+                if i < j and under & other:
+                    raise ValueError(f"{window_id}: underlying(s) {sorted(under & other)} appear in "
+                                     f"two batches ({roots[i].name}, {roots[j].name}); "
+                                     "overlapping batches are refused")
+        actual_underlyings: set = set()
+        for under in per_batch_underlyings:
+            actual_underlyings |= under
+        if actual_underlyings != set(coverage.expected_underlyings):
+            raise ValueError(f"{window_id}: combined underlyings {sorted(actual_underlyings)} do not "
+                             f"match coverage expected {sorted(coverage.expected_underlyings)} "
+                             f"(missing {sorted(set(coverage.expected_underlyings) - actual_underlyings)}, "
+                             f"unexpected {sorted(actual_underlyings - set(coverage.expected_underlyings))})")
         kept, conflicts, stats = combine_rows(window_id, attributions)
-        scope = {"mode": "full_universe", "universe_scope": "full_universe",
-                 "batches": [r.name for r in roots], "conflicts": len(conflicts),
-                 "note": "combined full universe: batches ranked together before the shortlist cut; "
-                         "conflicting symbols excluded fail-closed, see conflicts.csv"}
+        if coverage.scope == "bounded_subset":
+            scope = {"mode": "combined", "universe_scope": "bounded_subset",
+                     "batches": [r.name for r in roots], "conflicts": len(conflicts),
+                     "coverage_scope": "bounded_subset",
+                     "note": "combined bounded subset: the coverage contract declares a subset; "
+                             "served partial, never final"}
+        else:
+            scope = {"mode": "full_universe", "universe_scope": "full_universe",
+                     "batches": [r.name for r in roots], "conflicts": len(conflicts),
+                     "coverage": {"expected_batches": sorted(coverage.expected_batches),
+                                  "expected_underlyings": len(coverage.expected_underlyings),
+                                  "expected_sources": len(coverage.expected_sources)},
+                     "note": "combined full universe: batches ranked together before the shortlist cut; "
+                             "conflicting symbols excluded fail-closed, see conflicts.csv; "
+                             "full_universe claimed only because the explicit coverage contract "
+                             "matches the actual inputs exactly"}
         outputs.write_window(out_root, window, kept, policy, session_status, sources,
                              generated_at, scope)
         # Conflict report rows are flattened on the qualified basis (the
@@ -436,5 +576,6 @@ def combine_emit(batch_emit_roots: Sequence[Path | str], out_root: Path | str,
             wr.writerow({c: (r.get(c, "") if not isinstance(r.get(c), dict) else "") for c in CONFLICT_COLUMNS})
     report["conflicts"] = {"symbols": len({r["symbol"] for r in all_conflicts}),
                            "rows": len(all_conflicts), "report": "conflicts.csv"}
+    report["provenance"] = {"batch_scopes": provenance}
     (out_root / "combine_report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     return report

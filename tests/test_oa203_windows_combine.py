@@ -64,6 +64,12 @@ def _sources():
             for d in DAYS]
 
 
+def _coverage(underlyings, batches, scope="full_universe"):
+    locks = {(s["key"], s["sha256"]) for s in _sources()}
+    return combine.CombineCoverage(frozenset(underlyings), tuple(batches),
+                                   frozenset(locks), scope)
+
+
 def _write_emit(root, specs, *, state_status=None):
     return outputs.write_window(root, WIN, _rows(specs), w.WindowPolicy(),
                                 state_status or _status(), _sources(),
@@ -179,7 +185,10 @@ class CombineEmitTests(unittest.TestCase):
                              ("SHR261009C00100000", "AAA", 0.15, 0.48)])
         _write_emit(emit_b, [("BBB261009C00100000", "BBB", 0.15, 0.48),
                              ("SHR261009C00100000", "BBB", 0.90, 0.20)])
-        report = combine.combine_emit([emit_a, emit_b], self.root / "combined")
+        report = combine.combine_emit([emit_a, emit_b], self.root / "combined",
+                                      coverage=_coverage({"AAA", "BBB"},
+                                                         ["batch-01", "batch-02"]))
+        self.assertEqual(report["coverage"]["scope"], "full_universe")
         win_report = report["windows"]["overnight/overnight-2026-10-05_2026-10-06"]
         self.assertEqual(win_report["kept"], 2)
         self.assertEqual(win_report["conflicting_symbols"], 1)
@@ -230,13 +239,182 @@ class CombineEmitTests(unittest.TestCase):
         import shutil
         shutil.rmtree(emit_b / "oa203" / "windows" / "oa203-windows-v1" / "overnight")
         with self.assertRaises(ValueError):
-            combine.combine_emit([emit_a, emit_b], self.root / "combined")
+            combine.combine_emit([emit_a, emit_b], self.root / "combined",
+                                 coverage=_coverage({"AAA", "BBB"}, ["batch-01", "batch-02"]))
 
     def test_duplicate_batch_root_fails(self):
         emit_a = self.root / "batch-01"
         _write_emit(emit_a, [("AAA261009C00100000", "AAA", 1.00, 1.50)])
         with self.assertRaises(ValueError):
-            combine.combine_emit([emit_a, emit_a], self.root / "combined")
+            combine.combine_emit([emit_a, emit_a], self.root / "combined",
+                                 coverage=_coverage({"AAA", "BBB"}, ["batch-01", "batch-02"]))
+
+
+class CombineCoverageTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _summary(self, out):
+        d = (out / "oa203" / "windows" / "oa203-windows-v1" / "overnight"
+             / "overnight-2026-10-05_2026-10-06")
+        return json.loads((d / "summary.json").read_text(encoding="utf-8"))
+
+    def test_no_coverage_refused(self):
+        emit_a = self.root / "batch-01"
+        emit_b = self.root / "batch-02"
+        _write_emit(emit_a, [("AAA261009C00100000", "AAA", 1.00, 1.50)])
+        _write_emit(emit_b, [("BBB261009C00100000", "BBB", 0.15, 0.48)])
+        with self.assertRaises(ValueError):
+            combine.combine_emit([emit_a, emit_b], self.root / "combined")
+
+    def test_single_subset_with_subset_contract_is_partial_not_final(self):
+        emit_a = self.root / "batch-01"
+        _write_emit(emit_a, [("AAA261009C00100000", "AAA", 1.00, 1.50)])
+        report = combine.combine_emit([emit_a], self.root / "combined",
+                                      coverage=_coverage({"AAA"}, ["batch-01"],
+                                                         scope="bounded_subset"))
+        self.assertEqual(report["coverage"]["scope"], "bounded_subset")
+        summary = self._summary(self.root / "combined")
+        self.assertEqual(summary["state"], "partial")
+        self.assertEqual(summary["scope"]["universe_scope"], "bounded_subset")
+        self.assertEqual(summary["state_reasons"], ["bounded_universe_subset"])
+
+    def test_single_subset_with_full_universe_contract_refused(self):
+        emit_a = self.root / "batch-01"
+        _write_emit(emit_a, [("AAA261009C00100000", "AAA", 1.00, 1.50)])
+        # Contract claims a second batch that never arrives.
+        with self.assertRaises(ValueError):
+            combine.combine_emit([emit_a], self.root / "combined",
+                                 coverage=_coverage({"AAA", "BBB"},
+                                                    ["batch-01", "batch-02"]))
+        # Contract claims underlyings the single batch does not cover.
+        with self.assertRaises(ValueError):
+            combine.combine_emit([emit_a], self.root / "combined",
+                                 coverage=_coverage({"AAA", "BBB"}, ["batch-01"]))
+
+    def test_missing_batch_refused(self):
+        emit_a = self.root / "batch-01"
+        emit_b = self.root / "batch-02"
+        _write_emit(emit_a, [("AAA261009C00100000", "AAA", 1.00, 1.50)])
+        _write_emit(emit_b, [("BBB261009C00100000", "BBB", 0.15, 0.48)])
+        with self.assertRaises(ValueError):
+            combine.combine_emit([emit_a, emit_b], self.root / "combined",
+                                 coverage=_coverage({"AAA", "BBB", "CCC"},
+                                                    ["batch-01", "batch-02", "batch-03"]))
+
+    def test_unexpected_batch_refused(self):
+        emit_a = self.root / "batch-01"
+        emit_b = self.root / "batch-02"
+        emit_c = self.root / "batch-03"
+        _write_emit(emit_a, [("AAA261009C00100000", "AAA", 1.00, 1.50)])
+        _write_emit(emit_b, [("BBB261009C00100000", "BBB", 0.15, 0.48)])
+        _write_emit(emit_c, [("CCC261009C00100000", "CCC", 0.50, 0.60)])
+        with self.assertRaises(ValueError):
+            combine.combine_emit([emit_a, emit_b, emit_c], self.root / "combined",
+                                 coverage=_coverage({"AAA", "BBB"},
+                                                    ["batch-01", "batch-02"]))
+
+    def test_aliased_duplicate_batch_refused(self):
+        import shutil
+        emit_a = self.root / "batch-01"
+        _write_emit(emit_a, [("AAA261009C00100000", "AAA", 1.00, 1.50)])
+        shutil.copytree(emit_a, self.root / "batch-01-copy")
+        with self.assertRaises(ValueError):
+            combine.combine_emit([emit_a, self.root / "batch-01-copy"],
+                                 self.root / "combined",
+                                 coverage=_coverage({"AAA"},
+                                                    ["batch-01", "batch-01-copy"]))
+
+    def test_same_underlying_in_two_batches_refused(self):
+        emit_a = self.root / "batch-01"
+        emit_b = self.root / "batch-02"
+        _write_emit(emit_a, [("AAA261009C00100000", "AAA", 1.00, 1.50)])
+        _write_emit(emit_b, [("BBB261009P00050000", "AAA", 0.15, 0.48)])
+        with self.assertRaises(ValueError):
+            combine.combine_emit([emit_a, emit_b], self.root / "combined",
+                                 coverage=_coverage({"AAA"}, ["batch-01", "batch-02"]))
+
+    def test_first_summary_tampered_refused(self):
+        emit_a = self.root / "batch-01"
+        emit_b = self.root / "batch-02"
+        _write_emit(emit_a, [("AAA261009C00100000", "AAA", 1.00, 1.50)])
+        _write_emit(emit_b, [("BBB261009C00100000", "BBB", 0.15, 0.48)])
+        win_dir = (emit_a / "oa203" / "windows" / "oa203-windows-v1" / "overnight"
+                   / "overnight-2026-10-05_2026-10-06")
+        summary_path = win_dir / "summary.json"
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        summary["policy"]["version"] = "bogus"
+        summary_path.write_text(json.dumps(summary), encoding="utf-8")
+        with self.assertRaises(ValueError):
+            combine.combine_emit([emit_a, emit_b], self.root / "combined",
+                                 coverage=_coverage({"AAA", "BBB"},
+                                                    ["batch-01", "batch-02"]))
+
+    def test_first_summary_sessions_tampered_refused(self):
+        emit_a = self.root / "batch-01"
+        emit_b = self.root / "batch-02"
+        _write_emit(emit_a, [("AAA261009C00100000", "AAA", 1.00, 1.50)])
+        _write_emit(emit_b, [("BBB261009C00100000", "BBB", 0.15, 0.48)])
+        win_dir = (emit_a / "oa203" / "windows" / "oa203-windows-v1" / "overnight"
+                   / "overnight-2026-10-05_2026-10-06")
+        summary_path = win_dir / "summary.json"
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        summary["sessions"][0]["day"] = "2026-10-04"
+        summary_path.write_text(json.dumps(summary), encoding="utf-8")
+        with self.assertRaises(ValueError):
+            combine.combine_emit([emit_a, emit_b], self.root / "combined",
+                                 coverage=_coverage({"AAA", "BBB"},
+                                                    ["batch-01", "batch-02"]))
+
+    def test_partial_provenance_is_partial_never_final(self):
+        emit_a = self.root / "batch-01"
+        emit_b = self.root / "batch-02"
+        partial_status = {d: {"final": True, "assessment": "partial", "sweeps": 6}
+                          for d in DAYS}
+        _write_emit(emit_a, [("AAA261009C00100000", "AAA", 1.00, 1.50)],
+                    state_status=partial_status)
+        _write_emit(emit_b, [("BBB261009C00100000", "BBB", 0.15, 0.48)],
+                    state_status=partial_status)
+        report = combine.combine_emit([emit_a, emit_b], self.root / "combined",
+                                      coverage=_coverage({"AAA", "BBB"},
+                                                         ["batch-01", "batch-02"]))
+        self.assertEqual(report["coverage"]["scope"], "full_universe")
+        summary = self._summary(self.root / "combined")
+        self.assertEqual(summary["state"], "partial")
+        self.assertIn("session_partial:2026-10-05", summary["state_reasons"])
+        self.assertEqual(summary["scope"]["universe_scope"], "full_universe")
+
+    def test_quote_difference_reported_per_basis_in_emit(self):
+        rows_a = _rows([("AAA261009C00100000", "AAA", 1.00, 1.50)])
+        rows_b = _rows([("AAA261009C00100000", "BBB", 1.00, 1.50)])
+        rows_b[0]["qualified"]["entry_ask_ms"] = (
+            rows_b[0]["qualified"].get("entry_ask_ms") or 0) + 1000
+        outputs.write_window(self.root / "batch-01", WIN, rows_a, w.WindowPolicy(),
+                             _status(), _sources(), "2026-10-06T20:00:00Z", {"mode": "test"})
+        outputs.write_window(self.root / "batch-02", WIN, rows_b, w.WindowPolicy(),
+                             _status(), _sources(), "2026-10-06T20:00:00Z", {"mode": "test"})
+        report = combine.combine_emit([self.root / "batch-01", self.root / "batch-02"],
+                                      self.root / "combined",
+                                      coverage=_coverage({"AAA", "BBB"},
+                                                         ["batch-01", "batch-02"]))
+        self.assertEqual(report["conflicts"]["symbols"], 1)
+        with open(self.root / "combined" / "conflicts.csv", encoding="utf-8",
+                  newline="") as f:
+            conflicts = list(csv.DictReader(f))
+        self.assertEqual(len(conflicts), 2)
+        by_batch = {c["batch"]: c for c in conflicts}
+        self.assertNotEqual(by_batch["batch-01"]["qualified_entry_ask_ms"],
+                            by_batch["batch-02"]["qualified_entry_ask_ms"])
+        self.assertEqual(by_batch["batch-01"]["mid_entry_ask_ms"],
+                         by_batch["batch-02"]["mid_entry_ask_ms"])
+        win_report = report["windows"]["overnight/overnight-2026-10-05_2026-10-06"]
+        self.assertEqual(len(win_report["conflicts"][0]["attributions"]), 2)
+        self.assertIn("qualified",
+                      win_report["conflicts"][0]["attributions"][0])
 
 
 @unittest.skipUnless(os.environ.get("REPLAY_130_CHECKPOINT"),

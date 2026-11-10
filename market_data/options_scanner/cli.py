@@ -28,7 +28,7 @@ from .runtime import ET, Config, on_stop
 from .session import build_universe_for, finalize, run_day
 from .sweep import run_sweep, select_universe
 from .tradier import Tradier, load_token
-from .windows_combine import combine_emit
+from .windows_combine import combine_coverage_from_dict, combine_emit
 from .windows_live import build_windows, publish_windows
 from .windows_publish import LocalFilesystemBackend
 
@@ -73,6 +73,7 @@ def main(argv: list[str] | None = None) -> int:
     wc = sub.add_parser("windows-combine", help="combine per-batch window emits into one full-universe emit (local only, no provider, no R2)")
     wc.add_argument("--emit-root", type=Path, action="append", required=True, help="one batch emit root per batch (distinct roots, same window set)")
     wc.add_argument("--out", type=Path, required=True, help="combined emit root")
+    wc.add_argument("--coverage", type=Path, required=True, help="JSON coverage contract: expected_underlyings, expected_batches, expected_sources [[key, sha256], ...], scope full_universe|bounded_subset (required: no combine without an explicit contract)")
     wp = sub.add_parser("windows-publish", help="publish a local windows emit root to a local backend (no R2)")
     wp.add_argument("--emit-root", type=Path, required=True)
     wp.add_argument("--out", type=Path, required=True, help="local backend root directory")
@@ -163,7 +164,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "windows-combine":
         # Local combine only. No provider, no R2, no schedule.
-        report = combine_emit(args.emit_root, args.out)
+        coverage = combine_coverage_from_dict(
+            json.loads(args.coverage.read_text(encoding="utf-8")))
+        report = combine_emit(args.emit_root, args.out, coverage=coverage)
         print(json.dumps(report, indent=2, default=str))
         return 0
     if args.command == "windows-publish":
