@@ -49,7 +49,7 @@ Two corrections to earlier notes:
    producer over the preserved cache (step 2). A full-universe combined
    emit would additionally need a combine-emit step that merges the 14
    batch emits with the same conflict semantics as
-   `combine-full-universe.py`; that step does not exist yet and is NOT
+   `combine-full-universe.py`; that step now exists as `windows_combine.combine_emit` and requires the explicit `--coverage` flag (CombineCoverage: expected underlyings, batch names, source locks, scope) -- a combine without it fails closed. It is NOT
    part of this first publication. The first publication is one batch's
    emit (step 1), which is executable today with existing code.
 2. A replay-built emit is NEVER `final`: `windows_outputs.write_window`
@@ -286,7 +286,7 @@ service (Chej-owned release, deploy by the workflow digest):
 - It does NOT publish a full-universe window: the preserved combined
   CSVs cannot be published as a window (no paths, qualified basis
   only). The full-universe first publication needs the combine-emit
-  step named in section 0, reviewed separately.
+  step named in section 0, reviewed separately and run with the required `--coverage` flag.
 - It does NOT claim the mixed-flat pin survives a flat-only read.
   See "Availability limitation" in `docs/130-window-publisher.md`
   and `docs/131-window-consumer.md`: the pointer check is a refusal

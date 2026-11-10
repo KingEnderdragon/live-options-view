@@ -115,13 +115,7 @@ offline, flag still off. No push, no activation.
    `<spool>/windows_emit/<day>/`) with a `cycle.json` manifest listing
    exactly which windows it built, and `publish_windows` publishes only
    that explicit list (a listed window missing from the emit root is
-   refused before any upload). The cycle timestamp is threaded into the
-   build as `generated_at`, so re-running a cycle with unchanged inputs
-   rebuilds byte-identically and the publisher returns
-   `already_published` (no fresh revision, no re-upload); a changed
-   window gets a new revision only for that window. A retry at a later
-   wall-clock time republishes only that cycle's windows, never
-   historical ones. Manual publish-all without a window list is
+   refused before any upload). Each window's summary bytes are a function of that window's own inputs only (stable per-window generated_at from its exit-session close, window-scoped scope and rows), so re-running a cycle with unchanged inputs rebuilds byte-identically and the publisher returns `already_published` (no fresh revision, no re-upload); a changed window gets a new revision only for that window. A retry at a later wall-clock time, or a next-day cycle overlapping the same windows, republishes only genuinely changed/added window products, never unchanged historical ones. Manual publish-all without a window list is
    unchanged.
 
 ### Spool / history prerequisite for ongoing production
@@ -156,9 +150,7 @@ archives are gone except for what is already published to R2 as window
 products (summaries/rankings/paths per window), which cannot rebuild
 other windows. If the backend's pointers are lost, re-publication
 re-uploads everything (no `already_published` shortcut) and retention
-accounting restarts from the visible inventory. If a cycle emit root is
-lost, the cycle rebuilds from the spool instead — same result while the
-spool and timestamp match, but the on-disk `cycle.json` record is gone.
+accounting restarts from the visible inventory. If a cycle emit root is lost, the cycle rebuilds from the spool instead -- same result while the spool matches (the cycle wall-clock timestamp no longer enters any window summary), but the on-disk `cycle.json` record is gone.
 
 ## Remaining implementation (live-builder work done; release gates remain)
 

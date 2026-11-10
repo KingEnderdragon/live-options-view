@@ -245,3 +245,29 @@ still bound every publish.
 
 Until the gate passes, `windows_publish.py` is offline-only: use the fake
 or local-filesystem backend, never `r2_backend()`.
+
+## Stable product identity (retry fix)
+
+The revision is still `rev_<sha256(summary.json)>` and the member
+digests are still the SHA-256 of the published member bytes -- no
+protocol change. What changed is the PRODUCER: `build_windows` (and
+`combine_emit`) now write stable canonical per-window summary bytes,
+so an unchanged window rebuilds byte-identically and the same revision
+genuinely denotes the same content:
+
+- `generated_at` in a window summary is the window's exit-session
+  close (its data-as-of time), NOT the build/cycle wall clock. The
+  wall clock stays in the build report and `cycle.json` (cycle
+  metadata), never in a window summary.
+- `scope.underlyings` lists only underlyings selected on the window's
+  own sessions and in the build's universe (the live builder
+  previously listed the union across all loaded days).
+- Rows cover only contracts with in-session observations in the
+  window's own sessions, so an unrelated day's universe rotation
+  cannot leak rows or scope into a historical window.
+
+A retry at a later wall-clock time, or a next-day cycle overlapping
+the same windows, therefore returns `already_published` for every
+unchanged window (no fresh revision, no re-upload, no attempt token
+consumed) and a new revision only for genuinely changed/added window
+products. See `tests/test_oa203_windows_retry.py`.
