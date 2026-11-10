@@ -29,8 +29,9 @@ from .session import build_universe_for, finalize, run_day
 from .sweep import run_sweep, select_universe
 from .tradier import Tradier, load_token
 from .windows_combine import combine_coverage_from_dict, combine_emit
+from .archive_cache import prune_archive_cache
 from .windows_live import build_windows, prune_windows_emit, publish_windows
-from .windows_publish import LocalFilesystemBackend
+from .windows_publish import LocalFilesystemBackend, r2_backend
 
 
 # --------------------------------------------------------------------------
@@ -83,6 +84,17 @@ def main(argv: list[str] | None = None) -> int:
     wpe.add_argument("--keep-cycles", type=int, default=0, help="newest cycles to keep as a recency preference even when over budget (default 0: the byte budget alone decides; a hard floor cannot fit the headroom)")
     wpe.add_argument("--max-emit-mb", type=int, default=192, help="emit budget in MiB (default 192: sized so pruning to it leaves room for the next 32-window build)")
     wpe.add_argument("--confirm", action="store_true", help="actually delete (without this, dry-run: list only)")
+    acp = sub.add_parser("archive-cache-prune", help="prune older redundant local day archives after fresh exact remote digest verification (dry-run by default; local backend only)")
+    acp.add_argument("--spool", type=Path, required=True, help="spool holding per-day <YYYY-MM-DD>/ archives")
+    acp.add_argument("--backend-root", type=Path, required=False, help="local backend root directory (remote objects are verified here; required unless --r2 is given)")
+    acp.add_argument("--keep-sessions", type=int, default=10, help="newest finalized sessions to retain (default 10, the builder lookback; below 10 is refused)")
+    acp.add_argument("--max-days", type=int, default=2, help="max days pruned per run (default 2)")
+    acp.add_argument("--max-bytes-mb", type=int, default=512, help="max bytes pruned per run in MiB (default 512)")
+    acp.add_argument("--confirm", action="store_true", help="actually delete (without this, dry-run: list only; deletion also requires OA203_ARCHIVE_CACHE_PRUNE_ENABLED=1)")
+    acp.add_argument("--r2", action="store_true", help="verify against the real R2 backend (production); without this, --backend-root is verified")
+    acp.add_argument("--max-remote-requests", type=int, default=1024, help="hard cap on remote requests for the run (default 1024)")
+    acp.add_argument("--max-remote-bytes-mb", type=int, default=1024, help="hard cap on remote bytes read for the run in MiB (default 1024)")
+    acp.add_argument("--max-verify-seconds", type=float, default=600.0, help="hard wall-clock budget for the run in seconds (default 600)")
     args = parser.parse_args(argv)
     cfg = Config.from_env()
 
@@ -190,6 +202,32 @@ def main(argv: list[str] | None = None) -> int:
                                     keep_cycles=args.keep_cycles,
                                     max_emit_bytes=args.max_emit_mb * 1024 * 1024,
                                     dry_run=not args.confirm)
+        print(json.dumps(report, indent=2, default=str))
+        return 0
+    if args.command == "archive-cache-prune":
+        # Dry-run by default. --r2 verifies against the real R2 backend
+        # (production); otherwise the local backend root is verified.
+        # Deletes ONLY older finalized day dirs under --spool whose every
+        # artifact verifies against the remote backend by fresh GET +
+        # SHA-256 at prune time; never R2 objects, never the newest 10
+        # finalized sessions, never unfinalized/pending/recovery/linked
+        # days. Deletion additionally requires
+        # OA203_ARCHIVE_CACHE_PRUNE_ENABLED=1. The same verification code
+        # and hard remote budgets serve both backends.
+        if args.r2:
+            backend = r2_backend()
+        else:
+            if args.backend_root is None:
+                parser.error("--backend-root is required unless --r2 is given")
+            backend = LocalFilesystemBackend(args.backend_root)
+        report = prune_archive_cache(args.spool, backend,
+                                     keep_sessions=args.keep_sessions,
+                                     max_days_per_run=args.max_days,
+                                     max_bytes_per_run=args.max_bytes_mb * 1024 * 1024,
+                                     max_remote_requests=args.max_remote_requests,
+                                     max_remote_bytes=args.max_remote_bytes_mb * 1024 * 1024,
+                                     max_verify_seconds=args.max_verify_seconds,
+                                     dry_run=not args.confirm)
         print(json.dumps(report, indent=2, default=str))
         return 0
     return 2

@@ -694,6 +694,25 @@ class R2Backend:
                 raise KeyError(key) from None
             raise
 
+    def get_stream(self, key: str) -> tuple[Any, int]:
+        """Open a bounded streaming read: (body, content_length).
+
+        The caller reads the body in chunks and always closes it;
+        this method itself reads nothing. Added for the archive-cache
+        bounded reader (archive_cache._bounded_get); get() is
+        unchanged and the publisher's reads stay as they are.
+        Raises KeyError when the key is absent (same mapping as get).
+        A missing ContentLength is reported as -1 (unknown).
+        """
+        try:
+            resp = self.client.get_object(Bucket=self.bucket, Key=key)
+            return resp["Body"], int(resp.get("ContentLength", -1))
+        except Exception as exc:  # boto3 ClientError: NoSuchKey -> KeyError
+            code = (getattr(exc, "response", {}) or {}).get("Error", {}).get("Code")
+            if code in ("NoSuchKey", "404"):
+                raise KeyError(key) from None
+            raise
+
     def put_if_absent(self, key: str, data: bytes, content_type: str) -> bool:
         try:
             self.client.put_object(Bucket=self.bucket, Key=key, Body=data,
