@@ -23,9 +23,11 @@ Conflict semantics (fail closed, same as ``combine-full-universe.py`` in
 the preserved #130 checkpoint, which this module follows):
 
 A contract (OCC symbol) that appears under more than one attribution
-with DIFFERING evidence — different per-basis status, reasons, values or
-timestamps, or different identity/quality fields — is a conflict, not a
-duplicate. Its identity/deliverable/path evidence is ambiguous, so it is
+with DIFFERING evidence — different per-basis status, reasons, values,
+sessions or timestamps, different quote evidence (bid/ask, quote stamps,
+sizes, ages, spreads) on ANY basis, or different identity/quality fields
+— is a conflict, not a duplicate. A difference in any one of those fields
+is a conflict; only rows identical in ALL of them are pure duplicates. Its identity/deliverable/path evidence is ambiguous, so it is
 EXCLUDED from the combined ranked output: it is not ranked, not eligible,
 and no canonical economic identity is asserted from root spelling. Its
 paths are NOT stitched. Every attribution is preserved in the conflict
@@ -71,20 +73,38 @@ CSV_EVIDENCE_FIELDS = ["status", "reasons", "pct", "entry", "exit",
                        "abs_change_per_contract", "entry_session", "exit_session",
                        "entry_ms", "exit_ms", "option_type", "strike",
                        "expiration", "flags"]
+# Per-basis fields carried in the conflict report for every basis (the
+# flat qualified-basis columns above are kept for compatibility; a report
+# that only shows one basis hides the field that actually differed).
+_PER_BASIS_CONFLICT_FIELDS = ["status", "reasons", "pct", "entry", "exit",
+                              "abs_change_per_contract", "entry_session", "exit_session",
+                              "entry_ms", "exit_ms", "entry_ask_ms", "exit_ask_ms",
+                              "entry_bid_ms", "exit_bid_ms", "entry_ask", "exit_ask"]
 CONFLICT_COLUMNS = ["window", "symbol", "batch", "underlying", "option_type",
                     "strike", "expiration", "status", "reasons", "pct", "entry",
                     "exit", "abs_change_per_contract", "entry_session",
-                    "exit_session", "entry_ms", "exit_ms", "flags"]
+                    "exit_session", "entry_ms", "exit_ms", "flags"] + [
+    f"{basis}_{field}" for basis in w.BASES for field in _PER_BASIS_CONFLICT_FIELDS]
 
 
+# Per-basis evidence fields: every economically relevant field the paths
+# file carries for a basis (windows_outputs.BASIS_COLUMNS) — status,
+# reasons, values, sessions, boundary offsets and the full quote evidence
+# (bid/ask, quote stamps, sizes, ages, spreads). A difference in ANY of
+# these is a conflict, never a silent dedup. This mirrors the #130
+# checkpoint's EVIDENCE_FIELDS (combine-full-universe.py: status,
+# reasons, pct, entry, exit, abs_change_per_contract, entry/exit session,
+# entry/exit ms, option_type, strike, expiration, flags) and extends it
+# from the flat CSV row to the evaluated row's full per-basis evidence;
+# nothing in that list is narrowed.
 def _row_evidence(row: Mapping[str, Any]) -> tuple:
     """Hashable evidence for one evaluated row (all bases + identity)."""
     parts: list[Any] = []
     for basis in w.BASES:
         b = row.get(basis) or {}
-        parts.append((basis, b.get("status"), tuple(b.get("reasons") or []),
-                      b.get("pct"), b.get("entry"), b.get("exit"),
-                      b.get("entry_ms"), b.get("exit_ms")))
+        parts.append((basis, tuple(
+            tuple(b.get(c) or []) if c == "reasons" else b.get(c)
+            for c in outputs.BASIS_COLUMNS)))
     parts.append((row.get("option_type"), row.get("strike"), row.get("expiration"),
                   row.get("root"), row.get("contract_size"),
                   tuple(sorted(row.get("flags") or [])),
@@ -148,15 +168,8 @@ def _attribution_evidence(row: Mapping[str, Any]) -> dict[str, Any]:
                                 "flags": list(row.get("flags") or [])}
     for basis in w.BASES:
         b = row.get(basis) or {}
-        evidence[basis] = {"status": b.get("status"),
-                           "reasons": list(b.get("reasons") or []),
-                           "pct": b.get("pct"), "entry": b.get("entry"),
-                           "exit": b.get("exit"),
-                           "abs_change_per_contract": b.get("abs_change_per_contract"),
-                           "entry_ms": b.get("entry_ms"),
-                           "exit_ms": b.get("exit_ms"),
-                           "entry_session": b.get("entry_session"),
-                           "exit_session": b.get("exit_session")}
+        evidence[basis] = {c: (list(b.get(c) or []) if c == "reasons" else b.get(c))
+                           for c in outputs.BASIS_COLUMNS}
     # CSV-row attributions carry flat basis fields instead of nested dicts.
     if "status" in row:
         evidence["status"] = row.get("status")
@@ -391,7 +404,7 @@ def combine_emit(batch_emit_roots: Sequence[Path | str], out_root: Path | str,
         for c in conflicts:
             for a in c["attributions"]:
                 q = a.get("qualified") or {}
-                all_conflicts.append({
+                flat: dict[str, Any] = {
                     "window": window_id, "symbol": c["symbol"], "batch": a["batch"],
                     "underlying": a.get("underlying"), "option_type": a.get("option_type"),
                     "strike": a.get("strike"), "expiration": a.get("expiration"),
@@ -401,10 +414,20 @@ def combine_emit(batch_emit_roots: Sequence[Path | str], out_root: Path | str,
                     "entry_session": q.get("entry_session") or "",
                     "exit_session": q.get("exit_session") or "",
                     "entry_ms": q.get("entry_ms"), "exit_ms": q.get("exit_ms"),
-                    "flags": ";".join(a.get("flags") or [])})
+                    "flags": ";".join(a.get("flags") or [])}
+                for basis in w.BASES:
+                    b = a.get(basis) or {}
+                    for field in _PER_BASIS_CONFLICT_FIELDS:
+                        value = b.get(field)
+                        if field == "reasons":
+                            value = ";".join(value or [])
+                        elif field in ("entry_session", "exit_session"):
+                            value = value or ""
+                        flat[f"{basis}_{field}"] = value
+                all_conflicts.append(flat)
         report["windows"][f"{kind}/{window_id}"] = stats
         report["windows"][f"{kind}/{window_id}"]["conflicts"] = [
-            {"symbol": c["symbol"], "attributions": [a["batch"] for a in c["attributions"]]}
+            {"symbol": c["symbol"], "attributions": c["attributions"]}
             for c in conflicts]
     with open(out_root / "conflicts.csv", "w", newline="", encoding="utf-8") as f:
         wr = csv.DictWriter(f, fieldnames=CONFLICT_COLUMNS, lineterminator="\n")

@@ -6,6 +6,7 @@ test (skipped unless REPLAY_130_CHECKPOINT points at the preserved
 14-batch replay, not just fixtures.
 """
 
+import copy
 import csv
 import gzip
 import io
@@ -117,6 +118,50 @@ class CombineRowsTests(unittest.TestCase):
         self.assertEqual(ranked[1]["mid_rank"], 2)
         # And the subset ranking alone would have crowned the wrong top.
         self.assertEqual(w.rank_window(a, "mid")[0]["symbol"], "AAA261009C00100000")
+
+
+class QuoteEvidenceTests(unittest.TestCase):
+    def test_quote_stamp_only_difference_is_conflict(self):
+        # Chej repro: two rows differing ONLY in qualified.entry_ask_ms.
+        a = _rows([("AAA261009C00100000", "AAA", 1, 1.5)])[0]
+        b = copy.deepcopy(a)
+        b["qualified"]["entry_ask_ms"] = (b["qualified"].get("entry_ask_ms") or 0) + 1000
+        kept, conflicts, stats = combine.combine_rows(
+            WIN.window_id, [("a", [a]), ("b", [b])])
+        self.assertEqual(kept, [])
+        self.assertEqual(len(conflicts), 1)
+        self.assertEqual(stats["conflicting_symbols"], 1)
+        by_batch = {x["batch"]: x for x in conflicts[0]["attributions"]}
+        self.assertNotEqual(by_batch["a"]["qualified"]["entry_ask_ms"],
+                            by_batch["b"]["qualified"]["entry_ask_ms"])
+        self.assertEqual(by_batch["a"]["qualified"]["pct"],
+                         by_batch["b"]["qualified"]["pct"])
+
+    def test_each_basis_quote_field_difference_is_conflict(self):
+        for basis in w.BASES:
+            for field in ("entry_ask_ms", "exit_ask_ms", "entry_bid_ms",
+                          "exit_bid_ms", "entry_relative_spread", "exit_relative_spread",
+                          "entry_ask_size", "entry_session", "abs_change_per_contract"):
+                a = _rows([("AAA261009C00100000", "AAA", 1, 1.5)])[0]
+                b = copy.deepcopy(a)
+                current = b[basis].get(field)
+                if isinstance(current, str):
+                    b[basis][field] = "2026-10-06"  # the window's other session day
+                else:
+                    b[basis][field] = (current or 0) + 1
+                kept, conflicts, _ = combine.combine_rows(
+                    WIN.window_id, [("a", [a]), ("b", [b])])
+                self.assertEqual((kept, len(conflicts)), ([], 1), (basis, field))
+
+    def test_flags_only_difference_is_conflict(self):
+        # Metadata/flags-only difference is a conflict (EVIDENCE_FIELDS precedent).
+        a = _rows([("AAA261009C00100000", "AAA", 1, 1.5)])[0]
+        b = copy.deepcopy(a)
+        b["flags"] = [*a["flags"], "wide_spread"]
+        kept, conflicts, _ = combine.combine_rows(
+            WIN.window_id, [("a", [a]), ("b", [b])])
+        self.assertEqual(kept, [])
+        self.assertEqual(len(conflicts), 1)
 
 
 class CombineEmitTests(unittest.TestCase):
