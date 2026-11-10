@@ -28,6 +28,8 @@ from .runtime import ET, Config, on_stop
 from .session import build_universe_for, finalize, run_day
 from .sweep import run_sweep, select_universe
 from .tradier import Tradier, load_token
+from .windows_live import build_windows, publish_windows
+from .windows_publish import LocalFilesystemBackend
 
 
 # --------------------------------------------------------------------------
@@ -61,6 +63,14 @@ def main(argv: list[str] | None = None) -> int:
     rd.add_argument("--dir", type=Path, action="append", required=True)
     rd.add_argument("--top", type=int, default=100)
     rd.add_argument("--all", action="store_true", help="use all ranks, not only clean rows")
+    wb = sub.add_parser("windows-build", help="build #130 windows from local finalized day archives (no provider, no R2)")
+    wb.add_argument("--dir", type=Path, action="append", required=True, help="one finalized day directory per session")
+    wb.add_argument("--underlyings", nargs="+", required=True, help="bounded set of underlyings (at most 50)")
+    wb.add_argument("--emit-root", type=Path, required=True)
+    wb.add_argument("--top", type=int, default=15)
+    wp = sub.add_parser("windows-publish", help="publish a local windows emit root to a local backend (no R2)")
+    wp.add_argument("--emit-root", type=Path, required=True)
+    wp.add_argument("--out", type=Path, required=True, help="local backend root directory")
     args = parser.parse_args(argv)
     cfg = Config.from_env()
 
@@ -139,6 +149,18 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "readout":
         print(readout(args.dir, args.top, clean_only=not args.all))
+        return 0
+    if args.command == "windows-build":
+        # Dormant wiring: local build only. No provider, no R2, no schedule.
+        report = build_windows(args.dir, {u.strip() for u in args.underlyings},
+                               args.emit_root, top=args.top)
+        print(json.dumps(report, indent=2, default=str))
+        return 0
+    if args.command == "windows-publish":
+        # Local backend only. R2 publication is a release step (Chej) via
+        # windows_publish.r2_backend(); this command never constructs it.
+        results = publish_windows(args.emit_root, LocalFilesystemBackend(args.out))
+        print(json.dumps(results, indent=2, default=str))
         return 0
     return 2
 
