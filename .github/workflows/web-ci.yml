@@ -44,8 +44,13 @@ jobs:
       - name: worker logic
         run: node tests/worker_logic.test.js
       - name: D1 account/session storage (#208)
+        env:
+          # node:sqlite is behind this flag on Node 22 (unflagged on 24).
+          NODE_OPTIONS: --experimental-sqlite
         run: node tests/storage_d1.test.mjs
       - name: KV to D1 migration and rollback (#208)
+        env:
+          NODE_OPTIONS: --experimental-sqlite
         run: node tests/migrate_d1.test.mjs
       - name: bot registration probe contract
         run: node tests/preflight_worker_contract.test.js
