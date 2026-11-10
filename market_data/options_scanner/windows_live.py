@@ -40,6 +40,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 from collections import defaultdict
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -56,6 +57,18 @@ MAX_UNDERLYINGS = 50
 MAX_UNDERLYINGS_FULL = 500  # live universe size (Config.universe_size default)
 MAX_SESSIONS = 10
 WINDOWS_LIVE_ENV = "OA203_WINDOWS_LIVE_ENABLED"
+
+# Local-output retention / disk headroom (see docs/130-live-window-wiring.md).
+# Worst case per cycle: 14 windows x (summary <=1 MiB + rankings <=4 MiB
+# + paths <=4 MiB compressed) = 126 MiB. The hook requires twice that
+# free before starting a build, and the prune keeps at most 10 cycles
+# (the 10-session window) within a 512 MiB emit budget.
+MAX_WINDOW_EMIT_BYTES = (1 + 4 + 4) * 1024 * 1024
+MAX_WINDOWS_PER_CYCLE = 14
+MAX_CYCLE_EMIT_BYTES = MAX_WINDOWS_PER_CYCLE * MAX_WINDOW_EMIT_BYTES
+MIN_EMIT_FREE_BYTES = 2 * MAX_CYCLE_EMIT_BYTES
+DEFAULT_KEEP_CYCLES = 10
+DEFAULT_MAX_EMIT_BYTES = 512 * 1024 * 1024
 
 
 def load_local_session(day_dir: Path, underlyings: set[str],
@@ -144,7 +157,8 @@ def windows_live_enabled() -> bool:
 def run_after_finalize(spool_dir: Path | str, day, universe: Mapping[str, Any], *,
                        backend: pub.StorageBackend | None = None,
                        emit_root: Path | str | None = None,
-                       now: datetime | None = None) -> dict[str, Any]:
+                       now: datetime | None = None,
+                       min_free_bytes: int = MIN_EMIT_FREE_BYTES) -> dict[str, Any]:
     """Build + publish windows for the finalized day (hook implementation).
 
     Builds from the finalized day archives in the spool (up to 10
@@ -182,7 +196,8 @@ def run_after_finalize(spool_dir: Path | str, day, universe: Mapping[str, Any], 
         raise ValueError(f"finalized day {day.isoformat()}: universe disagrees with its own archive")
     cycle = day.isoformat()
     emit = (Path(emit_root) / cycle) if emit_root is not None else spool / "windows_emit" / cycle
-    report = build_windows(dirs, unders, emit, full_universe=True, generated_at=now)
+    report = build_windows(dirs, unders, emit, full_universe=True, generated_at=now,
+                           min_free_bytes=min_free_bytes)
     window_ids = sorted({(w["kind"], w["window_id"]) for w in report["windows"]})
     manifest = {"cycle": cycle, "day": day.isoformat(), "days": [d.name for d in dirs],
                 "underlyings": sorted(unders), "universe_scope": report["universe_scope"],
@@ -199,7 +214,8 @@ def run_after_finalize(spool_dir: Path | str, day, universe: Mapping[str, Any], 
 
 def build_windows(day_dirs: list[Path] | tuple[Path, ...], underlyings: set[str],
                   emit_root: Path, *, top: int = 15, full_universe: bool = False,
-                  generated_at: datetime | str | None = None) -> dict[str, Any]:
+                  generated_at: datetime | str | None = None,
+                  min_free_bytes: int = MIN_EMIT_FREE_BYTES) -> dict[str, Any]:
     """Evaluate every supported window kind over local finalized days.
 
     ``day_dirs`` are finalized day-archive directories (sorted by date,
@@ -232,6 +248,7 @@ def build_windows(day_dirs: list[Path] | tuple[Path, ...], underlyings: set[str]
     windows and the publisher returns already_published with no fresh
     revision. A genuinely changed window still gets a new revision.
     """
+    _check_emit_headroom(Path(emit_root), min_free_bytes=min_free_bytes)
     dirs = [Path(d) for d in day_dirs]
     if not 1 <= len(dirs) <= MAX_SESSIONS:
         raise ValueError(f"bounded build: 1..{MAX_SESSIONS} sessions, got {len(dirs)}")
@@ -388,6 +405,152 @@ def build_windows(day_dirs: list[Path] | tuple[Path, ...], underlyings: set[str]
         report["windows"].append(summary)
     report["contracts_kept"] = kept_total
     report["conflicting_symbols"] = len({c["symbol"] for c in all_conflicts})
+    return report
+
+
+def _check_emit_headroom(emit: Path, *, min_free_bytes: int = MIN_EMIT_FREE_BYTES) -> None:
+    """Fail closed before a build when the emit volume is too full.
+
+    Resolves the nearest existing ancestor of ``emit`` (the emit root
+    may not exist yet) and requires at least ``min_free_bytes`` free.
+    Raises ValueError naming free/required bytes; the operator prunes
+    older per-cycle emit roots (``prune_windows_emit`` /
+    ``windows-prune-emit``), never the finalized day archives.
+    """
+    probe = Path(emit)
+    while not probe.exists():
+        probe = probe.parent
+    free = shutil.disk_usage(probe).free
+    if free < min_free_bytes:
+        raise ValueError(
+            f"emit headroom: {free} bytes free on {probe}, need at least "
+            f"{min_free_bytes} bytes before building; prune older per-cycle "
+            f"emit roots (windows-prune-emit), never the finalized day archives")
+
+
+def _cycle_dirs(emit_root: Path) -> list[Path]:
+    """Per-cycle emit roots: direct children named YYYY-MM-DD holding cycle.json."""
+    out = []
+    for child in sorted(Path(emit_root).iterdir()):
+        if not child.is_dir():
+            continue
+        try:
+            date.fromisoformat(child.name)
+        except ValueError:
+            continue
+        if (child / "cycle.json").is_file():
+            out.append(child)
+    return out
+
+
+def _cycle_size(cycle_dir: Path) -> int:
+    return sum(p.stat().st_size for p in Path(cycle_dir).rglob("*") if p.is_file())
+
+
+def _cycle_revision(cycle_dir: Path, kind: str, window_id: str) -> str | None:
+    """The revision this cycle built for one window (rev_<sha256(summary.json)>)."""
+    summary_path = (Path(cycle_dir) / "oa203" / "windows" / pub.POLICY
+                    / kind / window_id / "summary.json")
+    try:
+        data = summary_path.read_bytes()
+    except OSError:
+        return None
+    return "rev_" + hashlib.sha256(data).hexdigest()
+
+
+def _cycle_prunable(cycle_dir: Path, backend: pub.StorageBackend) -> tuple[bool, str]:
+    """True when every window in this cycle is published or superseded.
+
+    Published: the backend pointer revision equals the revision this
+    cycle built. Superseded: the pointer revision differs but its
+    published_at is later than this cycle's generated_at (a newer cycle
+    republished the window). Anything else -- no pointer, a damaged
+    pointer, an older pointer revision -- means the cycle's emit is the
+    only copy of that revision, so it must NOT be pruned.
+    """
+    try:
+        manifest = json.loads((Path(cycle_dir) / "cycle.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return False, f"cycle.json unreadable ({exc})"
+    try:
+        cycle_time = datetime.fromisoformat(
+            str(manifest.get("generated_at")).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return False, "cycle.json generated_at missing/unparseable"
+    for kind, window_id in manifest.get("windows", []):
+        rev = _cycle_revision(cycle_dir, kind, window_id)
+        if rev is None:
+            return False, f"{window_id}: summary.json missing"
+        try:
+            pointer = pub._read_pointer(backend, pub.window_prefix(kind, window_id))
+        except ValueError as exc:
+            return False, f"{window_id}: pointer damaged ({exc})"
+        if pointer is None:
+            return False, f"{window_id}: not published (no pointer)"
+        if pointer.get("revision") == rev:
+            continue
+        try:
+            pub_time = datetime.fromisoformat(
+                str(pointer.get("published_at")).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return False, f"{window_id}: pointer published_at missing/unparseable"
+        if pub_time > cycle_time:
+            continue
+        return False, f"{window_id}: pointer is an older revision (cycle revision unpublished)"
+    return True, "all windows published or superseded"
+
+
+def prune_windows_emit(emit_root: Path, backend: pub.StorageBackend, *,
+                       keep_cycles: int = DEFAULT_KEEP_CYCLES,
+                       max_emit_bytes: int = DEFAULT_MAX_EMIT_BYTES,
+                       dry_run: bool = True) -> dict[str, Any]:
+    """Prune old per-cycle emit roots (derived output ONLY).
+
+    Keeps the newest ``keep_cycles`` cycle dirs as a hard floor, then
+    prunes verified older cycles, oldest first, until the emit total is
+    at or under ``max_emit_bytes``. A cycle is pruned only when every
+    window in it is published or superseded (see ``_cycle_prunable``);
+    anything unverified is skipped with a reason and left in place.
+    Dry-run (default) lists what would be deleted and deletes nothing;
+    with ``dry_run=False`` each deletion is re-listed to confirm the
+    directory is gone. Only direct children of ``emit_root`` named
+    YYYY-MM-DD and holding cycle.json are ever considered -- never the
+    finalized day archives (they live in the spool, not under the emit
+    root), never source history, never live/published data. In dry-run
+    mode ``pruned`` and ``bytes_after`` are projected, not actual.
+    """
+    root = Path(emit_root)
+    cycles = _cycle_dirs(root)
+    sizes = {c: _cycle_size(c) for c in cycles}
+    total = sum(sizes.values())
+    kept_floor = cycles[-keep_cycles:] if keep_cycles > 0 else []
+    candidates = [c for c in cycles if c not in kept_floor]
+    report: dict[str, Any] = {"emit_root": str(root), "dry_run": dry_run,
+                              "keep_cycles": keep_cycles,
+                              "max_emit_bytes": max_emit_bytes,
+                              "bytes_before": total, "cycles_before": len(cycles),
+                              "pruned": [], "skipped": [], "kept": [],
+                              "bytes_after": total, "cycles_after": len(cycles)}
+    for cycle in candidates:
+        if total <= max_emit_bytes:
+            break
+        ok, reason = _cycle_prunable(cycle, backend)
+        if not ok:
+            report["skipped"].append({"cycle": cycle.name, "reason": reason})
+            continue
+        if dry_run:
+            report["pruned"].append(cycle.name)
+            total -= sizes[cycle]
+            continue
+        shutil.rmtree(cycle)
+        if cycle.exists():
+            raise RuntimeError(f"prune: {cycle} still exists after delete")
+        report["pruned"].append(cycle.name)
+        total -= sizes[cycle]
+    pruned_names = set(report["pruned"])
+    report["kept"] = [c.name for c in cycles if c.name not in pruned_names]
+    report["bytes_after"] = total
+    report["cycles_after"] = len(cycles) - (0 if dry_run else len(report["pruned"]))
     return report
 
 

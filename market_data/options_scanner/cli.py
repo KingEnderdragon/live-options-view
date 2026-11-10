@@ -29,7 +29,7 @@ from .session import build_universe_for, finalize, run_day
 from .sweep import run_sweep, select_universe
 from .tradier import Tradier, load_token
 from .windows_combine import combine_coverage_from_dict, combine_emit
-from .windows_live import build_windows, publish_windows
+from .windows_live import build_windows, prune_windows_emit, publish_windows
 from .windows_publish import LocalFilesystemBackend
 
 
@@ -77,6 +77,12 @@ def main(argv: list[str] | None = None) -> int:
     wp = sub.add_parser("windows-publish", help="publish a local windows emit root to a local backend (no R2)")
     wp.add_argument("--emit-root", type=Path, required=True)
     wp.add_argument("--out", type=Path, required=True, help="local backend root directory")
+    wpe = sub.add_parser("windows-prune-emit", help="prune old per-cycle window emit roots (derived output only; dry-run by default; local backend only)")
+    wpe.add_argument("--emit-root", type=Path, required=True, help="emit root holding per-cycle <YYYY-MM-DD>/ dirs")
+    wpe.add_argument("--backend-root", type=Path, required=True, help="local backend root directory (published pointers are verified here)")
+    wpe.add_argument("--keep-cycles", type=int, default=10, help="newest cycles to keep (default 10)")
+    wpe.add_argument("--max-emit-mb", type=int, default=512, help="emit budget in MiB (default 512)")
+    wpe.add_argument("--confirm", action="store_true", help="actually delete (without this, dry-run: list only)")
     args = parser.parse_args(argv)
     cfg = Config.from_env()
 
@@ -174,6 +180,17 @@ def main(argv: list[str] | None = None) -> int:
         # windows_publish.r2_backend(); this command never constructs it.
         results = publish_windows(args.emit_root, LocalFilesystemBackend(args.out))
         print(json.dumps(results, indent=2, default=str))
+        return 0
+    if args.command == "windows-prune-emit":
+        # Local backend only, dry-run by default. Deletes ONLY verified
+        # per-cycle emit dirs under --emit-root; never day archives,
+        # never source history, never live/published data. For R2
+        # verification Chej calls prune_windows_emit with r2_backend().
+        report = prune_windows_emit(args.emit_root, LocalFilesystemBackend(args.backend_root),
+                                    keep_cycles=args.keep_cycles,
+                                    max_emit_bytes=args.max_emit_mb * 1024 * 1024,
+                                    dry_run=not args.confirm)
+        print(json.dumps(report, indent=2, default=str))
         return 0
     return 2
 
