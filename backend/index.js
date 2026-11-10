@@ -4,8 +4,7 @@ import { handleSettle, settleAllBots, settlementPriceServer, validateSettleReque
 import { handleBotIndexReconcile, handleBotMetadata, handleBots } from './bots.js';
 import { handleLogin, handleLogout, handleMe, handleRegister } from './auth.js';
 import { handlePaperTrade } from './paper-trade.js';
-import { cutoverFenceActive, handleMigration } from './migrate.js';
-import { createStorage } from './storage.js';
+import { cutoverFenceActive } from './fence.js';
 
 // Re-exported from backend/common.js so the Worker's public API (the 31
 // exports pinned by tests/worker_logic.test.js) stays on backend/index.js.
@@ -43,10 +42,9 @@ export default {
       return proxied;
     }
 
-    // Issue #208 cutover fence. While the migration is copying KV into D1 the
-    // additive revision still owns the writes, so the fence stops them in one
-    // place: every mutating route below answers 503 until the operator disarms
-    // it after the switch revision is live. Reads keep working throughout.
+    // Post-cutover fence check. The migration route is retired from this
+    // Worker, but the fence remains as a safety interlock: a stale armed fence
+    // pauses writes instead of being ignored. Reads keep working throughout.
     if (request.method === 'POST' && MUTATING_API_PATHS.has(url.pathname) &&
         await cutoverFenceActive(env)) {
       return new Response(JSON.stringify({
@@ -75,13 +73,6 @@ export default {
 
     if (request.method === 'POST' && url.pathname === '/api/bot-metadata') {
       return handleBotMetadata(request, env);
-    }
-
-    // Operator-only, issue #208 cutover route. Present only when
-    // MIGRATION_TOKEN is configured; handleMigration answers 404 otherwise, so
-    // an unconfigured deployment does not advertise it.
-    if (request.method === 'POST' && url.pathname === '/api/admin/migrate') {
-      return handleMigration(request, env, createStorage(env));
     }
 
     if (request.method === 'POST' && url.pathname === '/api/bot-index/reconcile') {

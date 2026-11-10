@@ -39,6 +39,7 @@
 
 import { SESSION_TTL_SECONDS } from './common.js';
 import { createLegacyKvSource, hashSessionToken } from './storage.js';
+import { cutoverFenceActive } from './fence.js';
 
 export const RECORD_BUDGET = 20;
 export const QUERY_BUDGET = 40;          // D1 Free: 50 queries per invocation
@@ -142,31 +143,7 @@ async function writeCheckpoint(session, name, value) {
   );
 }
 
-/**
- * True when writes must be rejected.
- *
- * Fails CLOSED whenever a DB binding exists: an unreadable migration_state, a
- * missing table, a malformed row or a thrown query all block writes rather than
- * silently reporting "not fenced". An armed barrier must not evaporate because
- * the thing that stores it is briefly unavailable. The only false-by-default
- * case is no binding at all, which means this deployment cannot be mid-cutover.
- */
-export async function cutoverFenceActive(env) {
-  if (!env?.DB) return false;
-  try {
-    const row = await env.DB.prepare('SELECT value FROM migration_state WHERE name = ?')
-      .bind('fence').first();
-    if (!row) return false;
-    const fence = JSON.parse(row.value);
-    // Anything that is not an explicit `armed: false` is treated as armed.
-    return fence?.armed !== false;
-  } catch (error) {
-    console.error(JSON.stringify({
-      event: 'cutover_fence_unreadable', fail_closed: true, error: String(error?.message ?? error),
-    }));
-    return true;
-  }
-}
+export { cutoverFenceActive } from './fence.js';
 
 async function sha256Hex(text) {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));

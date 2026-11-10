@@ -1,5 +1,5 @@
-// backend/bots.js (B4) -- bot roster: the membership index (R2 + legacy KV
-// markers), the operator reconcile/metadata routes, the public /api/bots
+// backend/bots.js (B4) -- bot roster: the R2 membership index (legacy markers
+// are mirrored in D1 for reconciliation), the operator reconcile/metadata routes, the public /api/bots
 // roster, and netPositions. Moved verbatim from worker.js; the entry
 // re-exports the public names. syncBotMembership is exported for auth
 // (register/login retry it) -- it is not one of the Worker's public exports.
@@ -138,7 +138,7 @@ export async function handleBotIndexReconcile(request, env) {
 // session, let alone anonymously.
 // Public strategy summary for the Automated card. Only the fields the runner
 // intentionally publishes are retained; nested objects, credentials and
-// arbitrary metadata are rejected rather than copied into KV.
+// arbitrary metadata are rejected rather than copied into the record.
 const STRATEGY_STATE_KEYS = new Set([
   'strategy', 'symbol', 'window', 'signal_date', 'close', 'sma',
   'prior_close', 'prior_sma', 'signal', 'target', 'position', 'position_qty',

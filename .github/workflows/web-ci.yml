@@ -64,6 +64,10 @@ jobs:
         env:
           NODE_OPTIONS: --experimental-sqlite
         run: node tests/verify_bounded.test.mjs
+      - name: No runtime KV bindings (#208)
+        env:
+          NODE_OPTIONS: --experimental-sqlite
+        run: node tests/no_runtime_kv.test.mjs
       - name: bot registration probe contract
         run: node tests/preflight_worker_contract.test.js
       - name: bot account closure and identity compatibility

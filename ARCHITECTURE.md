@@ -27,7 +27,7 @@ tastytrade/DXLink ── market_data/live_market/ ── R2 published artifacts 
                                │
                          browser quote store
 
-Crassus ── Worker /api/* ── KV accounts + R2 execution records
+Crassus ── Worker /api/* ── D1 accounts/sessions + R2 execution records
 Cloudflare cron ── same Worker settlement logic ── archive spot marks
 Tradier time-and-sales ── moo144/tradier/...   (archive-only in this repository)
 OA-203 scanner ── oa203/scanner/... ── read-only MCP rankings/detail
@@ -53,7 +53,7 @@ R2 bucket `qqq-options-chain-data` holds several products, not one interchangeab
 | `squeeze-scanner/v1/scheduled/*` | External [short-squeeze-scanner](https://github.com/OwenTanzer/short-squeeze-scanner) | Squeeze panel and MCP; latest successful rows and latest attempt/status remain distinct |
 | `oa203/scanner/<date>/` | OA-203 scanner | Final retrospective rankings and sweep evidence for MCP; active `inprogress/` generations are provisional, digest-pinned and policy-gated |
 | `moo144/tradier[/-ibit]/<date>/` | Separate Tradier collector | Archived time-and-sales; no website/MCP reader in this tree. Product purpose remains a separate decision |
-| `system/bot-membership-v1.json`, `paper-trades/requests/*`, KV `USERS`/`SESSIONS` | Worker | Bot roster, canonical execution records, authenticated account/session state; never conflated with public market readings |
+| `system/bot-membership-v1.json`, `paper-trades/requests/*`, D1 `users`/`sessions`/`bot_markers` | Worker | Bot roster, canonical execution records, authenticated account/session state; never conflated with public market readings |
 
 ## Following one value
 
@@ -61,7 +61,9 @@ Live VWAP follows `take_snapshot` → `_compute_underlying_market` in [market_da
 
 The optional STEO path is `eia_steo_loop` in [market_data/live_market/steo.py](market_data/live_market/steo.py) → [market_data/live_market/crude_calibration.py](market_data/live_market/crude_calibration.py) → `macro/eia_steo.json` → page panel. A forecast level, a release-over-release revision and OVX's current regime are different measurements. Do not promise a revision when only one vintage exists.
 
-Settlement is `scheduled` → `settleAllBots` → bot membership + KV account → `fetchSpotMarkForDate` → `settleAccount` in [backend/settlement.js](backend/settlement.js), using membership from [backend/bots.js](backend/bots.js). The Nov 7/8 trace recorded missing recent daily archives and a retained position on a closed account. Those are dated findings, not a fresh inventory or a new settlement policy. Source-repair Q12 and closed-account semantics Q13 remain outside this organization work.
+Settlement is `scheduled` → `settleAllBots` → bot membership + D1 account → `fetchSpotMarkForDate` → `settleAccount` in [backend/settlement.js](backend/settlement.js), using membership from [backend/bots.js](backend/bots.js). The Nov 7/8 trace recorded missing recent daily archives and a retained position on a closed account. Those are dated findings, not a fresh inventory or a new settlement policy. Source-repair Q12 and closed-account semantics Q13 remain outside this organization work.
+
+The normal Worker has no KV bindings or migration endpoint. Legacy namespaces remain a cold recovery archive; the separately deployed, authenticated recovery entry is documented in [backend/NO_KV.md](backend/NO_KV.md). D1 remains the serving rollback floor after cutover.
 
 ## Release ownership and verification
 
