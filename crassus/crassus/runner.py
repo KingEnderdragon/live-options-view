@@ -44,6 +44,15 @@ from .config import (
     load_accounts,
 )
 from .flatten import maybe_flatten
+from .exits import (
+    ExitConfigError,
+    ExitStateStore,
+    activation_from_environment as exits_activated,
+    evaluate as evaluate_exits,
+    reentry_blocked,
+    resolve_policy,
+)
+from .key_health import KeyHealthConfig, KeyHealthMonitor
 from .market import QuoteRateLimited, QuoteReader, SnapshotReader, intent_lineage, unavailable_lineage
 from .observability import configure_logging, event, rejection_reason
 from .supervisor import HEARTBEAT_FD, report_cycle, supervise
@@ -150,6 +159,7 @@ class Runner:
         interval_s: float = 300.0,
         dry_run: bool = False,
         bot_registration_key: str | None = None,
+        key_health: KeyHealthMonitor | None = None,
     ):
         _validate_strategy_ids(accounts)
         key = bot_registration_key if bot_registration_key is not None else BOT_REGISTRATION_KEY
@@ -160,6 +170,13 @@ class Runner:
         self.dry_run = dry_run
         self.state_dir = Path(state_dir)
         self.stop_file = Path(state_dir) / "STOP"
+        # Periodic registration-key health (#41). Constructed by `main()` and
+        # injected, not built here: tests and one-off Runner constructions must
+        # not start probing a live Worker, while every deployed process gets
+        # the check by default. `None` means "this runtime was not asked to
+        # monitor the key", which is a fact worth keeping distinct from
+        # "monitoring is broken".
+        self.key_health = key_health
 
         self.ledger = DecisionLedger(ledger_dir)
         self.snapshots = SnapshotReader(snapshot_url)
@@ -183,6 +200,14 @@ class Runner:
         self._stop = threading.Event()
         self.retired: set[str] = set()
         self.cycle_count = 0
+        # Re-entry guard state for the exit layer (#86): a small durable record
+        # of recent exits, so a restart immediately after a stop-out cannot
+        # re-open the contract it just closed.
+        self.exit_state = ExitStateStore(self.state_dir)
+        # Deployment-level switch for the exit policy. Off unless
+        # CRASSUS_EXITS_ENABLED is set, so this branch is inert until the
+        # reviewed thresholds and precedence are approved.
+        self.exits_activated = exits_activated()
 
     # -- lifecycle --------------------------------------------------------
 
@@ -350,6 +375,18 @@ class Runner:
         log.info("--- cycle @ %s ET (%s) ---", clock.now_et().strftime("%H:%M:%S"), phase)
         event(log, "cycle_started", **fields)
         report_cycle("cycle_started", **fields)
+        # Bounded key health (#41): at most one non-mutating probe per
+        # configured interval, on a monotonic clock, inside the cycle that is
+        # already running. A failed probe is a diagnostic, never a reason to
+        # stop trading -- per-account registration errors remain authoritative.
+        if getattr(self, "key_health", None) is not None:
+            try:
+                report = self.key_health.maybe_check()
+                if report is not None:
+                    report_cycle("key_health", **fields, state=report["state"],
+                                 consecutive_failures=report["consecutive_failures"])
+            except Exception as exc:  # never let a diagnostic break a cycle
+                log.warning("key health check failed to run: %s", type(exc).__name__)
         processed = 0
         skipped = 0
         try:
@@ -484,6 +521,7 @@ class Runner:
         )
 
         try:
+            exit_policy = None
             flatten_decision = maybe_flatten(ctx, account.params)
             if flatten_decision is not None:
                 decision: Decision = flatten_decision
@@ -500,7 +538,44 @@ class Runner:
                 )
                 return
             else:
-                decision = strategy(ctx)
+                # Configurable profit/protective exits (#86) sit between the
+                # mandatory flatten and the account's own strategy: session
+                # beats risk control, risk control beats the signal. A bad
+                # `exits` block is recorded against this account only.
+                try:
+                    exit_policy = resolve_policy(
+                        account.strategy_id,
+                        account.params,
+                        activated=bool(getattr(self, "exits_activated", False)),
+                    )
+                except ExitConfigError as exc:
+                    self.ledger.record(
+                        **base,
+                        outcome_class=Outcome.RUNNER_ERROR,
+                        reason=f"Invalid exit configuration: {exc}",
+                        account_state_before=state_before,
+                    )
+                    return
+                exit_decision = evaluate_exits(ctx, exit_policy, strategy_id=account.strategy_id)
+                if exit_decision is not None:
+                    decision = exit_decision
+                else:
+                    decision = strategy(ctx)
+                    # `exit_state` is created by __init__; a Runner assembled
+                    # directly by a test helper may not have one, in which case
+                    # the cooldown guard is simply absent rather than crashing
+                    # that account's cycle.
+                    store = getattr(self, "exit_state", None)
+                    if store is not None:
+                        blocked = reentry_blocked(
+                            decision,
+                            username=state.username,
+                            store=store,
+                            policy=exit_policy,
+                            book=book,
+                        )
+                        if blocked is not None:
+                            decision = blocked
         except QuoteRateLimited as exc:
             # Classified as rate_limited, not a generic strategy failure --
             # the quote-side 429 already honored Retry-After globally via
@@ -586,6 +661,21 @@ class Runner:
                 log.warning("%s: strategy_state metadata sync failed: %s", alias, exc)
 
         log.info("%s: %s %s x%s -- %s", alias, decision.action, decision.symbol, decision.quantity, decision.reason)
+        exit_trigger = (decision.metadata or {}).get("exit_trigger")
+        store = getattr(self, "exit_state", None)
+        if exit_trigger and isinstance(decision.symbol, str) and store is not None:
+            # Recorded *before* submission on purpose: the cooldown must hold
+            # even when the exit is rejected or its outcome stays ambiguous.
+            # A stop-out that fails to fill is exactly the moment an
+            # unchanged signal would buy the same contract straight back.
+            store.record(
+                state.username,
+                decision.symbol,
+                trigger=str(exit_trigger),
+                quantity=decision.quantity or 0,
+                decision_id=decision_id,
+            )
+
         try:
             result = executor.submit(
                 symbol=decision.symbol,
@@ -710,6 +800,11 @@ def main(argv: list[str] | None = None) -> int:
         base_url=args.base_url,
         interval_s=args.interval,
         dry_run=args.dry_run,
+        # Deployed processes get periodic key health by default (#41). The
+        # cadence, heartbeat and probe timeout come from the environment so
+        # rollout and rollback are configuration changes, not code changes;
+        # CRASSUS_KEY_HEALTH_INTERVAL_S=0 turns the periodic check off.
+        key_health=KeyHealthMonitor(config=KeyHealthConfig.from_environment()),
     )
     archive = archive_from_environment(runner.ledger.paths.ledger.parent, runner.state_dir)
     if archive:

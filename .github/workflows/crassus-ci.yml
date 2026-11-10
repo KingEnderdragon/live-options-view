@@ -70,9 +70,18 @@ jobs:
       - name: Run changing-ATM position-stacking fixture (#86)
         working-directory: crassus
         run: python scripts/verify_position_stacking.py
+      - name: Run configurable profit/protective exit suite (#86)
+        working-directory: crassus
+        run: python scripts/verify_exits.py
       - name: Run bot credential preflight suite (#41)
         working-directory: crassus
         run: python scripts/verify_preflight.py
+      - name: Run bounded registration-key health suite (#41)
+        working-directory: crassus
+        run: python scripts/verify_key_health.py
+      - name: Run pre-merge credential provisioning gate suite (#41)
+        working-directory: crassus
+        run: python scripts/verify_provisioning_gate.py
       - name: Run isolated paper lifecycle with real Runner + Worker harness (#41/#86/#102)
         working-directory: crassus
         run: python scripts/verify_paper_lifecycle.py
@@ -103,6 +112,30 @@ jobs:
       - name: Run durable archive failure-boundary suite
         working-directory: crassus
         run: python scripts/verify_archive.py
+
+  provisioning-gate:
+    # Review-time control for #41: an entry that becomes active with a
+    # credential variable for the first time must carry redacted provisioning
+    # evidence, or land as active:false. Fetch depth is full so the pull
+    # request's base revision is available to compare against; the script
+    # fails closed when it cannot resolve it.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Gate newly active bot credentials
+        working-directory: crassus
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [ -z "$BASE_REF" ]; then
+            BASE_REF=none
+          fi
+          python scripts/provisioning_gate.py --base-ref "$BASE_REF" --json
 
   docker-build-smoke:
     # Builds the exact image Railway deploys from (see crassus/railway.toml's
