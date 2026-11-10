@@ -49,16 +49,14 @@ def _attempts(backend_root):
     return out
 
 
-def _touching(emit_root, day):
-    """Window ids whose summary sessions include ``day``."""
-    touching = set()
-    base = Path(emit_root) / "oa203" / "windows" / "oa203-windows-v1"
-    for kind_dir in base.iterdir():
-        for win_dir in kind_dir.iterdir():
-            summary = json.loads((win_dir / "summary.json").read_text(encoding="utf-8"))
-            if any(s["day"] == day for s in summary["sessions"]):
-                touching.add(win_dir.name)
-    return touching
+def _touching(report, day):
+    """Window ids whose summary sessions include ``day`` (from the build report).
+
+    The hook deletes a successfully published cycle's emit root, so the
+    emit tree is gone by the time a test reads it; the build report in
+    the return value carries the same window/session data.
+    """
+    return {w["window_id"] for w in report["build"]["windows"] if day in w["sessions"]}
 
 
 class RetryTests(unittest.TestCase):
@@ -145,7 +143,7 @@ class RetryTests(unittest.TestCase):
         again = self._run("2026-10-09", self.universe, NOW_PLUS_5)
         by_id = {r["window_id"]: r for r in again["publish"]}
         self.assertEqual(len(by_id), 14)
-        touching = _touching(again["emit_root"], "2026-10-09")
+        touching = _touching(again, "2026-10-09")
         self.assertEqual(len(touching), 6)
         for window_id, r in by_id.items():
             if window_id in touching:
@@ -176,7 +174,7 @@ class RetryTests(unittest.TestCase):
         universe_path.write_text(json.dumps(universe) + "\n", encoding="utf-8")
         again = self._run("2026-10-09", self.universe, NOW_PLUS_5)
         by_id = {r["window_id"]: r for r in again["publish"]}
-        touching = _touching(again["emit_root"], "2026-10-05")
+        touching = _touching(again, "2026-10-05")
         self.assertEqual(len(touching), 6)
         for window_id, r in by_id.items():
             if window_id in touching:

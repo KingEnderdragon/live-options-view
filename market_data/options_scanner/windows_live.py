@@ -40,9 +40,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 from collections import defaultdict
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -59,16 +60,26 @@ MAX_SESSIONS = 10
 WINDOWS_LIVE_ENV = "OA203_WINDOWS_LIVE_ENABLED"
 
 # Local-output retention / disk headroom (see docs/130-live-window-wiring.md).
-# Worst case per cycle: 14 windows x (summary <=1 MiB + rankings <=4 MiB
-# + paths <=4 MiB compressed) = 126 MiB. The hook requires twice that
-# free before starting a build, and the prune keeps at most 10 cycles
-# (the 10-session window) within a 512 MiB emit budget.
+# Corrected peak accounting: a 10-session cycle builds at most 32 windows
+# (6 weekly + 9 overnight + 9 two-session + 8 three-session), each at most
+# 9 MiB of emit members (summary <=1 MiB + rankings <=4 MiB + paths <=4 MiB
+# compressed). Peak per cycle is therefore 32 x 9 MiB = 288 MiB. The hook
+# requires twice that free before starting a build (1x the build peak plus
+# 1x for a local-backend copy of the same cycle) and fails closed below it.
+# The manual prune budget (192 MiB) is sized so pruning to it always leaves
+# room for the next build: 192 + 576 = 768 MiB <= the ~773 MiB free on the
+# scanner's /data volume (Chej's figures, 5000 MB total / 4190 MB used, not
+# independently verified here). There is NO hard cycle-count floor: a floor
+# of 10 cycle dirs cannot fit the headroom at full-universe scale, so the
+# byte budget alone decides (keep_cycles=0 by default; an operator may ask
+# for a recency preference explicitly, and the report then shows the
+# over-budget state instead of silently exceeding it).
 MAX_WINDOW_EMIT_BYTES = (1 + 4 + 4) * 1024 * 1024
-MAX_WINDOWS_PER_CYCLE = 14
+MAX_WINDOWS_PER_CYCLE = 32
 MAX_CYCLE_EMIT_BYTES = MAX_WINDOWS_PER_CYCLE * MAX_WINDOW_EMIT_BYTES
 MIN_EMIT_FREE_BYTES = 2 * MAX_CYCLE_EMIT_BYTES
-DEFAULT_KEEP_CYCLES = 10
-DEFAULT_MAX_EMIT_BYTES = 512 * 1024 * 1024
+DEFAULT_KEEP_CYCLES = 0
+DEFAULT_MAX_EMIT_BYTES = 192 * 1024 * 1024
 
 
 def load_local_session(day_dir: Path, underlyings: set[str],
@@ -207,9 +218,26 @@ def run_after_finalize(spool_dir: Path | str, day, universe: Mapping[str, Any], 
     results = publish_windows(emit, backend or pub.r2_backend(),
                               window_ids={(kind, window_id) for kind, window_id in window_ids},
                               now=now)
+    # Publish/verify then remove expendable derived output: this cycle's
+    # emit root is rebuildable from the spool while the spool matches, and
+    # its products now live in the backend. Removing it here is what keeps
+    # ongoing publication bounded: a successful cycle leaves no accumulated
+    # emit behind. A failed publish raises above, so the emit root is kept
+    # as recovery evidence. Older cycles converge the same way: every
+    # verified older cycle is pruned (keep_cycles=0, max_emit_bytes=0);
+    # unverified cycles are kept as evidence. Both steps are best-effort
+    # and recorded, never raised after a successful publish.
+    cleanup = _remove_cycle_emit(emit)
+    try:
+        older = prune_windows_emit(emit.parent, backend, keep_cycles=0,
+                                   max_emit_bytes=0, dry_run=False)
+    except Exception as exc:  # noqa: BLE001 - recorded, never masks a publish
+        older = {"error": f"{type(exc).__name__}: {exc}"}
+    cleanup["older_prune"] = older
     return {"enabled": True, "cycle": cycle, "day": day.isoformat(), "days": [d.name for d in dirs],
             "underlyings": sorted(unders), "emit_root": str(emit),
-            "build": report, "publish": results}
+            "manifest": manifest, "build": report, "publish": results,
+            "cleanup": cleanup}
 
 
 def build_windows(day_dirs: list[Path] | tuple[Path, ...], underlyings: set[str],
@@ -424,80 +452,292 @@ def _check_emit_headroom(emit: Path, *, min_free_bytes: int = MIN_EMIT_FREE_BYTE
     if free < min_free_bytes:
         raise ValueError(
             f"emit headroom: {free} bytes free on {probe}, need at least "
-            f"{min_free_bytes} bytes before building; prune older per-cycle "
-            f"emit roots (windows-prune-emit), never the finalized day archives")
+            f"{min_free_bytes} bytes before building (32-window cycle peak "
+            f"{MAX_CYCLE_EMIT_BYTES} bytes x2); prune verified per-cycle emit "
+            f"roots (windows-prune-emit), never the finalized day archives. "
+            f"Note: emit pruning only helps if emit is what fills the volume; "
+            f"the scanner's own day archives also grow on this volume.")
+
+
+def _is_link(path: Path) -> bool:
+    """True for symlinks and (on Windows) junctions; False on any stat failure."""
+    try:
+        if path.is_symlink():
+            return True
+    except OSError:
+        return False
+    is_junction = getattr(path, "is_junction", None)
+    if is_junction is None:
+        return False
+    try:
+        return bool(is_junction())
+    except OSError:
+        return False
+
+
+def _resolve_inside(path: Path, root: Path) -> Path | None:
+    """``path`` resolved, when it stays inside resolved ``root``; else None."""
+    try:
+        resolved = path.resolve()
+        rroot = root.resolve()
+    except OSError:
+        return None
+    if resolved == rroot or rroot in resolved.parents:
+        return resolved
+    return None
+
+
+def _cycle_dir_safe(cycle_dir: Path, emit_root: Path) -> tuple[bool, str]:
+    """Containment + link + day-archive-marker checks for one cycle dir.
+
+    The emit root itself must not be a link; the cycle dir must resolve
+    inside it, must not itself be a link, must hold no symlink/junction
+    anywhere inside it, and must hold no day-archive marker (``sweeps/``).
+    Anything else is refused: the prune never follows a link out of the
+    emit root and never operates on source archives.
+    """
+    if _is_link(emit_root):
+        return False, "emit root is a symlink/junction"
+    resolved = _resolve_inside(cycle_dir, emit_root)
+    if resolved is None:
+        return False, "cycle dir escapes the emit root"
+    if _is_link(cycle_dir):
+        return False, "cycle dir is a symlink/junction"
+    for dirpath, dirnames, filenames in os.walk(resolved, followlinks=False):
+        here = Path(dirpath)
+        for name in list(dirnames) + filenames:
+            if _is_link(here / name):
+                return False, f"symlink/junction inside cycle: {name}"
+        if (here / "sweeps").is_dir():
+            return False, "cycle dir holds a day-archive marker (sweeps/)"
+    return True, "safe"
 
 
 def _cycle_dirs(emit_root: Path) -> list[Path]:
-    """Per-cycle emit roots: direct children named YYYY-MM-DD holding cycle.json."""
+    """Per-cycle emit roots: real direct children named YYYY-MM-DD holding cycle.json.
+
+    Symlinked/junction children are never followed and never listed.
+    """
     out = []
     for child in sorted(Path(emit_root).iterdir()):
-        if not child.is_dir():
+        if _is_link(child) or not child.is_dir():
             continue
         try:
             date.fromisoformat(child.name)
         except ValueError:
             continue
-        if (child / "cycle.json").is_file():
+        manifest = child / "cycle.json"
+        if manifest.is_file() and not _is_link(manifest):
             out.append(child)
     return out
 
 
+def _link_children(emit_root: Path) -> list[str]:
+    """Names of symlinked/junction direct children (reported, never followed)."""
+    return sorted(c.name for c in Path(emit_root).iterdir() if _is_link(c))
+
+
 def _cycle_size(cycle_dir: Path) -> int:
-    return sum(p.stat().st_size for p in Path(cycle_dir).rglob("*") if p.is_file())
+    """Total bytes of real files under a cycle dir (links never followed)."""
+    total = 0
+    for dirpath, dirnames, filenames in os.walk(cycle_dir, followlinks=False):
+        here = Path(dirpath)
+        dirnames[:] = [d for d in dirnames if not _is_link(here / d)]
+        for name in filenames:
+            p = here / name
+            if _is_link(p):
+                continue
+            try:
+                total += p.stat().st_size
+            except OSError:
+                continue
+    return total
 
 
-def _cycle_revision(cycle_dir: Path, kind: str, window_id: str) -> str | None:
-    """The revision this cycle built for one window (rev_<sha256(summary.json)>)."""
-    summary_path = (Path(cycle_dir) / "oa203" / "windows" / pub.POLICY
-                    / kind / window_id / "summary.json")
-    try:
-        data = summary_path.read_bytes()
-    except OSError:
-        return None
-    return "rev_" + hashlib.sha256(data).hexdigest()
+def _pointer_revision_verified(backend: pub.StorageBackend, prefix: str,
+                               pointer: dict) -> bool:
+    """True when the pointer's revision members exist in the backend with matching digests.
+
+    A newer pointer alone proves nothing about durability: the revision it
+    names must be readable from the backend with every member digest
+    matching the pointer. Any read failure or digest mismatch is False.
+    """
+    revision = pointer.get("revision")
+    members = pointer.get("members") or {}
+    if not isinstance(revision, str) or not isinstance(members, dict):
+        return False
+    for name in pub.WINDOW_MEMBERS:
+        digest = members.get(name)
+        if not isinstance(digest, str):
+            return False
+        try:
+            data = backend.get(f"{prefix}/{revision}/{name}")
+        except Exception:
+            return False
+        if hashlib.sha256(data).hexdigest() != digest:
+            return False
+    return True
 
 
 def _cycle_prunable(cycle_dir: Path, backend: pub.StorageBackend) -> tuple[bool, str]:
-    """True when every window in this cycle is published or superseded.
+    """True only on exact, verified evidence that every window in this cycle is durably accepted.
 
-    Published: the backend pointer revision equals the revision this
-    cycle built. Superseded: the pointer revision differs but its
-    published_at is later than this cycle's generated_at (a newer cycle
-    republished the window). Anything else -- no pointer, a damaged
-    pointer, an older pointer revision -- means the cycle's emit is the
-    only copy of that revision, so it must NOT be pruned.
+    The manifest must be present, well-formed, and list every window the
+    cycle built: cycle/day/days/generated_at all present and consistent
+    (cycle == day == the directory name, days non-empty ISO dates,
+    generated_at a timezone-aware timestamp), windows a non-empty list of
+    [kind, window_id] pairs for known kinds/ids. A missing, empty or
+    malformed manifest qualifies NOTHING -- there is no vacuous pass.
+
+    For each window the local members must exist and match the manifest
+    identity, and the backend pointer must prove durable acceptance:
+    PUBLISHED -- pointer revision equals the local summary hash AND every
+    pointer member digest equals the digest of the corresponding local
+    member bytes AND published_at does not predate the cycle (5-minute
+    clock tolerance); SUPERSEDED -- pointer names a different revision
+    with published_at strictly later than the cycle AND that revision's
+    members verify in the backend (see _pointer_revision_verified). A
+    newer pointer whose revision members cannot be verified, a member
+    digest mismatch, or a malformed timestamp is a refusal, never a pass.
     """
+    ok, reason = _cycle_dir_safe(cycle_dir, cycle_dir.parent)
+    if not ok:
+        return False, reason
     try:
         manifest = json.loads((Path(cycle_dir) / "cycle.json").read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         return False, f"cycle.json unreadable ({exc})"
+    if not isinstance(manifest, dict):
+        return False, "cycle.json is not a JSON object"
+    cycle = manifest.get("cycle")
+    day = manifest.get("day")
+    if not isinstance(cycle, str) or not isinstance(day, str) or cycle != day:
+        return False, "cycle.json cycle/day missing or mismatched"
+    try:
+        date.fromisoformat(day)
+    except ValueError:
+        return False, "cycle.json day is not an ISO date"
+    if cycle_dir.name != day:
+        return False, "cycle dir name does not match cycle.json day"
+    days = manifest.get("days")
+    if not isinstance(days, list) or not days or not all(isinstance(d, str) for d in days):
+        return False, "cycle.json days missing or empty"
+    try:
+        for d in days:
+            date.fromisoformat(d)
+    except ValueError:
+        return False, "cycle.json days holds a non-ISO date"
+    windows = manifest.get("windows")
+    if not isinstance(windows, list) or not windows:
+        return False, "cycle.json windows missing or empty (no evidence)"
+    for entry in windows:
+        if (not isinstance(entry, (list, tuple)) or len(entry) != 2
+                or not isinstance(entry[0], str) or not isinstance(entry[1], str)
+                or entry[0] not in w.KINDS
+                or not pub.WINDOW_ID[entry[0]].match(entry[1])):
+            return False, f"cycle.json windows holds a malformed entry: {entry!r}"
+    # The manifest must list exactly the windows present in the cycle's
+    # local emit tree: a manifest that omits a window is not evidence
+    # about that window, and an extra directory the manifest does not
+    # account for is not prunable on this evidence either.
+    tree = Path(cycle_dir) / "oa203" / "windows" / pub.POLICY
+    present: set[tuple[str, str]] = set()
+    if tree.is_dir():
+        for kind_dir in sorted(x for x in tree.iterdir() if x.is_dir()):
+            for win_dir in sorted(x for x in kind_dir.iterdir() if x.is_dir()):
+                present.add((kind_dir.name, win_dir.name))
+    if present != {(k, w_id) for k, w_id in windows}:
+        return False, "cycle.json windows do not match the windows in the local emit tree"
     try:
         cycle_time = datetime.fromisoformat(
             str(manifest.get("generated_at")).replace("Z", "+00:00"))
     except (TypeError, ValueError):
         return False, "cycle.json generated_at missing/unparseable"
-    for kind, window_id in manifest.get("windows", []):
-        rev = _cycle_revision(cycle_dir, kind, window_id)
-        if rev is None:
-            return False, f"{window_id}: summary.json missing"
+    if cycle_time.tzinfo is None:
+        return False, "cycle.json generated_at has no timezone"
+    for kind, window_id in windows:
+        member_dir = Path(cycle_dir) / "oa203" / "windows" / pub.POLICY / kind / window_id
+        try:
+            summary_bytes = (member_dir / "summary.json").read_bytes()
+            rankings_bytes = (member_dir / "rankings.csv").read_bytes()
+            paths_bytes = (member_dir / "paths.csv.gz").read_bytes()
+        except OSError as exc:
+            return False, f"{window_id}: local member missing ({exc})"
+        try:
+            summary = json.loads(summary_bytes.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            return False, f"{window_id}: local summary.json malformed"
+        if summary.get("kind") != kind or summary.get("window_id") != window_id:
+            return False, f"{window_id}: local summary identity mismatch"
+        local_rev = "rev_" + hashlib.sha256(summary_bytes).hexdigest()
+        local_digests = {"summary.json": hashlib.sha256(summary_bytes).hexdigest(),
+                         "rankings.csv": hashlib.sha256(rankings_bytes).hexdigest(),
+                         "paths.csv.gz": hashlib.sha256(paths_bytes).hexdigest()}
         try:
             pointer = pub._read_pointer(backend, pub.window_prefix(kind, window_id))
         except ValueError as exc:
             return False, f"{window_id}: pointer damaged ({exc})"
         if pointer is None:
             return False, f"{window_id}: not published (no pointer)"
-        if pointer.get("revision") == rev:
-            continue
+        members = pointer.get("members")
+        if (not isinstance(members, dict)
+                or any(not isinstance(members.get(m), str)
+                       or not re.fullmatch(r"[0-9a-f]{64}", members.get(m) or "")
+                       for m in pub.WINDOW_MEMBERS)):
+            return False, f"{window_id}: pointer members malformed"
+        if not isinstance(pointer.get("revision"), str) or not pointer["revision"].startswith("rev_"):
+            return False, f"{window_id}: pointer revision malformed"
         try:
             pub_time = datetime.fromisoformat(
                 str(pointer.get("published_at")).replace("Z", "+00:00"))
         except (TypeError, ValueError):
             return False, f"{window_id}: pointer published_at missing/unparseable"
-        if pub_time > cycle_time:
+        if pub_time.tzinfo is None:
+            return False, f"{window_id}: pointer published_at has no timezone"
+        prefix = pub.window_prefix(kind, window_id)
+        if pointer.get("revision") == local_rev:
+            if members != local_digests:
+                return False, f"{window_id}: pointer member digests differ from local members"
+            if pub_time < cycle_time - timedelta(minutes=5):
+                return False, f"{window_id}: pointer published_at predates the cycle"
             continue
-        return False, f"{window_id}: pointer is an older revision (cycle revision unpublished)"
-    return True, "all windows published or superseded"
+        if pub_time <= cycle_time:
+            return False, f"{window_id}: pointer is an older revision (cycle revision unpublished)"
+        if not _pointer_revision_verified(backend, prefix, pointer):
+            return False, f"{window_id}: newer pointer revision members not verified in backend"
+    return True, "all windows published or superseded (member digests verified)"
+
+
+def _delete_cycle_dir(cycle_dir: Path) -> None:
+    """Delete one cycle dir after its safety re-check; re-list to confirm."""
+    ok, reason = _cycle_dir_safe(cycle_dir, cycle_dir.parent)
+    if not ok:
+        raise RuntimeError(f"prune: refusing unsafe cycle dir {cycle_dir}: {reason}")
+    shutil.rmtree(cycle_dir)
+    if cycle_dir.exists():
+        raise RuntimeError(f"prune: {cycle_dir} still exists after delete")
+
+
+def _remove_cycle_emit(cycle_dir: Path) -> dict[str, Any]:
+    """Remove one just-published cycle emit root; never raises.
+
+    The cycle's products live in the backend and the emit is rebuildable
+    from the spool while the spool matches, so a successfully published
+    cycle's emit is expendable. A failure to remove is reported, not
+    raised: the publish already succeeded, and the next cycle's headroom
+    pre-check will refuse before the disk can fill.
+    """
+    try:
+        ok, reason = _cycle_dir_safe(cycle_dir, cycle_dir.parent)
+        if not ok:
+            return {"removed": False, "bytes_removed": 0,
+                    "error": f"unsafe cycle dir, kept: {reason}"}
+        size = _cycle_size(cycle_dir)
+        _delete_cycle_dir(cycle_dir)
+        return {"removed": True, "bytes_removed": size, "error": None}
+    except Exception as exc:
+        return {"removed": False, "bytes_removed": 0,
+                "error": f"{type(exc).__name__}: {exc}"}
 
 
 def prune_windows_emit(emit_root: Path, backend: pub.StorageBackend, *,
@@ -506,20 +746,30 @@ def prune_windows_emit(emit_root: Path, backend: pub.StorageBackend, *,
                        dry_run: bool = True) -> dict[str, Any]:
     """Prune old per-cycle emit roots (derived output ONLY).
 
-    Keeps the newest ``keep_cycles`` cycle dirs as a hard floor, then
-    prunes verified older cycles, oldest first, until the emit total is
-    at or under ``max_emit_bytes``. A cycle is pruned only when every
-    window in it is published or superseded (see ``_cycle_prunable``);
-    anything unverified is skipped with a reason and left in place.
-    Dry-run (default) lists what would be deleted and deletes nothing;
-    with ``dry_run=False`` each deletion is re-listed to confirm the
-    directory is gone. Only direct children of ``emit_root`` named
-    YYYY-MM-DD and holding cycle.json are ever considered -- never the
-    finalized day archives (they live in the spool, not under the emit
-    root), never source history, never live/published data. In dry-run
-    mode ``pruned`` and ``bytes_after`` are projected, not actual.
+    Prunes verified cycles, oldest first, until the emit total is at or
+    under ``max_emit_bytes``. A cycle is pruned only when every window in
+    it is published or superseded with member digests verified against
+    the backend (see ``_cycle_prunable``); anything unverified is skipped
+    with a reason and left in place. ``keep_cycles`` is a recency
+    preference only: the newest N cycles are never pruned even when over
+    budget, and the report then shows the over-budget state. It is NOT a
+    hard floor -- the default is 0, so the byte budget alone decides; a
+    hard floor of 10 cycle dirs cannot fit the headroom at full-universe
+    scale. Dry-run (default) lists what would be deleted and deletes
+    nothing; with ``dry_run=False`` each deletion is re-listed to confirm
+    the directory is gone. Only real direct children of ``emit_root``
+    named YYYY-MM-DD and holding cycle.json are ever considered -- never
+    the finalized day archives (they live in the spool, not under the emit
+    root), never source history, never live/published data. Pointing the
+    prune at a spool (direct children holding day archives) raises
+    outright. Symlinked/junction children are reported as skipped and
+    never followed. In dry-run mode ``pruned`` and ``bytes_after`` are
+    projected, not actual.
     """
     root = Path(emit_root)
+    for child in root.iterdir():
+        if child.is_dir() and (child / "sweeps" / "manifest.jsonl").is_file():
+            raise ValueError(f"refusing to prune {root}: it holds finalized day archives (spool)")
     cycles = _cycle_dirs(root)
     sizes = {c: _cycle_size(c) for c in cycles}
     total = sum(sizes.values())
@@ -531,6 +781,9 @@ def prune_windows_emit(emit_root: Path, backend: pub.StorageBackend, *,
                               "bytes_before": total, "cycles_before": len(cycles),
                               "pruned": [], "skipped": [], "kept": [],
                               "bytes_after": total, "cycles_after": len(cycles)}
+    for name in _link_children(root):
+        report["skipped"].append({"cycle": name,
+                                   "reason": "symlink/junction at emit root: never followed"})
     for cycle in candidates:
         if total <= max_emit_bytes:
             break
@@ -542,9 +795,7 @@ def prune_windows_emit(emit_root: Path, backend: pub.StorageBackend, *,
             report["pruned"].append(cycle.name)
             total -= sizes[cycle]
             continue
-        shutil.rmtree(cycle)
-        if cycle.exists():
-            raise RuntimeError(f"prune: {cycle} still exists after delete")
+        _delete_cycle_dir(cycle)
         report["pruned"].append(cycle.name)
         total -= sizes[cycle]
     pruned_names = set(report["pruned"])
