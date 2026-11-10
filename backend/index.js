@@ -4,6 +4,8 @@ import { handleSettle, settleAllBots, settlementPriceServer, validateSettleReque
 import { handleBotIndexReconcile, handleBotMetadata, handleBots } from './bots.js';
 import { handleLogin, handleLogout, handleMe, handleRegister } from './auth.js';
 import { handlePaperTrade } from './paper-trade.js';
+import { handleMigration } from './migrate.js';
+import { createStorage } from './storage.js';
 
 // Re-exported from backend/common.js so the Worker's public API (the 31
 // exports pinned by tests/worker_logic.test.js) stays on backend/index.js.
@@ -56,9 +58,15 @@ export default {
       return handleBotMetadata(request, env);
     }
 
-    if (request.method === 'POST' && url.pathname === '/api/bot-index/reconcile') {
-      return handleBotIndexReconcile(request, env);
+    // Operator-only, issue #208 cutover route. Present only when
+    // MIGRATION_TOKEN is configured; handleMigration answers 404 otherwise, so
+    // an unconfigured deployment does not advertise it.
+    if (request.method === 'POST' && url.pathname === '/api/admin/migrate') {
+      return handleMigration(request, env, createStorage(env));
     }
+
+    if (request.method === 'POST' && url.pathname === '/api/bot-index/reconcile') {
+      return handleBotIndexReconcile(request, env);    }
 
     if (request.method === 'GET' && url.pathname === '/api/me') {
       return handleMe(request, env);

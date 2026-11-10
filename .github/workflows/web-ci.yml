@@ -43,6 +43,10 @@ jobs:
         run: node tests/historical_archive.test.js
       - name: worker logic
         run: node tests/worker_logic.test.js
+      - name: D1 account/session storage (#208)
+        run: node tests/storage_d1.test.mjs
+      - name: KV to D1 migration and rollback (#208)
+        run: node tests/migrate_d1.test.mjs
       - name: bot registration probe contract
         run: node tests/preflight_worker_contract.test.js
       - name: bot account closure and identity compatibility

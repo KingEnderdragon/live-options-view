@@ -1,0 +1,128 @@
+// tests/helpers/d1_shim.mjs -- a real SQLite database behind D1's API shape.
+//
+// Node's built-in `node:sqlite` gives the tests the same engine D1 runs, so the
+// schema and the SQL in backend/storage.js are exercised for real: UNIQUE
+// constraints, conditional UPDATE ... WHERE version = ?, and ON CONFLICT
+// clauses all behave as they will in production. Only the network wrapper is
+// fake.
+
+import { DatabaseSync } from 'node:sqlite';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
+
+class Statement {
+  constructor(db, sql, params) {
+    this.db = db;
+    this.sql = sql;
+    this.params = params;
+  }
+
+  bind(...params) {
+    return new Statement(this.db, this.sql, params);
+  }
+
+  async run() {
+    const prepared = this.db.prepare(this.sql);
+    const result = prepared.run(...this.params);
+    return { success: true, meta: { changes: result.changes, last_row_id: result.lastInsertRowid } };
+  }
+
+  async first() {
+    const row = this.db.prepare(this.sql).get(...this.params);
+    return row ?? null;
+  }
+
+  async all() {
+    const results = this.db.prepare(this.sql).all(...this.params);
+    return { results, success: true, meta: {} };
+  }
+}
+
+export class FakeD1 {
+  constructor() {
+    this.db = new DatabaseSync(':memory:');
+    this.queries = [];
+  }
+
+  static schemaSql() {
+    return fs.readFileSync(
+      path.join(ROOT, 'backend', 'migrations', '0001_accounts_sessions.sql'), 'utf8',
+    );
+  }
+
+  prepare(sql) {
+    this.queries.push(sql);
+    return new Statement(this.db, sql, []);
+  }
+
+  async exec(sql) {
+    this.db.exec(sql);
+    return { count: 0, duration: 0 };
+  }
+
+  async batch(statements) {
+    // D1 batch is atomic; SQLite in a transaction gives the same guarantee.
+    this.db.exec('BEGIN');
+    const results = [];
+    try {
+      for (const statement of statements) results.push(await statement.run());
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+    return results;
+  }
+
+  raw(sql, ...params) {
+    return this.db.prepare(sql).all(...params);
+  }
+}
+
+export function makeStorage() {
+  const d1 = new FakeD1();
+  d1.db.exec(FakeD1.schemaSql());
+  return d1;
+}
+
+/** A legacy KV namespace stand-in for migration tests. */
+export class FakeKV {
+  constructor() {
+    this.data = new Map();
+    this.complete = true;
+    this.listCalls = 0;
+    this.failOnPage = null;
+  }
+
+  async get(key) {
+    return this.data.has(key) ? this.data.get(key) : null;
+  }
+
+  async put(key, value, options = {}) {
+    void options;
+    this.data.set(key, value);
+  }
+
+  async delete(key) {
+    this.data.delete(key);
+  }
+
+  async list({ prefix = '', limit = 1000, cursor } = {}) {
+    this.listCalls += 1;
+    if (this.failOnPage && this.listCalls === this.failOnPage) {
+      throw new Error('simulated KV list failure');
+    }
+    const keys = [...this.data.keys()].filter(k => k.startsWith(prefix)).sort();
+    const start = cursor ? keys.indexOf(cursor) + 1 : 0;
+    const page = keys.slice(start, start + limit);
+    const done = start + page.length >= keys.length;
+    return {
+      keys: page.map(name => ({ name })),
+      list_complete: done,
+      cursor: done ? undefined : page[page.length - 1],
+    };
+  }
+}
