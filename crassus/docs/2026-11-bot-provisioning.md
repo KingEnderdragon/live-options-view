@@ -208,3 +208,52 @@ Worker was unreachable or gave an unaccepted response, `2` means the key is not
 configured. Rollback is `CRASSUS_KEY_HEALTH_INTERVAL_S=0` and a restart; no
 state needs cleaning, and the state file is inert without the runner.
 
+
+## Login failure classification and session recovery
+
+The runner's first version treated *any* login status at or above 400 as "this
+account does not exist yet" and attempted registration. During the November 9
+Worker degradation that turned every transient 500/503 into a `register` call
+that could only answer 409, doubling requests per failing account per cycle and
+adding KV reads to an already strained quota. The classification is now:
+
+| Login result | Handling |
+| --- | --- |
+| 408, 425, 429, 500, 502, 503, 504 | `TransportError`; retried on a later cycle; **never** registers |
+| 401 | the only status that can mean "no such account"; one bounded provisioning attempt |
+| other 4xx | `ConfigError`; retrying cannot help |
+| 2xx | sync bot metadata, then read `/api/me` |
+
+Provisioning is bounded rather than disabled. A transient `register` failure
+spaces the next attempt by 300 s, then 900 s, then 1800 s (one runner cycle, then
+three, then six), and the attempt count resets on success — so a Worker that
+recovers is picked up, and nothing here sleeps or spins. If a 401 is followed by
+a 409, the account exists and the configured password is wrong: that is reported
+as a credential mismatch, registration is not retried for an hour (a login still
+happens each cycle, so fixing the credential is picked up), and the message says
+so plainly instead of blaming the network.
+
+Runtime session loss is handled too. Previously a stale cookie (Worker restart,
+cleared session store, natural expiry) made `/api/me` return 401 and the runner
+raise a transport error every cycle forever — a healthy account stayed dark
+until the process restarted. Now a `/api/me` 401 triggers exactly one
+re-authentication and one retry; a second 401 becomes a `ConfigError` naming the
+credential, and a transient login during that re-authentication stays a
+`TransportError` so the next cycle recovers.
+
+`crassus/scripts/verify_session_recovery.py` covers all of this with a scripted
+HTTP layer: transient login never registers and recovers later, 401 provisions
+once, 409 is a mismatch with cooldown, backoff grows and still recovers, 429 is
+transient, `/api/me` 401 re-authenticates once and recovers, and a second 401 is
+a bounded configuration error.
+
+### What this does not fix
+
+An exhausted Cloudflare KV quota is a storage outage, not an auth bug. This
+patch reduces the pressure — a degraded Worker no longer gets a pointless
+`register` per account per cycle, and session loss costs one login rather than
+one per cycle — but it cannot restore quota that has already been spent. Until
+the quota resets or the account is raised, writes (including session creation)
+can keep failing; `429` is now classified as transient so the runner backs off
+rather than amplifying. Migrating session storage off Workers KV is issue #208's
+architectural direction and is explicitly *not* part of this hotfix.
