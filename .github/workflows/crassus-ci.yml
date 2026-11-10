@@ -79,6 +79,9 @@ jobs:
       - name: Run supervisor heartbeat protocol suite (#41)
         working-directory: crassus
         run: python scripts/verify_heartbeat_protocol.py
+      - name: Run login classification and session recovery suite (#41)
+        working-directory: crassus
+        run: python scripts/verify_session_recovery.py
       - name: Run bounded registration-key health suite (#41)
         working-directory: crassus
         run: python scripts/verify_key_health.py
