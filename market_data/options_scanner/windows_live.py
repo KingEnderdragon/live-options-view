@@ -1,46 +1,58 @@
 """Build and publish #130 windows from local finalized day archives.
 
-This is the missing producer-to-publisher link for live window products,
-and it is deliberately dormant:
+This is the producer-to-publisher link for live window products:
 
 * It reads ONLY local day directories (the scanner host's spool, the same
   files ``finalize`` wrote: summary.json, universe.json,
   sweeps/manifest.jsonl, sweeps/sweep_NNNN.jsonl.gz). It never touches a
-  provider, never reads R2, and never uploads.
+  provider and never reads R2.
 * ``build_windows`` writes a local emit root (``oa203/windows/`` tree).
   ``publish_windows`` publishes that emit root to an injected backend.
   The CLI's ``windows-publish`` only offers the local-filesystem backend;
   R2 publication is a release step (Chej) via ``windows_publish.r2_backend``.
-* NOTHING here runs on a schedule, hooks into ``run_day``/``finalize``,
-  or sets any flag. The live trigger (call this after finalize, on what
-  cadence, under what flag, on which Railway service setting) is a
-  separate, unapproved step: see docs/130-live-window-wiring.md.
+* The production hook is ``run_after_finalize`` (called from
+  ``session.finalize``): it runs only when the env flag
+  ``OA203_WINDOWS_LIVE_ENABLED == "1"`` (disabled by default). Enabling
+  the flag is live activation (Chej alone, after review); the code only
+  implements the hook.
+* ``build_windows`` defaults to a bounded 50-underlying subset
+  (``universe_scope: bounded_subset`` — always served partial, never
+  final). ``full_universe=True`` loads the complete selected universe
+  (at most 500 underlyings, the live universe size) and combines it
+  before ranking (see ``windows_combine``); the passed underlyings must
+  cover every selected underlying of every loaded day, or the build
+  fails closed.
 
 The loader reuses ``windows_replay.load_session`` exactly (same manifest,
 calendar, row and contract-identity validation) by pointing its ``fetch``
 at the local day directory for one call. That is the point: one
-implementation of the validation, no fork. A day whose daily assessment
-is not ``complete`` is refused by that validation (fail-closed); see the
-wiring doc for the partial-day gap that leaves open.
+implementation of the validation, no fork. A final day assessed
+``partial`` is admitted with explicit ``session_partial:<day>`` reasons
+(see ``windows_replay.validate_manifest``); a torn or invalid manifest
+is still refused fail-closed.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import os
 from collections import defaultdict
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping, Sequence
 
 import market_data.options_scanner.windows as w
+import market_data.options_scanner.windows_combine as combine
 import market_data.options_scanner.windows_outputs as outputs
 import market_data.options_scanner.windows_publish as pub
 import market_data.options_scanner.windows_replay as replay
 from market_data.options_scanner.returns import ContractInfo, Observation
 
 MAX_UNDERLYINGS = 50
+MAX_UNDERLYINGS_FULL = 500  # live universe size (Config.universe_size default)
 MAX_SESSIONS = 10
+WINDOWS_LIVE_ENV = "OA203_WINDOWS_LIVE_ENABLED"
 
 
 def load_local_session(day_dir: Path, underlyings: set[str],
@@ -51,7 +63,9 @@ def load_local_session(day_dir: Path, underlyings: set[str],
     hold summary.json, universe.json and sweeps/ exactly as ``finalize``
     wrote them. Returns the replay session metadata plus ``sources`` (the
     local files read, each with its SHA-256). Raises on any missing,
-    torn, non-final or non-complete day: nothing is invented.
+    torn, non-final or invalid day; a final day assessed partial is
+    admitted (see ``windows_replay.validate_manifest``): nothing is
+    invented.
     """
     day = day_dir.name
     date.fromisoformat(day)  # ValueError on a non-date directory name
@@ -79,25 +93,107 @@ def load_local_session(day_dir: Path, underlyings: set[str],
     return meta
 
 
+def selected_underlyings(day_dirs: Sequence[Path]) -> set[str]:
+    """Union of selected underlyings across local day archives."""
+    out: set[str] = set()
+    for d in day_dirs:
+        universe = json.loads((Path(d) / "universe.json").read_text(encoding="utf-8"))
+        out.update(u["underlying"] for u in universe.get("selected", []))
+    return out
+
+
+def finalized_day_dirs(spool: Path, *, through_day: date | None = None,
+                       limit: int = MAX_SESSIONS) -> list[Path]:
+    """Finalized local day directories in the spool, oldest first.
+
+    A directory counts as finalized when it holds a summary.json with
+    ``final: true``; a final-but-partial day counts (its partiality is
+    carried as session_partial reasons by the loader). Torn or non-final
+    days are skipped here and would still fail closed if passed to
+    build_windows directly.
+    """
+    spool = Path(spool)
+    dirs = []
+    for day_dir in sorted(p for p in spool.iterdir() if p.is_dir()):
+        try:
+            day = date.fromisoformat(day_dir.name)
+        except ValueError:
+            continue
+        if through_day is not None and day > through_day:
+            continue
+        summary_path = day_dir / "summary.json"
+        if not summary_path.is_file():
+            continue
+        try:
+            if not json.loads(summary_path.read_text(encoding="utf-8")).get("final"):
+                continue
+        except ValueError:
+            continue
+        dirs.append(day_dir)
+    return dirs[-limit:] if limit else dirs
+
+
+def windows_live_enabled() -> bool:
+    """Live window hook enablement: env flag only, default off."""
+    return os.getenv(WINDOWS_LIVE_ENV) == "1"
+
+
+def run_after_finalize(spool_dir: Path | str, day, universe: Mapping[str, Any], *,
+                       backend: pub.StorageBackend | None = None,
+                       emit_root: Path | str | None = None,
+                       now: datetime | None = None) -> dict[str, Any]:
+    """Build + publish windows for the finalized day (hook implementation).
+
+    Builds from the finalized day archives in the spool (up to 10
+    sessions ending at ``day``) over the complete selected universe,
+    then publishes to ``backend`` (default: the R2 backend — constructed
+    only here, i.e. only when the hook actually runs). Callers must gate
+    this on ``windows_live_enabled()``; this function itself performs
+    the build + publish and must never be called from an unflagged path.
+    Returns the build report plus per-window publish results.
+    """
+    spool = Path(spool_dir)
+    day = date.fromisoformat(day) if isinstance(day, str) else day
+    dirs = finalized_day_dirs(spool, through_day=day)
+    if not dirs:
+        raise ValueError(f"no finalized day archives in spool {spool}")
+    today_selected = {u["underlying"] for u in universe.get("selected", [])}
+    unders = selected_underlyings(dirs)
+    if today_selected and not today_selected <= unders:
+        raise ValueError(f"finalized day {day.isoformat()}: universe disagrees with its own archive")
+    emit = Path(emit_root) if emit_root is not None else spool / "windows_emit"
+    report = build_windows(dirs, unders, emit, full_universe=True)
+    results = publish_windows(emit, backend or pub.r2_backend(), now=now)
+    return {"enabled": True, "day": day.isoformat(), "days": [d.name for d in dirs],
+            "underlyings": sorted(unders), "emit_root": str(emit),
+            "build": report, "publish": results}
+
+
 def build_windows(day_dirs: list[Path] | tuple[Path, ...], underlyings: set[str],
-                  emit_root: Path, *, top: int = 15) -> dict[str, Any]:
+                  emit_root: Path, *, top: int = 15, full_universe: bool = False) -> dict[str, Any]:
     """Evaluate every supported window kind over local finalized days.
 
     ``day_dirs`` are finalized day-archive directories (sorted by date,
-    at most 10 sessions); ``underlyings`` is an explicit bounded set
-    (at most 50, mirroring the replay bound — a full-universe emit needs
-    the combine-emit step, see docs/130-live-window-wiring.md).
+    at most 10 sessions); ``underlyings`` is an explicit set of
+    underlyings. By default at most 50 (a bounded subset, served
+    partial as ``bounded_universe_subset`` — it never claims
+    full-universe completion). With ``full_universe=True`` at most 500
+    (the live universe size) and the passed set must cover every
+    selected underlying of every loaded day; the combined full universe
+    is ranked before the shortlist is cut (see ``windows_combine``).
     Writes the ``oa203/windows/`` tree under ``emit_root`` with scope
-    ``live_archive`` (unlike replay emits, a genuinely final window
-    stays final: ``write_window`` only forces partial for
-    ``offline_replay`` scope). Returns the build report. Writes nothing
-    outside ``emit_root`` and touches no provider or R2.
+    ``live_archive``. A full-universe build keeps a genuinely final
+    window final; a bounded-subset build is served partial as
+    ``bounded_universe_subset`` (replay emits stay forced partial as
+    ``bounded_universe_replay``). Returns the build report. Writes
+    nothing outside ``emit_root`` and touches no provider or R2.
     """
     dirs = [Path(d) for d in day_dirs]
     if not 1 <= len(dirs) <= MAX_SESSIONS:
         raise ValueError(f"bounded build: 1..{MAX_SESSIONS} sessions, got {len(dirs)}")
-    if not 1 <= len(underlyings) <= MAX_UNDERLYINGS:
-        raise ValueError(f"bounded build: 1..{MAX_UNDERLYINGS} underlyings, got {len(underlyings)}")
+    max_under = MAX_UNDERLYINGS_FULL if full_universe else MAX_UNDERLYINGS
+    if not 1 <= len(underlyings) <= max_under:
+        raise ValueError(f"bounded build: 1..{max_under} underlyings, got {len(underlyings)}")
     if [d.name for d in dirs] != sorted(d.name for d in dirs) or len({d.name for d in dirs}) != len(dirs):
         raise ValueError("day directories must be unique and sorted by date")
     unders = set(underlyings)
@@ -105,6 +201,11 @@ def build_windows(day_dirs: list[Path] | tuple[Path, ...], underlyings: set[str]
     sampled: dict[str, set] = defaultdict(set)
     sessions_meta = [load_local_session(d, unders, rows_by_symbol, sampled) for d in dirs]
     sessions = [m["session"] for m in sessions_meta]
+    if full_universe:
+        for d in dirs:
+            missing = selected_underlyings([d]) - unders
+            if missing:
+                raise ValueError(f"full_universe: {d.name} selected underlyings not covered: {sorted(missing)[:5]}")
     complete_weeks = replay.validate_calendar(sessions)
     import pandas_market_calendars as mcal
     calendar_version = mcal.__version__
@@ -116,52 +217,77 @@ def build_windows(day_dirs: list[Path] | tuple[Path, ...], underlyings: set[str]
         skipped.append({"window_id": f"weekly-{yw[0]}-W{yw[1]:02d}", "reason": "incomplete_calendar_week"})
     windows = weekly + w.overnight_windows(sessions, policy) + w.multi_session_windows(sessions, policy)
 
-    contracts = []
+    # One candidate path per (symbol, underlying) attribution. A symbol
+    # seen under more than one underlying is NOT stitched into a single
+    # path: each attribution is evaluated separately and resolved by
+    # windows_combine (pure duplicate -> one row; differing evidence ->
+    # all attributions excluded, conflict recorded).
+    candidates: list[tuple[ContractInfo, list[Observation], str]] = []
     for symbol, rs in rows_by_symbol.items():
-        rs.sort(key=lambda r: (r["t"], r["sweep"]))
-        last = rs[-1]
-        replay.validate_contract_identity(symbol, last)
-        identity = ("underlying", "type", "strike", "expiration", "contract_size")
-        if any(any(r.get(k) != last.get(k) for k in identity) or
-               (r.get("root") and last.get("root") and r["root"] != last["root"]) for r in rs):
-            raise RuntimeError(f"contract identity changed within path: {symbol}")
-        info = ContractInfo(symbol=symbol, underlying=last["underlying"], option_type=last["type"],
-                            strike=last["strike"], expiration=last["expiration"], root=last.get("root"),
-                            contract_size=int(last.get("contract_size") or 100))
-        path = [Observation(t=r["t"], bid=r["bid"], ask=r["ask"], bid_ms=r.get("bid_ms"),
-                            ask_ms=r.get("ask_ms"), underlying_price=r.get("spot"),
-                            bid_size=r.get("bid_size"), ask_size=r.get("ask_size"),
-                            volume=r.get("volume"), open_interest=r.get("oi")) for r in rs]
-        contracts.append((info, path))
+        by_under: dict[str, list] = defaultdict(list)
+        for r in rs:
+            by_under[r["underlying"]].append(r)
+        for under, urs in by_under.items():
+            urs.sort(key=lambda r: (r["t"], r["sweep"]))
+            last = urs[-1]
+            replay.validate_contract_identity(symbol, last)
+            identity = ("underlying", "type", "strike", "expiration", "contract_size")
+            if any(any(r.get(k) != last.get(k) for k in identity) or
+                   (r.get("root") and last.get("root") and r["root"] != last["root"]) for r in urs):
+                raise RuntimeError(f"contract identity changed within path: {symbol} ({under})")
+            info = ContractInfo(symbol=symbol, underlying=last["underlying"], option_type=last["type"],
+                                strike=last["strike"], expiration=last["expiration"], root=last.get("root"),
+                                contract_size=int(last.get("contract_size") or 100))
+            path = [Observation(t=r["t"], bid=r["bid"], ask=r["ask"], bid_ms=r.get("bid_ms"),
+                                ask_ms=r.get("ask_ms"), underlying_price=r.get("spot"),
+                                bid_size=r.get("bid_size"), ask_size=r.get("ask_size"),
+                                volume=r.get("volume"), open_interest=r.get("oi")) for r in urs]
+            candidates.append((info, path, under))
 
     def contract_days(info: ContractInfo, path: list[Observation]) -> set[str]:
         seen = {s.day for s in sessions for o in path if s.open_ms <= o.t < s.close_ms}
         return seen & sampled.get((info.underlying, info.expiration), set())
 
-    days_by_symbol = {info.symbol: contract_days(info, path) for info, path in contracts}
+    candidate_days = [contract_days(info, path) for info, path, _ in candidates]
     all_sources = [s for m in sessions_meta for s in m["sources"]]
     status = {m["day"]: {"final": m["final"], "assessment": m["assessment"],
+                         "assessment_reasons": m.get("assessment_reasons", []),
                          "sweeps": m["sweeps"]} for m in sessions_meta}
     generated = datetime.now(timezone.utc).isoformat()
+    universe_scope = "full_universe" if full_universe else "bounded_subset"
+    all_conflicts: list[dict] = []
+    kept_total = 0
     report: dict[str, Any] = {"builder": "windows_live", "mode": "live_archive",
+                              "universe_scope": universe_scope,
                               "calendar": {"name": "NYSE", "package": "pandas_market_calendars",
                                            "version": calendar_version},
                               "policy": policy.as_dict(),
                               "sessions": [{k: v for k, v in m.items() if k not in ("session", "sources")}
                                            for m in sessions_meta],
-                              "underlyings": sorted(unders), "contracts": len(contracts),
+                              "underlyings": sorted(unders), "contracts": len(candidates),
+                              "contracts_kept": 0, "conflicts": all_conflicts,
+                              "conflicting_symbols": 0,
                               "skipped_weeks": skipped, "windows": []}
     for win in windows:
-        rows = [w.evaluate(win, info, path, days_by_symbol[info.symbol], policy)
-                for info, path in contracts]
+        evaluated = [(under, w.evaluate(win, info, path, days, policy))
+                     for (info, path, under), days in zip(candidates, candidate_days)]
+        rows, conflicts, _stats = combine.combine_rows(
+            win.window_id, [(under, [row]) for under, row in evaluated])
+        for c in conflicts:
+            all_conflicts.append({"window_id": win.window_id, "symbol": c["symbol"],
+                                  "attributions": c["attributions"]})
+        kept_total += len(rows)
         days = {s.day for s in win.sessions}
         srcs = [x for x in all_sources if x["key"].split("/")[2] in days]
         outputs.write_window(Path(emit_root), win, rows, policy,
                              {d: status[d] for d in days}, srcs, generated,
-                             {"mode": "live_archive", "underlyings": sorted(unders),
+                             {"mode": "live_archive", "universe_scope": universe_scope,
+                              "underlyings": sorted(unders),
                               "calendar_package_version": calendar_version,
-                              "note": "built from local finalized day archives on the scanner host; "
-                                      "no provider, no R2 read"})
+                              "note": ("built from the complete selected universe on the scanner host; "
+                                       "no provider, no R2 read") if full_universe else
+                                      ("built from a bounded subset of the selected universe on the scanner host; "
+                                       "not the full universe; no provider, no R2 read")})
         summary: dict[str, Any] = {**win.as_dict(), "evaluated": len(rows)}
         for basis in w.BASES:
             ranked = w.rank_window(rows, basis)
@@ -176,6 +302,8 @@ def build_windows(day_dirs: list[Path] | tuple[Path, ...], underlyings: set[str]
                               "top": [{"rank": r[f"{basis}_rank"], "symbol": r["symbol"],
                                        "pct": r[basis]["pct"]} for r in elig[:top]]}
         report["windows"].append(summary)
+    report["contracts_kept"] = kept_total
+    report["conflicting_symbols"] = len({c["symbol"] for c in all_conflicts})
     return report
 
 
