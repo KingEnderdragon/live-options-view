@@ -651,5 +651,148 @@ class TenSessionTests(unittest.TestCase):
         self.assertEqual(live.MIN_EMIT_FREE_BYTES, 2 * live.MAX_CYCLE_EMIT_BYTES)
 
 
+class ScratchEmitTests(unittest.TestCase):
+    """Default emit lives on ephemeral scratch, not the archive volume.
+
+    The 576 MiB pre-check now applies to the scratch filesystem; the hook
+    writes nothing to /data except the small windows_live.json record in
+    the day archive. Scratch is removed on success AND on failure (the
+    publisher's attempt ledger plus the deterministic byte-identical
+    rebuild are the recovery evidence); an explicit emit_root keeps the
+    old behaviour, including keeping the emit on publish failure.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.spool = self.root / "days"
+        self.spool.mkdir(parents=True)
+        for day in DAYS:
+            _write_day(self.spool, day)
+        self.universe = {"selected": [{"underlying": u, "expiration": "2026-10-09"}
+                                       for u in ("AAA", "BBB", "CCC")]}
+        self.backend_root = self.root / "backend"
+        self.scratch_root = self.root / "scratch"
+        self.scratch_root.mkdir()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_default_emit_is_scratch_not_spool(self):
+        with mock.patch.dict(os.environ, {"OA203_WINDOWS_SCRATCH_DIR": str(self.scratch_root)}):
+            report = live.run_after_finalize(
+                self.spool, "2026-10-09", self.universe,
+                backend=pub.LocalFilesystemBackend(self.backend_root), now=NOW)
+        self.assertEqual(report["emit_location"], "scratch")
+        self.assertEqual(Path(report["scratch_root"]), self.scratch_root.resolve())
+        self.assertEqual(len(report["publish"]), 14)
+        self.assertTrue(report["cleanup"]["removed"])
+        # No windows_emit ever created in the spool; scratch is empty again.
+        self.assertFalse((self.spool / "windows_emit").exists())
+        self.assertEqual(list(self.scratch_root.iterdir()), [])
+        self.assertFalse(Path(report["emit_root"]).exists())
+        # Published products and source archives survive.
+        pointer = json.loads((self.backend_root / "oa203" / "windows" / "oa203-windows-v1"
+                              / "overnight" / "overnight-2026-10-05_2026-10-06"
+                              / "latest.json").read_text(encoding="utf-8"))
+        self.assertTrue(pointer["revision"].startswith("rev_"))
+        for day in DAYS:
+            self.assertTrue((self.spool / day / "summary.json").is_file(), day)
+
+    def test_default_scratch_root_is_system_temp(self):
+        with mock.patch.dict(os.environ):
+            os.environ.pop("OA203_WINDOWS_SCRATCH_DIR", None)
+            report = live.run_after_finalize(
+                self.spool, "2026-10-09", self.universe,
+                backend=pub.LocalFilesystemBackend(self.backend_root), now=NOW)
+        self.assertEqual(report["emit_location"], "scratch")
+        self.assertEqual(Path(report["scratch_root"]), Path(tempfile.gettempdir()).resolve())
+        self.assertEqual(len(report["publish"]), 14)
+
+    def test_scratch_inside_spool_refused(self):
+        with self.assertRaises(ValueError) as ctx:
+            live.run_after_finalize(
+                self.spool, "2026-10-09", self.universe,
+                backend=pub.LocalFilesystemBackend(self.backend_root),
+                scratch_dir=self.spool, now=NOW)
+        self.assertIn("inside the spool", str(ctx.exception))
+        with mock.patch.dict(os.environ,
+                            {"OA203_WINDOWS_SCRATCH_DIR": str(self.spool / "windows_emit")}):
+            with self.assertRaises(ValueError) as ctx:
+                live.run_after_finalize(
+                    self.spool, "2026-10-09", self.universe,
+                    backend=pub.LocalFilesystemBackend(self.backend_root), now=NOW)
+        self.assertIn("inside the spool", str(ctx.exception))
+        self.assertFalse((self.spool / "windows_emit").exists())
+
+    def test_scratch_missing_root_refused(self):
+        with self.assertRaises(ValueError) as ctx:
+            live.run_after_finalize(
+                self.spool, "2026-10-09", self.universe,
+                backend=pub.LocalFilesystemBackend(self.backend_root),
+                scratch_dir=self.root / "no-such-dir", now=NOW)
+        self.assertIn("not an existing directory", str(ctx.exception))
+
+    def test_scratch_removed_on_publish_failure(self):
+        class FailingBackend(pub.LocalFilesystemBackend):
+            def put(self, key, data, content_type=None):
+                raise RuntimeError("simulated publish failure")
+
+        with mock.patch.dict(os.environ, {"OA203_WINDOWS_SCRATCH_DIR": str(self.scratch_root)}):
+            with self.assertRaises(RuntimeError):
+                live.run_after_finalize(
+                    self.spool, "2026-10-09", self.universe,
+                    backend=FailingBackend(self.backend_root), now=NOW)
+        # The scratch temp dir is gone even though the publish failed (the
+        # backend attempt ledger plus the deterministic byte-identical
+        # rebuild are the recovery evidence, per the docstring).
+        self.assertEqual(list(self.scratch_root.iterdir()), [])
+        self.assertFalse((self.spool / "windows_emit").exists())
+        for day in DAYS:
+            self.assertTrue((self.spool / day / "summary.json").is_file(), day)
+
+    def test_scratch_headroom_checked_on_scratch_filesystem(self):
+        def fake_disk_usage(path):
+            # Plenty free nowhere: the check must probe the scratch
+            # filesystem and name scratch in the failure, not the spool's.
+            return SimpleNamespace(total=5_000_000_000,
+                                   used=5_000_000_000,
+                                   free=live.MIN_EMIT_FREE_BYTES - 1)
+
+        with mock.patch.dict(os.environ, {"OA203_WINDOWS_SCRATCH_DIR": str(self.scratch_root)}):
+            with mock.patch.object(live.shutil, "disk_usage", fake_disk_usage):
+                with self.assertRaises(ValueError) as ctx:
+                    live.run_after_finalize(
+                        self.spool, "2026-10-09", self.universe,
+                        backend=pub.LocalFilesystemBackend(self.backend_root), now=NOW)
+        self.assertIn("emit headroom", str(ctx.exception))
+        self.assertIn("scratch", str(ctx.exception))
+        self.assertFalse((self.spool / "windows_emit").exists())
+        self.assertEqual(list(self.scratch_root.iterdir()), [])
+
+    def test_build_windows_scratch_flag_names_scratch(self):
+        emit = self.root / "emit"
+        with self.assertRaises(ValueError) as ctx:
+            live.build_windows([self.spool / d for d in DAYS], {"AAA", "BBB", "CCC"},
+                               emit, full_universe=True, min_free_bytes=10 ** 18,
+                               scratch_emit=True)
+        self.assertIn("emit headroom", str(ctx.exception))
+        self.assertIn("scratch", str(ctx.exception))
+        self.assertFalse(emit.exists())
+
+    def test_explicit_emit_root_keeps_old_location(self):
+        emit_root = self.root / "emit"
+        report = live.run_after_finalize(
+            self.spool, "2026-10-09", self.universe,
+            backend=pub.LocalFilesystemBackend(self.backend_root),
+            emit_root=emit_root, now=NOW)
+        self.assertEqual(report["emit_location"], "explicit")
+        self.assertIsNone(report["scratch_root"])
+        self.assertTrue(report["cleanup"]["removed"])
+        self.assertFalse(Path(report["emit_root"]).exists())
+        self.assertFalse((self.spool / "windows_emit").exists())
+
+
+
 if __name__ == "__main__":
     unittest.main()

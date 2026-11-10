@@ -42,6 +42,7 @@ import json
 import os
 import re
 import shutil
+import tempfile
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -58,6 +59,7 @@ MAX_UNDERLYINGS = 50
 MAX_UNDERLYINGS_FULL = 500  # live universe size (Config.universe_size default)
 MAX_SESSIONS = 10
 WINDOWS_LIVE_ENV = "OA203_WINDOWS_LIVE_ENABLED"
+WINDOWS_SCRATCH_ENV = "OA203_WINDOWS_SCRATCH_DIR"
 
 # Local-output retention / disk headroom (see docs/130-live-window-wiring.md).
 # Corrected peak accounting: a 10-session cycle builds at most 32 windows
@@ -67,9 +69,15 @@ WINDOWS_LIVE_ENV = "OA203_WINDOWS_LIVE_ENABLED"
 # requires twice that free before starting a build (1x the build peak plus
 # 1x for a local-backend copy of the same cycle) and fails closed below it.
 # The manual prune budget (192 MiB) is sized so pruning to it always leaves
-# room for the next build: 192 + 576 = 768 MiB <= the ~773 MiB free on the
-# scanner's /data volume (Chej's figures, 5000 MB total / 4190 MB used, not
-# independently verified here). There is NO hard cycle-count floor: a floor
+# room for the next build. Since the cycle emit moved to ephemeral scratch
+# (see run_after_finalize), the 576 MiB pre-check now applies to the
+# scratch filesystem, not the archive volume: the hook writes nothing to
+# /data except the small windows_live.json record in the day archive.
+# The archive volume's own headroom is a separate owner concern -- the
+# scanner's day archives grow ~110 MB/day on /data (Chej's figures, 5000 MB
+# total / 4190 MB used, not independently verified here) and no code here
+# deletes them; see archive_cache.py for the bounded local cache lifecycle.
+# There is NO hard cycle-count floor: a floor
 # of 10 cycle dirs cannot fit the headroom at full-universe scale, so the
 # byte budget alone decides (keep_cycles=0 by default; an operator may ask
 # for a recency preference explicitly, and the report then shows the
@@ -165,9 +173,42 @@ def windows_live_enabled() -> bool:
     return os.getenv(WINDOWS_LIVE_ENV) == "1"
 
 
+def _resolve_cycle_emit(spool: Path, cycle: str,
+                        emit_root: Path | str | None,
+                        scratch_dir: Path | str | None
+                        ) -> tuple[Path, str, Path | None, tempfile.TemporaryDirectory | None]:
+    """Resolve one cycle's emit dir: explicit root, or ephemeral scratch.
+
+    Returns ``(emit, location, scratch_root, scratch_tmp)``. With an
+    explicit ``emit_root`` the location is ``"explicit"`` and there is no
+    scratch dir to clean up. Otherwise the emit root is a fresh
+    ``oa203-windows-*`` temporary directory under ``scratch_dir``,
+    ``$OA203_WINDOWS_SCRATCH_DIR``, or the system temp dir; the caller
+    must clean it up (``scratch_tmp.cleanup()``) on success AND on
+    failure. Fails closed when the scratch root is missing, is not a
+    directory, or resolves inside the spool: derived output must never
+    live on the archive volume.
+    """
+    if emit_root is not None:
+        return Path(emit_root) / cycle, "explicit", None, None
+    configured = scratch_dir if scratch_dir is not None else os.getenv(WINDOWS_SCRATCH_ENV)
+    root = Path(configured) if configured else Path(tempfile.gettempdir())
+    resolved = root.resolve()
+    spool_resolved = Path(spool).resolve()
+    if resolved == spool_resolved or spool_resolved in resolved.parents:
+        raise ValueError(
+            f"windows scratch root {resolved} is inside the spool {spool_resolved}; "
+            "derived output must live on ephemeral scratch, not the archive volume")
+    if not resolved.is_dir():
+        raise ValueError(f"windows scratch root is not an existing directory: {root}")
+    tmp = tempfile.TemporaryDirectory(prefix="oa203-windows-", dir=str(resolved))
+    return Path(tmp.name) / cycle, "scratch", resolved, tmp
+
+
 def run_after_finalize(spool_dir: Path | str, day, universe: Mapping[str, Any], *,
                        backend: pub.StorageBackend | None = None,
                        emit_root: Path | str | None = None,
+                       scratch_dir: Path | str | None = None,
                        now: datetime | None = None,
                        min_free_bytes: int = MIN_EMIT_FREE_BYTES) -> dict[str, Any]:
     """Build + publish windows for the finalized day (hook implementation).
@@ -181,9 +222,16 @@ def run_after_finalize(spool_dir: Path | str, day, universe: Mapping[str, Any], 
     Returns the build report plus per-window publish results.
 
     Per-cycle output: one cycle (one finalized day) writes to its own
-    emit root (``<emit_root>/<day>``, or ``<spool>/windows_emit/<day>``
-    by default) and records exactly which windows it built in
-    ``cycle.json`` there. ``publish_windows`` is then given that
+    emit root and records exactly which windows it built in ``cycle.json``
+    there. By default the emit root is ephemeral scratch (a
+    ``oa203-windows-*`` temporary directory under ``OA203_WINDOWS_SCRATCH_DIR``
+    or the system temp dir), NOT the spool: the hook writes nothing to the
+    archive volume except the small ``windows_live.json`` record in the day
+    archive, and the scratch dir is removed on success AND on failure (the
+    publisher's attempt ledger in the backend plus the deterministic
+    byte-identical rebuild are the recovery evidence). An explicit
+    ``emit_root`` (tests / operator runs) keeps the old behaviour: the
+    cycle dir is ``<emit_root>/<day>``. ``publish_windows`` is then given that
     explicit list -- never a directory scan of an accumulated emit root --
     so stale windows from earlier cycles are never republished and an
     unchanged re-run of the same cycle is idempotent: each window's
@@ -206,45 +254,62 @@ def run_after_finalize(spool_dir: Path | str, day, universe: Mapping[str, Any], 
     if today_selected and not today_selected <= unders:
         raise ValueError(f"finalized day {day.isoformat()}: universe disagrees with its own archive")
     cycle = day.isoformat()
-    emit = (Path(emit_root) / cycle) if emit_root is not None else spool / "windows_emit" / cycle
-    report = build_windows(dirs, unders, emit, full_universe=True, generated_at=now,
-                           min_free_bytes=min_free_bytes)
-    window_ids = sorted({(w["kind"], w["window_id"]) for w in report["windows"]})
-    manifest = {"cycle": cycle, "day": day.isoformat(), "days": [d.name for d in dirs],
-                "underlyings": sorted(unders), "universe_scope": report["universe_scope"],
-                "generated_at": report["generated_at"],
-                "windows": [[kind, window_id] for kind, window_id in window_ids]}
-    (emit / "cycle.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
-    effective_backend = backend if backend is not None else pub.r2_backend()
-    results = publish_windows(emit, effective_backend,
-                              window_ids={(kind, window_id) for kind, window_id in window_ids},
-                              now=now)
-    # Publish/verify then remove expendable derived output: this cycle's
-    # emit root is rebuildable from the spool while the spool matches, and
-    # its products now live in the backend. Removing it here is what keeps
-    # ongoing publication bounded: a successful cycle leaves no accumulated
-    # emit behind. A failed publish raises above, so the emit root is kept
-    # as recovery evidence. Older cycles converge the same way: every
-    # verified older cycle is pruned (keep_cycles=0, max_emit_bytes=0);
-    # unverified cycles are kept as evidence. Both steps are best-effort
-    # and recorded, never raised after a successful publish.
-    cleanup = _remove_cycle_emit(emit)
+    emit, emit_location, scratch_root, scratch_tmp = _resolve_cycle_emit(
+        spool, cycle, emit_root, scratch_dir)
     try:
-        older = prune_windows_emit(emit.parent, effective_backend, keep_cycles=0,
-                                   max_emit_bytes=0, dry_run=False)
-    except Exception as exc:  # noqa: BLE001 - recorded, never masks a publish
-        older = {"error": f"{type(exc).__name__}: {exc}"}
-    cleanup["older_prune"] = older
-    return {"enabled": True, "cycle": cycle, "day": day.isoformat(), "days": [d.name for d in dirs],
-            "underlyings": sorted(unders), "emit_root": str(emit),
-            "manifest": manifest, "build": report, "publish": results,
-            "cleanup": cleanup}
+        report = build_windows(dirs, unders, emit, full_universe=True, generated_at=now,
+                               min_free_bytes=min_free_bytes,
+                               scratch_emit=(emit_location == "scratch"))
+        window_ids = sorted({(w["kind"], w["window_id"]) for w in report["windows"]})
+        manifest = {"cycle": cycle, "day": day.isoformat(), "days": [d.name for d in dirs],
+                    "underlyings": sorted(unders), "universe_scope": report["universe_scope"],
+                    "generated_at": report["generated_at"],
+                    "windows": [[kind, window_id] for kind, window_id in window_ids]}
+        (emit / "cycle.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+        effective_backend = backend if backend is not None else pub.r2_backend()
+        results = publish_windows(emit, effective_backend,
+                                  window_ids={(kind, window_id) for kind, window_id in window_ids},
+                                  now=now)
+        # Publish/verify then remove expendable derived output: this cycle's
+        # emit root is rebuildable from the spool while the spool matches, and
+        # its products now live in the backend. Removing it here is what keeps
+        # ongoing publication bounded: a successful cycle leaves no accumulated
+        # emit behind. A failed publish raises above; with an explicit emit
+        # root the emit is kept as recovery evidence, while a scratch emit is
+        # still removed by the finally (the backend attempt ledger plus the
+        # deterministic byte-identical rebuild are the recovery evidence).
+        # Older cycles converge the same way: every
+        # verified older cycle is pruned (keep_cycles=0, max_emit_bytes=0);
+        # unverified cycles are kept as evidence. Both steps are best-effort
+        # and recorded, never raised after a successful publish.
+        cleanup = _remove_cycle_emit(emit)
+        try:
+            older = prune_windows_emit(emit.parent, effective_backend, keep_cycles=0,
+                                       max_emit_bytes=0, dry_run=False)
+        except Exception as exc:  # noqa: BLE001 - recorded, never masks a publish
+            older = {"error": f"{type(exc).__name__}: {exc}"}
+        cleanup["older_prune"] = older
+        return {"enabled": True, "cycle": cycle, "day": day.isoformat(), "days": [d.name for d in dirs],
+                "underlyings": sorted(unders), "emit_root": str(emit),
+                "emit_location": emit_location,
+                "scratch_root": (str(scratch_root) if scratch_root is not None else None),
+                "manifest": manifest, "build": report, "publish": results,
+                "cleanup": cleanup}
+    finally:
+        # Scratch is removed on success AND on failure; a cleanup
+        # failure must never mask the publish/build outcome.
+        if scratch_tmp is not None:
+            try:
+                scratch_tmp.cleanup()
+            except Exception:
+                pass
 
 
 def build_windows(day_dirs: list[Path] | tuple[Path, ...], underlyings: set[str],
                   emit_root: Path, *, top: int = 15, full_universe: bool = False,
                   generated_at: datetime | str | None = None,
-                  min_free_bytes: int = MIN_EMIT_FREE_BYTES) -> dict[str, Any]:
+                  min_free_bytes: int = MIN_EMIT_FREE_BYTES,
+                  scratch_emit: bool = False) -> dict[str, Any]:
     """Evaluate every supported window kind over local finalized days.
 
     ``day_dirs`` are finalized day-archive directories (sorted by date,
@@ -277,7 +342,8 @@ def build_windows(day_dirs: list[Path] | tuple[Path, ...], underlyings: set[str]
     windows and the publisher returns already_published with no fresh
     revision. A genuinely changed window still gets a new revision.
     """
-    _check_emit_headroom(Path(emit_root), min_free_bytes=min_free_bytes)
+    _check_emit_headroom(Path(emit_root), min_free_bytes=min_free_bytes,
+                           scratch=scratch_emit)
     dirs = [Path(d) for d in day_dirs]
     if not 1 <= len(dirs) <= MAX_SESSIONS:
         raise ValueError(f"bounded build: 1..{MAX_SESSIONS} sessions, got {len(dirs)}")
@@ -437,27 +503,37 @@ def build_windows(day_dirs: list[Path] | tuple[Path, ...], underlyings: set[str]
     return report
 
 
-def _check_emit_headroom(emit: Path, *, min_free_bytes: int = MIN_EMIT_FREE_BYTES) -> None:
+def _check_emit_headroom(emit: Path, *, min_free_bytes: int = MIN_EMIT_FREE_BYTES,
+                          scratch: bool = False) -> None:
     """Fail closed before a build when the emit volume is too full.
 
     Resolves the nearest existing ancestor of ``emit`` (the emit root
     may not exist yet) and requires at least ``min_free_bytes`` free.
-    Raises ValueError naming free/required bytes; the operator prunes
-    older per-cycle emit roots (``prune_windows_emit`` /
-    ``windows-prune-emit``), never the finalized day archives.
+    Raises ValueError naming free/required bytes. With ``scratch`` the
+    probe is the ephemeral scratch filesystem, not the archive volume;
+    otherwise the operator prunes older per-cycle emit roots
+    (``prune_windows_emit`` / ``windows-prune-emit``), never the
+    finalized day archives.
     """
     probe = Path(emit)
     while not probe.exists():
         probe = probe.parent
     free = shutil.disk_usage(probe).free
     if free < min_free_bytes:
+        if scratch:
+            advice = ("free space on the scratch filesystem "
+                      "(OA203_WINDOWS_SCRATCH_DIR or the system temp dir); "
+                      "the hook writes nothing to the archive volume")
+        else:
+            advice = ("prune verified per-cycle emit roots "
+                      "(windows-prune-emit), never the finalized day archives. "
+                      "Note: emit pruning only helps if emit is what fills the "
+                      "volume; the scanner's own day archives also grow on "
+                      "this volume.")
         raise ValueError(
             f"emit headroom: {free} bytes free on {probe}, need at least "
             f"{min_free_bytes} bytes before building (32-window cycle peak "
-            f"{MAX_CYCLE_EMIT_BYTES} bytes x2); prune verified per-cycle emit "
-            f"roots (windows-prune-emit), never the finalized day archives. "
-            f"Note: emit pruning only helps if emit is what fills the volume; "
-            f"the scanner's own day archives also grow on this volume.")
+            f"{MAX_CYCLE_EMIT_BYTES} bytes x2); {advice}")
 
 
 def _is_link(path: Path) -> bool:
