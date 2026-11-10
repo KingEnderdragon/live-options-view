@@ -11,12 +11,18 @@ form through the same structured log route the rest of the runner uses.
 
 Three constraints shaped the design:
 
-* **Bounded.** No thread, no timer, no scheduler. `maybe_check` is called once
-  per runner cycle and does work only when the interval has elapsed on a
-  monotonic clock. With the default 900 s interval and 15 s probe timeout the
-  worst-case detection delay after a key change is 915 s, and the report says
-  so explicitly (`max_detection_delay_s`) rather than leaving an operator to
-  derive it.
+* **Scheduled inside the loop, and honest about it.** No thread, no timer, no
+  scheduler: `maybe_check` is called once per runner cycle and does work only
+  when the interval has elapsed on a monotonic clock. Detection therefore
+  depends on the cycle actually running. With a 900 s interval, a nominal 300 s
+  cycle and a 15 s probe timeout, a check that starts on the first cycle after
+  the interval expires completes within 915 s of scheduled time plus up to one
+  cycle period -- 1215 s -- *provided cycles keep to their period*. A cycle
+  overrun adds directly, and a hung cycle never reaches the check at all, so no
+  unconditional maximum exists. The report states the configured interval, the
+  interval actually observed between probes, how late the last probe was, the
+  conditional bound, and the condition it depends on; it does not claim a hard
+  maximum this module cannot enforce.
 * **Redacted.** The probe never returns the key, and this module never logs a
   request body. Everything reported is a state word, an HTTP status, timings
   and the Worker's own short error string, scrubbed again against the key
@@ -101,15 +107,25 @@ class KeyHealthConfig:
     interval_s: float = DEFAULT_INTERVAL_S
     heartbeat_s: float = DEFAULT_HEARTBEAT_S
     probe_timeout_s: float = DEFAULT_PROBE_TIMEOUT_S
+    #: The runner's nominal cycle period, when the caller knows it. It is
+    #: *nominal*: it is what the loop intends to sleep between cycles, not a
+    #: guarantee about how long a cycle takes.
+    cycle_interval_s: float | None = None
     base_url: str = field(default_factory=lambda: BASE_URL)
 
     @classmethod
-    def from_environment(cls, environ: dict[str, str] | None = None) -> "KeyHealthConfig":
+    def from_environment(
+        cls,
+        environ: dict[str, str] | None = None,
+        *,
+        cycle_interval_s: float | None = None,
+    ) -> "KeyHealthConfig":
         env = os.environ if environ is None else environ
         return cls(
             interval_s=_coerce_seconds(env.get("CRASSUS_KEY_HEALTH_INTERVAL_S"), DEFAULT_INTERVAL_S, allow_zero=True),
             heartbeat_s=_coerce_seconds(env.get("CRASSUS_KEY_HEALTH_HEARTBEAT_S"), DEFAULT_HEARTBEAT_S, allow_zero=False),
             probe_timeout_s=_coerce_seconds(env.get("CRASSUS_KEY_HEALTH_TIMEOUT_S"), DEFAULT_PROBE_TIMEOUT_S, allow_zero=False),
+            cycle_interval_s=cycle_interval_s,
             base_url=env.get("CRASSUS_BASE_URL") or BASE_URL,
         )
 
@@ -118,13 +134,46 @@ class KeyHealthConfig:
         return self.interval_s > 0
 
     @property
-    def max_detection_delay_s(self) -> float:
-        """Worst case between a real key change and this check noticing it.
+    def max_probe_duration_s(self) -> float:
+        """The longest one probe can occupy the calling cycle.
 
-        One interval (the wait) plus one probe timeout (the probe itself may
-        hang for its full budget before being classified `unreachable`).
+        This is a real bound on the *probe*, not on detection: the request has
+        a timeout, so it cannot hang forever.
         """
-        return self.interval_s + self.probe_timeout_s
+        return self.probe_timeout_s
+
+    @property
+    def conditional_detection_bound_s(self) -> float | None:
+        """Detection bound *if* the cycle cadence holds, or None if unknown.
+
+        The check runs once per runner cycle, so a changed key is noticed at the
+        first cycle that starts after the interval has elapsed. With a nominal
+        cycle period `P`, that is at most `interval + P` of scheduling delay
+        plus one probe timeout. It is conditional in two ways that this code
+        cannot enforce: a cycle that overruns its period adds that overrun
+        directly, and a cycle that hangs (a blocked network call, a stuck
+        supervisor pipe) never reaches the check at all, which makes detection
+        unbounded for as long as the hang lasts.
+
+        Deliberately returns None when the cycle period is not known rather than
+        inventing one; callers must state the condition alongside the number.
+        """
+        if self.cycle_interval_s is None:
+            return None
+        return self.interval_s + self.cycle_interval_s + self.probe_timeout_s
+
+    @property
+    def detection_bound_condition(self) -> str:
+        if self.cycle_interval_s is None:
+            return (
+                "unbounded from this monitor's view: checks run inside the runner "
+                "cycle and the cycle period was not supplied"
+            )
+        return (
+            f"conditional on each runner cycle completing within its nominal "
+            f"{self.cycle_interval_s:.0f}s period; a cycle overrun adds directly and "
+            f"a hung cycle suspends checks entirely"
+        )
 
 
 def _redact(text: str, secret: str | None) -> str:
@@ -180,6 +229,10 @@ class KeyHealthMonitor:
         self._state.setdefault("last_emitted_wall", None)
         self._state.setdefault("last_check_at", None)
         self._state.setdefault("last_detail", None)
+        # Scheduling truthfulness: what actually happened, not what was planned.
+        self._state.setdefault("observed_interval_s", None)
+        self._state.setdefault("last_lateness_s", None)
+        self._state.setdefault("max_lateness_s", None)
 
     # -- configuration ----------------------------------------------------
 
@@ -231,6 +284,15 @@ class KeyHealthMonitor:
 
         state = health_state(probe)
         previous = self._state.get("last_state")
+        previous_started = self._last_check_s
+        if previous_started is not None:
+            gap = started - previous_started
+            self._state["observed_interval_s"] = round(gap, 3)
+            lateness = max(0.0, gap - self.config.interval_s)
+            self._state["last_lateness_s"] = round(lateness, 3)
+            self._state["max_lateness_s"] = round(
+                max(lateness, float(self._state.get("max_lateness_s") or 0.0)), 3
+            )
         self._last_check_s = started
         self._next_check_s = started + self.config.interval_s
         self._state["checks"] = int(self._state.get("checks", 0)) + 1
@@ -243,6 +305,12 @@ class KeyHealthMonitor:
         self._state["last_check_at"] = self._now_iso()
         self._state["last_detail"] = self._detail(probe)
 
+        observed_interval = self._state.get("observed_interval_s")
+        bound = self.config.conditional_detection_bound_s
+        if observed_interval is None or bound is None:
+            within_bound = None
+        else:
+            within_bound = float(observed_interval) + self.config.probe_timeout_s <= bound
         report = {
             "state": state,
             "status": probe.get("status"),
@@ -255,8 +323,20 @@ class KeyHealthMonitor:
             "unreachable": self._state["unreachable"],
             "consecutive_failures": self._state["consecutive_failures"],
             "checked_at": self._state["last_check_at"],
-            "interval_s": self.config.interval_s,
-            "max_detection_delay_s": self.config.max_detection_delay_s,
+            # Scheduling, stated honestly: the configured interval, the interval
+            # actually observed between probes, how late the last probe was,
+            # and the derived detection bound together with the condition it
+            # depends on. No unconditional maximum is claimed, because the check
+            # runs inside the runner cycle and this module cannot bound a cycle.
+            "check_interval_s": self.config.interval_s,
+            "probe_timeout_s": self.config.probe_timeout_s,
+            "cycle_interval_s": self.config.cycle_interval_s,
+            "observed_interval_s": observed_interval,
+            "last_lateness_s": self._state.get("last_lateness_s"),
+            "max_lateness_s": self._state.get("max_lateness_s"),
+            "conditional_detection_bound_s": bound,
+            "within_conditional_bound": within_bound,
+            "detection_bound_condition": self.config.detection_bound_condition,
         }
 
         emitted_state = self._state.get("last_emitted_state")
@@ -303,8 +383,14 @@ class KeyHealthMonitor:
             "rejected": self._state.get("rejected", 0),
             "unreachable": self._state.get("unreachable", 0),
             "consecutive_failures": self._state.get("consecutive_failures", 0),
-            "interval_s": self.config.interval_s,
-            "max_detection_delay_s": self.config.max_detection_delay_s,
+            "check_interval_s": self.config.interval_s,
+            "probe_timeout_s": self.config.probe_timeout_s,
+            "cycle_interval_s": self.config.cycle_interval_s,
+            "observed_interval_s": self._state.get("observed_interval_s"),
+            "last_lateness_s": self._state.get("last_lateness_s"),
+            "max_lateness_s": self._state.get("max_lateness_s"),
+            "conditional_detection_bound_s": self.config.conditional_detection_bound_s,
+            "detection_bound_condition": self.config.detection_bound_condition,
             "enabled": self.config.enabled,
         }
 
@@ -347,6 +433,7 @@ def main(argv: list[str] | None = None) -> int:
             interval_s=config.interval_s,
             heartbeat_s=config.heartbeat_s,
             probe_timeout_s=config.probe_timeout_s,
+            cycle_interval_s=config.cycle_interval_s,
             base_url=args.base_url,
         )
     if args.interval is not None:
@@ -354,6 +441,7 @@ def main(argv: list[str] | None = None) -> int:
             interval_s=_coerce_seconds(args.interval, config.interval_s, allow_zero=True),
             heartbeat_s=config.heartbeat_s,
             probe_timeout_s=config.probe_timeout_s,
+            cycle_interval_s=config.cycle_interval_s,
             base_url=config.base_url,
         )
 
@@ -371,10 +459,14 @@ def main(argv: list[str] | None = None) -> int:
         if args.json:
             print(json.dumps(report, indent=2, sort_keys=True))
         else:
+            bound = report["conditional_detection_bound_s"]
+            bound_text = "unbounded (no cycle period supplied)" if bound is None else f"{bound:.0f}s"
             print(
                 f"key health: {report['state']} at {report['checked_at']} "
                 f"({report['detail']}); checks={report['checks']} "
-                f"max_detection_delay={report['max_detection_delay_s']:.0f}s"
+                f"interval={report['check_interval_s']:.0f}s "
+                f"lateness={report['last_lateness_s'] or 0:.0f}s "
+                f"conditional_bound={bound_text}"
             )
         if args.once or not config.enabled:
             return _exit_code(report["state"])

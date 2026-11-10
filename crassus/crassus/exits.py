@@ -182,7 +182,10 @@ def _strict_bool(block: dict[str, Any], field_name: str, default: bool) -> bool:
 
 @dataclass(frozen=True)
 class ExitPolicy:
-    profit_target_pct: float = DEFAULT_PROFIT_TARGET_PCT
+    #: `None` disables profit-taking entirely. That is deliberately distinct
+    #: from a very large number: `+1.00` is still an enabled target that fires
+    #: on a doubling, while `None` can never fire.
+    profit_target_pct: float | None = DEFAULT_PROFIT_TARGET_PCT
     stop_loss_pct: float = DEFAULT_STOP_LOSS_PCT
     reentry_cooldown_minutes: float = DEFAULT_REENTRY_COOLDOWN_MINUTES
     stop_bypasses_phelps: bool = DEFAULT_STOP_BYPASSES_PHELPS
@@ -235,9 +238,10 @@ def resolve_policy(
     if not isinstance(configured, bool):
         raise ExitConfigError(f"exits.enabled must be true or false, got {configured!r}")
     enabled = bool(configured and activated)
+    target_raw = block.get("profit_target_pct", DEFAULT_PROFIT_TARGET_PCT)
+    target = None if target_raw is None else _finite(target_raw, "profit_target_pct")
     policy = ExitPolicy(
-        profit_target_pct=_finite(block.get("profit_target_pct", DEFAULT_PROFIT_TARGET_PCT),
-                                  "profit_target_pct"),
+        profit_target_pct=target,
         stop_loss_pct=_finite(block.get("stop_loss_pct", DEFAULT_STOP_LOSS_PCT),
                               "stop_loss_pct"),
         reentry_cooldown_minutes=_finite(
@@ -252,10 +256,10 @@ def resolve_policy(
         ),
         enabled=enabled,
     )
-    if policy.profit_target_pct <= 0:
-        raise ExitConfigError("exits.profit_target_pct must be > 0")
     if policy.stop_loss_pct >= 0:
         raise ExitConfigError("exits.stop_loss_pct must be < 0")
+    if policy.profit_target_pct is not None and policy.profit_target_pct <= 0:
+        raise ExitConfigError("exits.profit_target_pct must be > 0, or null to disable")
     if policy.reentry_cooldown_minutes < 0:
         raise ExitConfigError("exits.reentry_cooldown_minutes must be >= 0")
     return policy
@@ -367,7 +371,7 @@ def _classify(position: Any, quote: Any, policy: ExitPolicy) -> Candidate | None
     change = pnl_pct(position.average_cost, price, position.quantity)
     if change <= policy.stop_loss_pct:
         trigger = "protective_stop"
-    elif change >= policy.profit_target_pct:
+    elif policy.profit_target_pct is not None and change >= policy.profit_target_pct:
         trigger = "profit_target"
     else:
         return None

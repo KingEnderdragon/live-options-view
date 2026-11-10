@@ -378,6 +378,30 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(decision.metadata["exit_trigger"], "protective_stop")
         self.assertEqual(decision.metadata["exit_threshold_pct"], -0.15)
 
+    def test_profit_target_can_be_disabled_entirely(self):
+        policy = resolve_policy(
+            "reddit_sentiment_qqq", {"exits": {"profit_target_pct": None}}, activated=True
+        )
+        self.assertIsNone(policy.profit_target_pct)
+        # A doubling plus is still not a profit exit when the target is null.
+        decision = evaluate(ctx(book(long_trade()), {SYMBOL: quote(2.20, 2.30)}), policy)
+        self.assertIsNone(decision)
+        # The stop is unaffected.
+        stopped = evaluate(ctx(book(long_trade()), {SYMBOL: quote(0.40, 0.45)}), policy)
+        self.assertEqual(stopped.metadata["exit_trigger"], "protective_stop")
+
+    def test_a_hundred_percent_target_is_enabled_not_disabled(self):
+        # The distinction the recommendation depends on: +100% is a live
+        # target that fires on a doubling; only null disables profit-taking.
+        policy = resolve_policy(
+            "reddit_sentiment_qqq", {"exits": {"profit_target_pct": 1.0}}, activated=True
+        )
+        fired = evaluate(ctx(book(long_trade()), {SYMBOL: quote(2.00, 2.10)}), policy)
+        self.assertEqual(fired.metadata["exit_trigger"], "profit_target")
+        self.assertEqual(fired.metadata["exit_threshold_pct"], 1.0)
+        below = evaluate(ctx(book(long_trade()), {SYMBOL: quote(1.90, 2.00)}), policy)
+        self.assertIsNone(below)
+
     def test_malformed_config_raises_per_account(self):
         with self.assertRaises(ExitConfigError):
             resolve_policy("reddit_sentiment_qqq", {"exits": {"profit_target_pct": "lots"}})

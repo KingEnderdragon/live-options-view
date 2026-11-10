@@ -185,10 +185,103 @@ class CadenceTests(unittest.TestCase):
             self.assertIsNotNone(monitor.maybe_check())        # 900s: due again
             self.assertEqual(len(calls), 2)
 
-    def test_max_detection_delay_is_interval_plus_probe_timeout(self):
-        config = KeyHealthConfig(interval_s=900.0, probe_timeout_s=15.0)
-        self.assertEqual(config.max_detection_delay_s, 915.0)
-        self.assertTrue(config.enabled)
+    def test_detection_bound_is_conditional_on_the_cycle_period(self):
+        # The check runs inside the runner cycle, so the honest statement is a
+        # bound conditional on the cycle keeping its period -- and no bound at
+        # all when the period is unknown.
+        no_cycle = KeyHealthConfig(interval_s=900.0, probe_timeout_s=15.0)
+        self.assertEqual(no_cycle.max_probe_duration_s, 15.0)
+        self.assertIsNone(no_cycle.conditional_detection_bound_s)
+        self.assertIn("unbounded", no_cycle.detection_bound_condition)
+
+        deployed = KeyHealthConfig(
+            interval_s=900.0, probe_timeout_s=15.0, cycle_interval_s=300.0
+        )
+        self.assertEqual(deployed.conditional_detection_bound_s, 1215.0)
+        self.assertIn("conditional", deployed.detection_bound_condition)
+        self.assertIn("hung cycle", deployed.detection_bound_condition)
+
+    def test_non_aligned_cycle_cadence_reports_measured_lateness(self):
+        # A 300 s runner cycle does not divide a 900 s interval at arbitrary
+        # starting phase, and a slow cycle period (350 s here) lands after the
+        # due time. The report must show the gap it actually observed.
+        with contextlib.nullcontext(_tmpdir()) as tmp:
+            clock = _Clock()
+            monitor, _clock, _ = _monitor(
+                Path(tmp), lambda: {"status": "accepted", "http_status": 400}, clock=clock
+            )
+            monitor.check()                       # t=0, next due at 900
+            clock.advance(350)
+            self.assertIsNone(monitor.maybe_check())   # t=350
+            clock.advance(350)
+            self.assertIsNone(monitor.maybe_check())   # t=700
+            clock.advance(350)
+            report = monitor.maybe_check()             # t=1050, 150 s late
+            self.assertIsNotNone(report)
+            self.assertEqual(report["observed_interval_s"], 1050.0)
+            self.assertEqual(report["last_lateness_s"], 150.0)
+            self.assertEqual(report["max_lateness_s"], 150.0)
+            self.assertEqual(report["check_interval_s"], 900.0)
+
+    def test_overrun_cycle_is_reported_as_exceeding_the_conditional_bound(self):
+        with contextlib.nullcontext(_tmpdir()) as tmp:
+            clock = _Clock()
+            monitor, _clock, _ = _monitor(
+                Path(tmp),
+                lambda: {"status": "accepted", "http_status": 400},
+                clock=clock,
+                config=KeyHealthConfig(
+                    interval_s=900.0, heartbeat_s=14400.0, probe_timeout_s=15.0,
+                    cycle_interval_s=300.0,
+                ),
+            )
+            monitor.check()                    # t=0
+            clock.advance(5000)                # a cycle that took far too long
+            report = monitor.check()
+            self.assertEqual(report["observed_interval_s"], 5000.0)
+            self.assertEqual(report["last_lateness_s"], 4100.0)
+            self.assertEqual(report["conditional_detection_bound_s"], 1215.0)
+            self.assertFalse(report["within_conditional_bound"])
+
+    def test_no_probe_without_a_cycle_to_run_it(self):
+        # A hung cycle simply never calls the monitor. Time passes, the report
+        # must show no check at all rather than implying one happened, and it
+        # must state that the bound depends on the cycle.
+        with contextlib.nullcontext(_tmpdir()) as tmp:
+            calls = []
+
+            def probe():
+                calls.append(True)
+                return {"status": "accepted", "http_status": 400}
+
+            clock = _Clock()
+            monitor, _clock, _ = _monitor(
+                Path(tmp), probe, clock=clock,
+                config=KeyHealthConfig(
+                    interval_s=900.0, heartbeat_s=14400.0, probe_timeout_s=15.0,
+                    cycle_interval_s=300.0,
+                ),
+            )
+            clock.advance(5000)                  # the loop never reaches us
+            self.assertEqual(calls, [])
+            report = monitor.report()
+            self.assertIsNone(report["state"])
+            self.assertIsNone(report["last_check_at"])
+            self.assertIsNone(report["observed_interval_s"])
+            self.assertEqual(report["conditional_detection_bound_s"], 1215.0)
+            self.assertIn("conditional", report["detection_bound_condition"])
+
+    def test_report_never_claims_a_hard_detection_maximum(self):
+        with contextlib.nullcontext(_tmpdir()) as tmp:
+            monitor, _clock, _ = _monitor(
+                Path(tmp), lambda: {"status": "accepted", "http_status": 400}
+            )
+            report = monitor.check()
+            self.assertNotIn("max_detection_delay_s", report)
+            self.assertNotIn("max_detection_delay_s", monitor.report())
+            for key in ("check_interval_s", "observed_interval_s", "last_lateness_s",
+                        "conditional_detection_bound_s", "detection_bound_condition"):
+                self.assertIn(key, report)
 
     def test_zero_interval_disables_the_check(self):
         with contextlib.nullcontext(_tmpdir()) as tmp:

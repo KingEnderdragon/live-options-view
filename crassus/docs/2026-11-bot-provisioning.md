@@ -147,9 +147,24 @@ and reports state changes through the normal structured log as
 `key_health_ok`, `key_health_rejected`, `key_health_unreachable` and
 `key_health_recovered`.
 
-Defaults: a check every 900 seconds with a 15 second probe timeout, so the
-worst-case delay between a real key change and detection is **915 seconds**.
-The event carries `max_detection_delay_s` so nobody has to derive it. Repeated
+Defaults: a check every 900 seconds with a 15 second probe timeout, run from
+inside the runner cycle. That last part matters and used to be misreported: the
+check is not on its own clock, so the time between a real key change and
+detection is the interval, plus however long it takes the loop to reach the
+next cycle, plus the probe. With the deployed 300-second nominal cycle the
+derived bound is `900 + 300 + 15 = 1215` seconds — **conditional** on each cycle
+finishing inside its period. A cycle that overruns adds its overrun directly,
+and a cycle that hangs (a blocked HTTP call, a stuck supervisor pipe) never
+reaches the check at all, which makes detection unbounded for as long as the
+hang lasts.
+
+The event therefore reports scheduling rather than a false maximum:
+`check_interval_s`, `cycle_interval_s`, `observed_interval_s` (the actual gap
+between the last two probes), `last_lateness_s` and `max_lateness_s`,
+`conditional_detection_bound_s` with `detection_bound_condition` spelling out
+the dependency, and `within_conditional_bound` for whether the last observed
+gap respected it. If a deployment ever needs a strict guarantee, that requires a
+separate supervised checker; the runner loop cannot provide one. Repeated
 identical states are not re-logged every cycle: an event fires on a state
 change, on recovery, or on a four-hour heartbeat, and the emitted state is
 persisted in `state/key_health.json` so a restart does not re-announce a known

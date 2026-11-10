@@ -387,7 +387,9 @@ class Runner:
                 report = self.key_health.maybe_check()
                 if report is not None:
                     report_cycle("key_health", **fields, state=report["state"],
-                                 consecutive_failures=report["consecutive_failures"])
+                                 consecutive_failures=report["consecutive_failures"],
+                                 observed_interval_s=report["observed_interval_s"],
+                                 last_lateness_s=report["last_lateness_s"])
             except Exception as exc:  # never let a diagnostic break a cycle
                 log.warning("key health check failed to run: %s", type(exc).__name__)
         processed = 0
@@ -808,8 +810,13 @@ def main(argv: list[str] | None = None) -> int:
         # Deployed processes get periodic key health by default (#41). The
         # cadence, heartbeat and probe timeout come from the environment so
         # rollout and rollback are configuration changes, not code changes;
-        # CRASSUS_KEY_HEALTH_INTERVAL_S=0 turns the periodic check off.
-        key_health=KeyHealthMonitor(config=KeyHealthConfig.from_environment()),
+        # CRASSUS_KEY_HEALTH_INTERVAL_S=0 turns the periodic check off. The
+        # cycle period is passed in so the report can state a *conditional*
+        # detection bound and its condition, rather than claiming a hard
+        # maximum the loop cannot enforce.
+        key_health=KeyHealthMonitor(
+            config=KeyHealthConfig.from_environment(cycle_interval_s=args.interval)
+        ),
     )
     archive = archive_from_environment(runner.ledger.paths.ledger.parent, runner.state_dir)
     if archive:
