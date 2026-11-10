@@ -215,7 +215,8 @@ def run_after_finalize(spool_dir: Path | str, day, universe: Mapping[str, Any], 
                 "generated_at": report["generated_at"],
                 "windows": [[kind, window_id] for kind, window_id in window_ids]}
     (emit / "cycle.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
-    results = publish_windows(emit, backend or pub.r2_backend(),
+    effective_backend = backend if backend is not None else pub.r2_backend()
+    results = publish_windows(emit, effective_backend,
                               window_ids={(kind, window_id) for kind, window_id in window_ids},
                               now=now)
     # Publish/verify then remove expendable derived output: this cycle's
@@ -229,7 +230,7 @@ def run_after_finalize(spool_dir: Path | str, day, universe: Mapping[str, Any], 
     # and recorded, never raised after a successful publish.
     cleanup = _remove_cycle_emit(emit)
     try:
-        older = prune_windows_emit(emit.parent, backend, keep_cycles=0,
+        older = prune_windows_emit(emit.parent, effective_backend, keep_cycles=0,
                                    max_emit_bytes=0, dry_run=False)
     except Exception as exc:  # noqa: BLE001 - recorded, never masks a publish
         older = {"error": f"{type(exc).__name__}: {exc}"}

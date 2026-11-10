@@ -479,7 +479,8 @@ class AutoCleanupTests(unittest.TestCase):
         for day in DAYS:
             self.assertTrue((self.spool / day / "summary.json").is_file(), day)
 
-    def test_run_after_finalize_prunes_older_verified_cycles(self):
+    @mock.patch.object(pub, "r2_backend")
+    def test_run_after_finalize_prunes_older_verified_cycles(self, default_backend):
         # An older verified cycle (Oct 7, built from its own three days,
         # published directly so its emit survives into the hook run) is
         # pruned by the hook after the new Oct 9 publish.
@@ -496,10 +497,11 @@ class AutoCleanupTests(unittest.TestCase):
         }) + "\n", encoding="utf-8")
         live.publish_windows(older_emit, pub.LocalFilesystemBackend(self.backend_root),
                              window_ids=set(window_ids), now=NOW)
+        default_backend.return_value = pub.LocalFilesystemBackend(self.backend_root)
         hook = live.run_after_finalize(
             self.spool, "2026-10-09", self.universe,
-            backend=pub.LocalFilesystemBackend(self.backend_root),
             emit_root=self.emit_root, now=NOW_PLUS_10)
+        default_backend.assert_called_once_with()
         self.assertTrue(hook["cleanup"]["removed"])
         self.assertEqual(hook["cleanup"]["older_prune"]["pruned"], ["2026-10-07"])
         self.assertFalse(older_emit.exists())
