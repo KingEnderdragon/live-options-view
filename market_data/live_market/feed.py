@@ -45,6 +45,11 @@ class DXLinkFeed:
         self._last_error: Optional[str]  = None
         self._last_close_code: Optional[int] = None
         self._last_event_time: Optional[datetime] = None
+        # Per-event-type evidence. The November 9 repair could not tell whether
+        # extended trades were absent, unsubscribed or unpaid for; counting what
+        # the provider actually sends makes that answer observable.
+        self._event_counts: dict[str, int] = {}
+        self._quote_time_counts = {"with_provider_time": 0, "without_provider_time": 0}
 
     def set_subscriptions(self, option_symbols: list[str], price_symbols: list[str]):
         self._subs = []
@@ -110,6 +115,8 @@ class DXLinkFeed:
                 "last_error":           self._last_error,
                 "last_close_code":      self._last_close_code,
                 "last_feed_event_time": self._last_event_time,
+                "event_counts": dict(self._event_counts),
+                "quote_time_counts": dict(self._quote_time_counts),
             }
 
     def needs_reauth(self) -> bool:
@@ -320,17 +327,25 @@ class DXLinkFeed:
             with self._lock:
                 self._last_event_time = now
                 s = self._state.setdefault(sym, {})
+                if et:
+                    self._event_counts[et] = self._event_counts.get(et, 0) + 1
                 if et == "Quote":
                     b = self._to_float(event.get("bidPrice"))
                     a = self._to_float(event.get("askPrice"))
+                    bid_time = self._event_time(event.get("bidTime"))
+                    ask_time = self._event_time(event.get("askTime"))
+                    if bid_time or ask_time:
+                        self._quote_time_counts["with_provider_time"] += 1
+                    else:
+                        self._quote_time_counts["without_provider_time"] += 1
                     if b is not None:
                         s["bid"] = b
                         s["bid_ts"] = now.isoformat()
-                        s["bid_observed_at"] = self._event_time(event.get("bidTime"))
+                        s["bid_observed_at"] = bid_time
                     if a is not None:
                         s["ask"] = a
                         s["ask_ts"] = now.isoformat()
-                        s["ask_observed_at"] = self._event_time(event.get("askTime"))
+                        s["ask_observed_at"] = ask_time
                 elif et == "Summary":
                     oi = self._to_int(event.get("openInterest"))
                     if oi is not None:

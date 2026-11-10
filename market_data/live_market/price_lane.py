@@ -27,7 +27,8 @@ from .config import (
     COLLECT_SPY, ET, PRICES_SECS, PRICE_TICKERS, PRICE_LANE_HEALTH_KEY,
     PRICE_LANE_HEALTH_SECS, PRICE_LANE_MAX_AUTH_CYCLES,
     PRICE_LANE_MAX_BACKOFF_SECS, PRICE_LANE_MIN_BACKOFF_SECS,
-    PRICE_LANE_CONTRACT_REFRESH_SECS, PRICE_LANE_RETRY_WINDOW_SECS, R2_BUCKET,
+    PRICE_LANE_CONTRACT_REFRESH_SECS, PRICE_LANE_RETRY_WINDOW_SECS,
+    CONTRACT_RESOLVE_RETRY_MIN_SECS, CONTRACT_RESOLVE_RETRY_MAX_SECS, R2_BUCKET,
     log,
 )
 from .feed import DXLinkFeed
@@ -35,9 +36,9 @@ from .oauth import TastyAuthError, tasty_auth
 from .price_history import RollingReferenceStore
 from .price_sessions import (
     ExchangeCalendarUnavailable, build_equity_calendar, lane_summary,
-    lane_summary_payload, session_for,
+    lane_summary_payload, session_for, session_start_for,
 )
-from .overview_sources import futures_snapshot
+from .overview_sources import futures_snapshot, resolution_status
 
 CRYPTO_LABELS = tuple(row["label"] for row in INSTRUMENTS if row["asset_class"] == "crypto")
 INSTRUMENTS_BY_LABEL = {row["label"]: row for row in INSTRUMENTS}
@@ -110,6 +111,11 @@ class PriceLane:
         self._contracts_checked_at: Optional[datetime] = None
         self._contracts_et_date = None
         self._contract_reconciliations = 0
+        self._contract_gap_since: Optional[datetime] = None
+        self._contract_retry_at: Optional[datetime] = None
+        self._contract_gap_reason: Optional[str] = None
+        self._contract_gaps = 0
+        self._access_token_at: Optional[datetime] = None
 
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -200,14 +206,20 @@ class PriceLane:
         if self._feed is None:
             raise RuntimeError("price_lane_feed_unavailable")
         sessions = {}
+        session_starts = {}
         for label in list(PRICE_TICKERS) + ["SPY"]:
             instrument = INSTRUMENTS_BY_LABEL.get(label)
-            if instrument is not None:
-                sessions[label] = session_for(instrument, now_et, calendar).status
+            if instrument is None:
+                continue
+            sessions[label] = session_for(instrument, now_et, calendar).status
+            start = session_start_for(instrument, now_et, calendar)
+            if start is not None:
+                session_starts[label] = start.astimezone(timezone.utc).isoformat()
         context = {
             "writer_id": self._writer_id,
             "summary": self._summary_payload,
             "sessions": sessions,
+            "session_starts": session_starts,
             "mode": summary["mode"],
         }
         counters = getattr(self, "_counters", None)
@@ -252,6 +264,7 @@ class PriceLane:
         self._auth_cycles += 1
         auth = self._auth(self._token_manager)
         self._auth_payload = dict(auth)
+        self._access_token_at = now
         try:
             self._resolve(auth["access_token"])
         except Exception as exc:
@@ -270,6 +283,34 @@ class PriceLane:
         self._state = "streaming"
         log.info(f"price lane feed ready  symbols={len(symbols)}  options=0")
 
+    def _resolution_token(self, now: datetime) -> Optional[str]:
+        """An access token for contract resolution, refreshed when it has aged.
+
+        The lane authenticates once and can run for days; a REST access token
+        issued at startup is long expired by the six-hour reconciliation. Live
+        November 9 evidence: resolution succeeded after startup and then failed
+        at 17:54Z and again at 23:54Z while `auth_cycles_this_window` stayed 1.
+        Refreshing is budgeted like any other auth attempt.
+        """
+        aged = (self._access_token_at is None
+                or (now - self._access_token_at).total_seconds() >= 600)
+        if not aged or not self._auth_budget_allows(now):
+            return (self._auth_payload or {}).get("access_token")
+        try:
+            self._auth_cycles += 1
+            auth = self._auth(self._token_manager)
+        except Exception as exc:
+            log.warning(f"price lane resolution token refresh failed: {type(exc).__name__}")
+            return (self._auth_payload or {}).get("access_token")
+        self._access_token_at = now
+        return auth["access_token"]
+
+    def _contract_retry_delay(self) -> float:
+        """Bounded retry after an incomplete resolution (not the 6h cadence)."""
+        self._contract_gaps += 1
+        return min(CONTRACT_RESOLVE_RETRY_MAX_SECS,
+                   CONTRACT_RESOLVE_RETRY_MIN_SECS * (2 ** (self._contract_gaps - 1)))
+
     def _reconcile_contracts(self, now: datetime, now_et: datetime) -> None:
         """Keep the lane's subscriptions on the same contracts the rows name.
 
@@ -277,6 +318,11 @@ class PriceLane:
         shared mapping: the chain session can resolve a new month, and a daily
         roll changes it without any disconnect. Re-resolve on a bounded cadence
         and rebuild this lane's own feed when the mapping changes.
+
+        A failed or partial resolution is NOT a roll. Preserving the last good
+        mapping keeps a healthy contract subscribed and retries on a bounded
+        cadence; the November 9 failure instead rebuilt onto a null snapshot,
+        which silently unsubscribed every futures symbol until the next day.
         """
         if self._feed is None:
             return
@@ -285,38 +331,89 @@ class PriceLane:
             or self._contracts_et_date != now_et.date()
             or (now - self._contracts_checked_at).total_seconds() >= self._contract_refresh_secs
         )
+        if self._contract_retry_at is not None and now >= self._contract_retry_at:
+            due = True
         if due and self._auth_payload is not None:
             try:
-                self._resolve(self._auth_payload["access_token"], force=True)
+                token = self._resolution_token(now)
+                if token:
+                    self._resolve(token, force=True)
             except Exception as exc:
                 log.warning(f"price lane contract refresh failed: {type(exc).__name__}")
             self._contracts_checked_at = now
             self._contracts_et_date = now_et.date()
         snapshot = futures_snapshot()
-        if snapshot != self._contracts:
-            self._rebuild_feed(snapshot)
-
-    def _rebuild_feed(self, snapshot: dict) -> None:
-        """Replace only this lane's connection; chain subscriptions are elsewhere."""
-        if self._auth_payload is None:
+        previous = dict(self._contracts or {})
+        if snapshot == previous:
+            if previous and all(previous.values()):
+                self._contract_gaps = 0
+                self._contract_retry_at = None
+                self._contract_gap_since = None
+                self._contract_gap_reason = None
             return
+        lost = [label for label, sym in previous.items() if sym and not snapshot.get(label)]
+        changed = [label for label, sym in snapshot.items()
+                   if sym and sym != previous.get(label)]
+        if lost and not changed:
+            # Resolution gap, not a roll: keep the current subscriptions and
+            # retry soon instead of unsubscribing a healthy contract.
+            if self._contract_retry_at is None or now >= self._contract_retry_at:
+                self._contract_retry_at = now + timedelta(seconds=self._contract_retry_delay())
+            self._contract_gap_since = self._contract_gap_since or now
+            self._contract_gap_reason = "resolution_incomplete_kept_last_known"
+            log.warning(
+                f"price lane contract resolution incomplete; keeping "
+                f"{sum(1 for value in previous.values() if value)} known contracts")
+            return
+        if self._contract_retry_at is not None and now < self._contract_retry_at:
+            return
+        if self._rebuild_feed(snapshot):
+            self._contracts = dict(snapshot)
+            self._contract_reconciliations += 1
+            self._contract_gap_since = None
+            self._contract_retry_at = None
+            self._contract_gap_reason = None
+        else:
+            # Never connect-storm: a failed replacement backs off like any
+            # other lane failure, and the old feed keeps streaming meanwhile.
+            self._contract_gap_since = self._contract_gap_since or now
+            self._contract_retry_at = now + timedelta(seconds=self._contract_retry_delay())
+            self._contract_gap_reason = "subscription_rebuild_failed"
+
+    def _rebuild_feed(self, snapshot: dict) -> bool:
+        """Replace only this lane's connection; chain subscriptions are elsewhere.
+
+        The replacement feed is started before the old one is stopped, so a
+        failed rebuild cannot leave the lane with no subscriptions at all.
+        """
+        if self._auth_payload is None:
+            return False
+        symbols = self._price_symbols()
+        new_feed = None
+        try:
+            new_feed = self._feed_factory(self._auth_payload["streamer_url"],
+                                          self._auth_payload["streamer_token"])
+            new_feed.set_subscriptions([], symbols)
+            new_feed.start()
+            if not new_feed.wait_ready(timeout=30):
+                raise RuntimeError("price_lane_feed_not_ready")
+        except Exception as exc:
+            log.warning(f"price lane subscription rebuild failed: {type(exc).__name__}")
+            if new_feed is not None:
+                try:
+                    new_feed.stop()
+                except Exception:
+                    pass
+            return False
         old = self._feed
-        self._feed = None
+        self._feed = new_feed
         if old is not None:
             try:
                 old.stop()
             except Exception:
                 pass
-        symbols = self._price_symbols()
-        feed = self._feed_factory(self._auth_payload["streamer_url"],
-                                  self._auth_payload["streamer_token"])
-        feed.set_subscriptions([], symbols)
-        feed.start()
-        feed.wait_ready(timeout=30)
-        self._feed = feed
-        self._contracts = dict(snapshot)
-        self._contract_reconciliations += 1
         log.info(f"price lane subscriptions reconciled  symbols={len(symbols)}  options=0")
+        return True
 
     def _keep_feed_alive(self):
         feed = self._feed
@@ -370,7 +467,11 @@ class PriceLane:
             "auth_cycle_budget": self._max_auth_cycles,
             "contracts_checked_at": _iso(self._contracts_checked_at),
             "contract_reconciliations": self._contract_reconciliations,
+            "contract_gap_since": _iso(self._contract_gap_since),
+            "contract_retry_at": _iso(self._contract_retry_at),
+            "contract_gap_reason": self._contract_gap_reason,
             "contracts": dict(self._contracts),
+            "contract_resolution": resolution_status(),
             "feed": feed_health,
             "lane": self._summary_payload,
             "rolling_references": (self._rolling.status() if self._rolling is not None else None),

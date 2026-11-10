@@ -64,6 +64,28 @@ with its own subscription snapshot, and replaces only its own DXLink connection
 when a roll or a chain-session resolution changes the active month. The payload
 therefore names the contract the lane is actually subscribed to.
 
+### Resolution integrity (November 9 repair)
+
+The provider is the only authority for the active month, and a resolution
+**gap is not a roll**. `resolve_futures()` builds a complete candidate mapping
+off to the side and commits it atomically; a request that fails, returns no
+items, or leaves a product without an eligible active contract preserves the
+last good mapping and records a bounded retry (60 s doubling to 900 s). A
+still-valid prior contract is carried for an unresolved product; an expired
+prior is dropped rather than resubscribed.
+
+The lane treats a snapshot that only *loses* contracts as a resolution gap: it
+keeps its current subscriptions, records `contract_gap_reason` and
+`contract_retry_at` in health, and retries on the bounded cadence. A replacement
+feed is started before the old one is stopped, so a failed rebuild cannot leave
+the lane with no subscriptions. Health now carries `contract_resolution`
+(state, last error, retry, per-label symbols) alongside `contracts`.
+
+The live November 9 failure this repairs: the 17:54:07Z six-hour reconciliation
+produced a null mapping, the lane rebuilt onto it, and every futures row stayed
+frozen at its 17:53:5xZ print for the rest of the evening while publication and
+health stayed green.
+
 ## Provider capabilities and cadence
 
 The November 9 bounded probe verified routes, not sustained entitlement:
@@ -99,6 +121,42 @@ A rolling reference is returned only when a ten-minute sample exists within
 is `null` and the comparison is unavailable — never 0% and never a prior UTC
 day wearing a 24-hour label. Futures changes require the same resolved contract;
 an unresolved or rolled contract cannot produce a comparison.
+
+### Extended-session price basis (November 9 repair)
+
+A last trade is a **current** equity price only when it carries a provider event
+time inside the active session. During premarket and after-hours a trade that
+predates the session (or has no provider time at all) is last session's close,
+and publishing it while the venue trades is the defect Owen reported: the live
+November 9 artifact carried the 15:59:59 ET closing print for all 71 streaming
+equity rows across 2.7 hours of after-hours while two-sided quotes advanced.
+
+In `premarket`/`afterhours` the selector therefore uses a **qualified two-sided
+quote** as the price when the trade is not from the current session:
+
+- both sides present and ordered, and both collector receipts inside
+  `EXTENDED_QUOTE_MAX_AGE_SECS` (the feed stale window);
+- spread at or under `EXTENDED_QUOTE_MAX_SPREAD_PCT` — a 13% after-hours quote
+  (IGV) is a placeholder, not a price;
+- `price_basis: bid_ask_midpoint`, `observed_at` from the **older** side's
+  provider time only when both sides carry one; when the feed supplies none,
+  `observed_at` stays `null` with `provider_quote_time_unavailable` and the row
+  is **unknown**, never live. Receipt time is never promoted to observation
+  time.
+
+If no qualified quote exists, the stale close is retained rather than replaced.
+Regular-session rows are unchanged, and futures/crypto/FX/daily families keep
+their provider-timed or explicitly dated selection.
+
+Provider evidence for the limit: this DXLink feed sends no extended-hours trade
+prints for US equities (0 of 71 rows advanced past the closing print across
+2.7 hours) and no `bidTime`/`askTime` on Quote events (QQQ's own 16:14 ET
+chain-session provenance records both as null while receipts advance). The feed
+health now counts events by type and counts quotes with/without provider time,
+so a future deployment can state which of the two is missing instead of
+inferring it. Fresh timestamped after-hours equity observations therefore need
+a provider route that supplies extended trade prints or quote timestamps; that
+is an owner decision, not something fixtures can manufacture.
 
 ## Verification
 

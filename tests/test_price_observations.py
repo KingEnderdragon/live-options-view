@@ -361,5 +361,125 @@ class YahooObservations(unittest.TestCase):
             self.assertIsNone(result["QQQ"]["refresh_error"])
 
 
+class ExtendedSessionSelection(unittest.TestCase):
+    """#178 repair: an active extended session is not last session's close.
+
+    The live November 9 artifact carried the 15:59:59 ET closing print for all
+    71 streaming equity rows across 2.7 hours of after-hours while two-sided
+    quotes advanced. These fixtures pin the selection rules that replace it
+    without ever promoting a receipt time into observation time.
+    """
+
+    def setUp(self):
+        self.old_last = copy.deepcopy(p._last_prices)
+        p._last_prices.clear()
+        self.now = datetime(2026, 11, 9, 21, 30, tzinfo=UTC)       # 16:30 ET
+        self.afterhours_start = "2026-11-09T21:00:00+00:00"       # 16:00 ET
+        self.premarket_start = "2026-11-09T09:00:00+00:00"        # 04:00 ET
+        self.regular_start = "2026-11-09T14:30:00+00:00"          # 09:30 ET
+
+    def tearDown(self):
+        p._last_prices.clear()
+        p._last_prices.update(self.old_last)
+
+    def publish_lane(self, state, sessions, starts, now=None):
+        sink = Sink()
+        context = {"writer_id": "test-writer", "summary": {"mode": "equities"},
+                   "sessions": sessions, "session_starts": starts}
+        with patch.object(entry, "fetch_yf_prices_bounded", return_value={}):
+            p.push_prices(sink, Feed(state), entry.Counters(), lane_context=context,
+                          now_utc=now or self.now)
+        return sink.payload["prices"]
+
+    def extended_state(self, last="2026-11-09T20:59:59.916000+00:00", **quote):
+        raw = {"last": 678.78, "last_ts": "2026-11-09T20:59:59.916000+00:00",
+               "last_observed_at": last, "last_session": "regular",
+               "bid": 679.58, "ask": 679.61,
+               "bid_ts": "2026-11-09T21:29:59+00:00", "ask_ts": "2026-11-09T21:29:59.500000+00:00",
+               "prev_close": 675.0, "prev_close_date": "2026-11-06"}
+        raw.update(quote)
+        return raw
+
+    def test_afterhours_stale_close_is_replaced_by_a_qualified_quote(self):
+        row = self.publish_lane({"QQQ": self.extended_state()},
+                                {"QQQ": "afterhours"}, {"QQQ": self.afterhours_start})["QQQ"]
+        self.assertEqual(row["price_basis"], "bid_ask_midpoint")
+        self.assertAlmostEqual(row["price"], 679.595)
+        self.assertIsNone(row["observed_at"], "a quote without provider time is not observed now")
+        self.assertEqual(row["observation_time_reason"], "provider_quote_time_unavailable")
+        self.assertEqual(row["quote_ts"], "2026-11-09T21:29:59.500000+00:00")
+        self.assertIsNone(row["session"], "a Quote has no trustworthy session discriminator")
+        self.assertEqual(row["market_session"], "afterhours")
+
+    def test_extended_quote_provider_times_make_the_row_live(self):
+        row = self.publish_lane({"QQQ": self.extended_state(
+            bid_observed_at="2026-11-09T21:29:58+00:00",
+            ask_observed_at="2026-11-09T21:29:59+00:00")},
+            {"QQQ": "afterhours"}, {"QQQ": self.afterhours_start})["QQQ"]
+        self.assertEqual(row["price_basis"], "bid_ask_midpoint")
+        self.assertEqual(row["observed_at"], "2026-11-09T21:29:58+00:00",
+                         "the older side wins; never the receipt clock")
+        self.assertIsNone(row["observation_time_reason"])
+
+    def test_premarket_trade_inside_the_session_still_wins(self):
+        row = self.publish_lane({"QQQ": self.extended_state(
+            last="2026-11-09T13:59:00+00:00")},
+            {"QQQ": "premarket"}, {"QQQ": self.premarket_start})["QQQ"]
+        self.assertEqual(row["price_basis"], "last_trade")
+        self.assertEqual(row["price"], 678.78)
+        self.assertEqual(row["observed_at"], "2026-11-09T13:59:00+00:00")
+        self.assertEqual(row["session"], "regular")
+
+    def test_wide_afterhours_quote_keeps_the_honest_stale_close(self):
+        # IGV's live 13% after-hours spread is a placeholder, not a price.
+        row = self.publish_lane({"QQQ": self.extended_state(bid=97.0, ask=110.55)},
+                                {"QQQ": "afterhours"}, {"QQQ": self.afterhours_start})["QQQ"]
+        self.assertEqual(row["price_basis"], "last_trade")
+        self.assertEqual(row["price"], 678.78)
+        self.assertEqual(row["observed_at"], "2026-11-09T20:59:59.916000+00:00")
+
+    def test_half_updated_quote_receipts_are_rejected(self):
+        row = self.publish_lane({"QQQ": self.extended_state(
+            ask_ts="2026-11-09T21:00:00+00:00")},  # 30 minutes old on one side
+            {"QQQ": "afterhours"}, {"QQQ": self.afterhours_start})["QQQ"]
+        self.assertEqual(row["price_basis"], "last_trade")
+        self.assertEqual(row["price"], 678.78)
+
+    def test_regular_session_keeps_the_last_trade(self):
+        row = self.publish_lane({"QQQ": self.extended_state(
+            last="2026-11-09T21:29:50+00:00")},
+            {"QQQ": "regular"}, {"QQQ": self.regular_start})["QQQ"]
+        self.assertEqual(row["price_basis"], "last_trade")
+        self.assertEqual(row["observed_at"], "2026-11-09T21:29:50+00:00")
+
+    def test_reference_rolls_with_the_provider_day_id(self):
+        first = self.publish_lane({"QQQ": self.extended_state()},
+                                  {"QQQ": "afterhours"}, {"QQQ": self.afterhours_start})["QQQ"]
+        self.assertEqual(first["reference"]["observation_date"], "2026-11-06")
+        rolled = self.publish_lane({"QQQ": self.extended_state(
+            prev_close=679.0, prev_close_date="2026-11-09")},
+            {"QQQ": "afterhours"}, {"QQQ": self.afterhours_start})["QQQ"]
+        self.assertEqual(rolled["reference"]["observation_date"], "2026-11-09")
+        self.assertEqual(rolled["reference"]["value"], 679.0)
+        self.assertAlmostEqual(rolled["chg_pct"], round((rolled["price"] - 679.0) / 679.0 * 100, 2))
+
+
+class FeedEventEvidence(unittest.TestCase):
+    def test_provider_event_and_quote_time_counts_are_observable(self):
+        feed = DXLinkFeed("unused", "unused")
+        millis = int(datetime.fromisoformat(OLD).timestamp() * 1000)
+        feed._ingest([
+            {"eventType": "Quote", "eventSymbol": "QQQ", "bidPrice": 100, "askPrice": 101},
+            {"eventType": "TradeETH", "eventSymbol": "QQQ", "price": 100.5, "time": millis},
+            {"eventType": "Quote", "eventSymbol": "QQQ", "bidPrice": 100, "askPrice": 101,
+             "bidTime": millis, "askTime": millis},
+        ])
+        health = feed.get_health()
+        self.assertEqual(health["event_counts"]["Quote"], 2)
+        self.assertEqual(health["event_counts"]["TradeETH"], 1)
+        self.assertEqual(health["quote_time_counts"],
+                         {"with_provider_time": 1, "without_provider_time": 1})
+
+
 if __name__ == "__main__":
     unittest.main()
