@@ -116,27 +116,34 @@ PHELPS_SUFFIX = "_phelps"
 #: behaviour, and rollback is the same single variable.
 ACTIVATION_ENV = "CRASSUS_EXITS_ENABLED"
 
-#: Proposed numeric defaults, every one an explicit review question rather than
-#: a tuned result. Rationale, for the review packet:
+#: Approved defaults (Owen, 2026-11-09): a bounded-loss policy with profit-taking
+#: disabled. These are the values the mechanism runs with when an account sets no
+#: `exits` block; they are approved as a starting policy, not presented as a
+#: calibrated optimum.
 #:
-#: * `profit_target_pct = 0.50` -- a long 0DTE ATM contract that doubles its
-#:   premium is a large move for an intraday hold; 50% is the conservative half
-#:   of that, and well above the 20% the Cheshire straddle already uses as its
-#:   core-profit threshold (`looking_glass_straddle.DEFAULT_CORE_PROFIT_THRESHOLD_PCT`),
-#:   which keeps a signal-driven book from being nickeled out by its own stop.
-#: * `stop_loss_pct = -0.50` -- the same magnitude on the loss side. Half the
-#:   debit is a wide stop for a same-day contract but a real one: the current
-#:   alternatives are an unbounded hold (today) or a stop so tight that Phelps's
-#:   own window cannot resolve. Symmetry keeps the pair explainable; nothing in
-#:   the repo establishes a better number.
+#: * `profit_target_pct = None` -- profit-taking is deliberately *off*. A +50%
+#:   target was the earlier placeholder and the only saved 0DTE sample in the
+#:   tree never reached it from any intraday entry (median favourable excursion
+#:   −5%, p90 +16%, max +39%), so it would have been decorative. `None` is not
+#:   the same as a large number: `1.00` is still an enabled +100% target that
+#:   fires on a doubling, while `None` can never fire.
+#: * `stop_loss_pct = -0.50` -- half the debit. The same sample puts
+#:   hold-to-close at a median −76% of premium, while a −50% stop moves the
+#:   median to −55% and the 10th percentile from −95% to −75%. Tighter (−25%) is
+#:   touched in 99% of entries and converts noise into realised losses; wider
+#:   (−75%) permits a three-quarter loss of the debit.
 #: * `reentry_cooldown_minutes = 15` -- one runner cycle is five minutes, so 15
 #:   covers three cycles: long enough that the same stale signal cannot buy the
 #:   same contract back immediately, short enough that a genuinely new setup
 #:   later in the session is not blocked.
+#: * `stop_bypasses_phelps = True`, `profit_bypasses_phelps = False` -- a stop
+#:   exists to bound loss and Phelps has no loss bound; taking a profit early
+#:   ends the convexity purchase the window paid for. The profit switch is inert
+#:   while the target is `None`, and is kept for the account that re-enables one.
 #: * `quote_max_age_s` is not configurable: it is the Worker's own 15-second
 #:   execution freshness contract, and a looser local value would only produce
 #:   409s.
-DEFAULT_PROFIT_TARGET_PCT = 0.50
+DEFAULT_PROFIT_TARGET_PCT: float | None = None
 DEFAULT_STOP_LOSS_PCT = -0.50
 DEFAULT_REENTRY_COOLDOWN_MINUTES = 15.0
 DEFAULT_STOP_BYPASSES_PHELPS = True

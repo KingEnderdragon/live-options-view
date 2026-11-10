@@ -110,7 +110,7 @@ def ctx(book_obj, quotes, *, params=None, now_et=NOW) -> StrategyContext:
 
 class BoundaryTests(unittest.TestCase):
     def test_profit_boundary_is_inclusive(self):
-        policy = ExitPolicy()
+        policy = ExitPolicy(profit_target_pct=0.50)
         decision = evaluate(ctx(book(long_trade()), {SYMBOL: quote(1.50, 1.55)}), policy)
         self.assertIsNotNone(decision)
         self.assertEqual(decision.metadata["exit_trigger"], "profit_target")
@@ -128,7 +128,8 @@ class BoundaryTests(unittest.TestCase):
         self.assertIsNone(above)
 
     def test_long_liquidates_at_the_bid_not_the_ask(self):
-        decision = evaluate(ctx(book(long_trade()), {SYMBOL: quote(1.50, 3.00)}), ExitPolicy())
+        decision = evaluate(ctx(book(long_trade()), {SYMBOL: quote(1.50, 3.00)}),
+                            ExitPolicy(profit_target_pct=0.50))
         self.assertEqual(decision.action, "sell")
         self.assertEqual(decision.quantity, 1)
         self.assertEqual(decision.metadata["exit_liquidation_price"], 1.50)
@@ -137,7 +138,8 @@ class BoundaryTests(unittest.TestCase):
     def test_short_liquidates_at_the_ask(self):
         # Short 1.00; buying back at 0.50 is a 50% gain.
         short_book = book(short_trade(1.00))
-        decision = evaluate(ctx(short_book, {SYMBOL: quote(0.40, 0.50)}), ExitPolicy())
+        decision = evaluate(ctx(short_book, {SYMBOL: quote(0.40, 0.50)}),
+                            ExitPolicy(profit_target_pct=0.50))
         self.assertEqual(decision.action, "buy")
         self.assertEqual(decision.quantity, 1)
         self.assertEqual(decision.metadata["exit_liquidation_price"], 0.50)
@@ -155,7 +157,8 @@ class BoundaryTests(unittest.TestCase):
             {"sym": SYMBOL, "side": "buy", "qty": 1, "price": 1.00, "ts": "2024-01-01T10:00:00Z"},
             {"sym": SYMBOL, "side": "buy", "qty": 1, "price": 2.00, "ts": "2024-01-01T10:05:00Z"},
         )
-        decision = evaluate(ctx(scaled, {SYMBOL: quote(2.25, 2.30)}), ExitPolicy())
+        decision = evaluate(ctx(scaled, {SYMBOL: quote(2.25, 2.30)}),
+                            ExitPolicy(profit_target_pct=0.50))
         self.assertEqual(decision.quantity, 2)
         self.assertAlmostEqual(decision.metadata["exit_cost_basis"], 1.5)
         self.assertAlmostEqual(decision.metadata["exit_pnl_pct"], 0.5)
@@ -210,7 +213,7 @@ class PrecedenceTests(unittest.TestCase):
             "WIN": Quote("WIN", 1.70, 1.75, "2024-01-01T12:00:25", "2024-01-01T12:00:30"),
             "LOSS": Quote("LOSS", 0.40, 0.45, "2024-01-01T12:00:25", "2024-01-01T12:00:30"),
         }
-        decision = evaluate(ctx(winners, quotes), ExitPolicy())
+        decision = evaluate(ctx(winners, quotes), ExitPolicy(profit_target_pct=0.50))
         self.assertEqual(decision.symbol, "LOSS")
         self.assertEqual(decision.metadata["exit_trigger"], "protective_stop")
 
@@ -233,12 +236,12 @@ class PrecedenceTests(unittest.TestCase):
         )
         # A has no quote; B is comfortably profitable and must still exit.
         quotes = {"B": Quote("B", 1.60, 1.65, "2024-01-01T12:00:25", "2024-01-01T12:00:30")}
-        decision = evaluate(ctx(two, quotes), ExitPolicy())
+        decision = evaluate(ctx(two, quotes), ExitPolicy(profit_target_pct=0.50))
         self.assertEqual(decision.symbol, "B")
         self.assertEqual(decision.metadata["exit_trigger"], "profit_target")
 
     def test_phelps_stop_bypasses_the_window_by_default(self):
-        params = {"phelps_minutes": 27.5}
+        params = {"phelps_minutes": 27.5, "exits": {"profit_target_pct": 0.50}}
         recent = book(long_trade(ts="2024-01-01T11:55:00Z"))  # 5 minutes ago
         decision = evaluate(
             ctx(recent, {SYMBOL: quote(0.40, 0.45)}, params=params),
@@ -249,7 +252,7 @@ class PrecedenceTests(unittest.TestCase):
         self.assertEqual(decision.metadata["exit_trigger"], "protective_stop")
 
     def test_phelps_profit_waits_for_the_window_by_default(self):
-        params = {"phelps_minutes": 27.5}
+        params = {"phelps_minutes": 27.5, "exits": {"profit_target_pct": 0.50}}
         recent = book(long_trade(ts="2024-01-01T11:55:00Z"))
         policy = resolve_policy("reddit_sentiment_qqq_phelps", params, activated=True)
         deferred = evaluate(
@@ -284,7 +287,8 @@ class PrecedenceTests(unittest.TestCase):
         # to bypass says *that* -- the sentence follows the policy rather than
         # asserting the default in both directions.
         params = {"phelps_minutes": 27.5,
-                  "exits": {"stop_bypasses_phelps": True, "profit_bypasses_phelps": True}}
+                  "exits": {"profit_target_pct": 0.50,
+                            "stop_bypasses_phelps": True, "profit_bypasses_phelps": True}}
         policy = resolve_policy("reddit_sentiment_qqq_phelps", params, activated=True)
 
         stop = evaluate(
@@ -377,6 +381,28 @@ class PolicyTests(unittest.TestCase):
         decision = evaluate(ctx(book(long_trade()), {SYMBOL: quote(0.84, 0.90)}), policy)
         self.assertEqual(decision.metadata["exit_trigger"], "protective_stop")
         self.assertEqual(decision.metadata["exit_threshold_pct"], -0.15)
+
+    def test_approved_default_policy_is_bounded_loss_only(self):
+        # The default is the policy Owen approved on 2026-11-09: stop -0.50,
+        # profit-taking disabled, stop bypasses Phelps, profit respects it,
+        # 15-minute cooldown. A change to any of these is a policy change and
+        # has to be deliberate, which is what this test makes expensive.
+        self.assertIsNone(exits.DEFAULT_PROFIT_TARGET_PCT)
+        policy = resolve_policy("reddit_sentiment_qqq", {}, activated=True)
+        self.assertTrue(policy.enabled)
+        self.assertIsNone(policy.profit_target_pct)
+        self.assertEqual(policy.stop_loss_pct, -0.50)
+        self.assertTrue(policy.stop_bypasses_phelps)
+        self.assertFalse(policy.profit_bypasses_phelps)
+        self.assertEqual(policy.reentry_cooldown_minutes, 15.0)
+
+        # Under the default a doubling is not a profit exit, and the stop fires.
+        self.assertIsNone(
+            evaluate(ctx(book(long_trade()), {SYMBOL: quote(2.40, 2.50)}), policy)
+        )
+        stopped = evaluate(ctx(book(long_trade()), {SYMBOL: quote(0.50, 0.55)}), policy)
+        self.assertEqual(stopped.metadata["exit_trigger"], "protective_stop")
+        self.assertIsNone(stopped.metadata["exit_policy"]["profit_target_pct"])
 
     def test_profit_target_can_be_disabled_entirely(self):
         policy = resolve_policy(

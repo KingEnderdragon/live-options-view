@@ -185,21 +185,25 @@ class CadenceTests(unittest.TestCase):
             self.assertIsNotNone(monitor.maybe_check())        # 900s: due again
             self.assertEqual(len(calls), 2)
 
-    def test_detection_bound_is_conditional_on_the_cycle_period(self):
-        # The check runs inside the runner cycle, so the honest statement is a
-        # bound conditional on the cycle keeping its period -- and no bound at
+    def test_detection_estimate_is_conditional_on_the_cycle_period(self):
+        # The check runs inside the runner cycle, so the honest statement is an
+        # estimate conditional on the cycle keeping its period -- and nothing at
         # all when the period is unknown.
         no_cycle = KeyHealthConfig(interval_s=900.0, probe_timeout_s=15.0)
-        self.assertEqual(no_cycle.max_probe_duration_s, 15.0)
-        self.assertIsNone(no_cycle.conditional_detection_bound_s)
-        self.assertIn("unbounded", no_cycle.detection_bound_condition)
+        self.assertEqual(no_cycle.request_timeout_s, 15.0)
+        self.assertFalse(hasattr(no_cycle, "max_probe_duration_s"))
+        self.assertIsNone(no_cycle.conditional_detection_estimate_s)
+        self.assertIn("unbounded", no_cycle.detection_estimate_condition)
 
         deployed = KeyHealthConfig(
             interval_s=900.0, probe_timeout_s=15.0, cycle_interval_s=300.0
         )
-        self.assertEqual(deployed.conditional_detection_bound_s, 1215.0)
-        self.assertIn("conditional", deployed.detection_bound_condition)
-        self.assertIn("hung cycle", deployed.detection_bound_condition)
+        self.assertEqual(deployed.conditional_detection_estimate_s, 1215.0)
+        self.assertIn("conditional", deployed.detection_estimate_condition)
+        self.assertIn("hung cycle", deployed.detection_estimate_condition)
+        # The request timeout is per-phase, not a wall-clock deadline; the
+        # wording must not imply the probe is capped by it.
+        self.assertIn("per-phase", deployed.detection_estimate_condition)
 
     def test_non_aligned_cycle_cadence_reports_measured_lateness(self):
         # A 300 s runner cycle does not divide a 900 s interval at arbitrary
@@ -240,8 +244,8 @@ class CadenceTests(unittest.TestCase):
             report = monitor.check()
             self.assertEqual(report["observed_interval_s"], 5000.0)
             self.assertEqual(report["last_lateness_s"], 4100.0)
-            self.assertEqual(report["conditional_detection_bound_s"], 1215.0)
-            self.assertFalse(report["within_conditional_bound"])
+            self.assertEqual(report["conditional_detection_estimate_s"], 1215.0)
+            self.assertFalse(report["within_detection_estimate"])
 
     def test_no_probe_without_a_cycle_to_run_it(self):
         # A hung cycle simply never calls the monitor. Time passes, the report
@@ -268,8 +272,8 @@ class CadenceTests(unittest.TestCase):
             self.assertIsNone(report["state"])
             self.assertIsNone(report["last_check_at"])
             self.assertIsNone(report["observed_interval_s"])
-            self.assertEqual(report["conditional_detection_bound_s"], 1215.0)
-            self.assertIn("conditional", report["detection_bound_condition"])
+            self.assertEqual(report["conditional_detection_estimate_s"], 1215.0)
+            self.assertIn("conditional", report["detection_estimate_condition"])
 
     def test_report_never_claims_a_hard_detection_maximum(self):
         with contextlib.nullcontext(_tmpdir()) as tmp:
@@ -280,7 +284,7 @@ class CadenceTests(unittest.TestCase):
             self.assertNotIn("max_detection_delay_s", report)
             self.assertNotIn("max_detection_delay_s", monitor.report())
             for key in ("check_interval_s", "observed_interval_s", "last_lateness_s",
-                        "conditional_detection_bound_s", "detection_bound_condition"):
+                        "conditional_detection_estimate_s", "detection_estimate_condition"):
                 self.assertIn(key, report)
 
     def test_zero_interval_disables_the_check(self):
