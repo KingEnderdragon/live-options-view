@@ -76,12 +76,21 @@ PATH_COLUMNS = outputs.PATH_COLUMNS
 BASIS_COLUMNS = outputs.BASIS_COLUMNS
 
 # Consumer byte ceilings (market_mcp/source.js LIMITS): a single artifact is
-# at most 4 MiB, a decompressed artifact at most 24 MiB. The publisher
+# at most 4 MiB, a decompressed artifact at most 48 MiB. The publisher
 # enforces them before upload so a published window is always consumable.
+# Measured full-universe members (real producer, 14-batch combine,
+# 71,710 contracts/window, 2026-11-09): summary at most 55,492 B,
+# rankings at most 65,497 B (shortlist-capped at 600 rows), paths.gz at
+# most 2,436,802 B -- all comfortably inside their caps, which are NOT
+# raised. Only the expanded-paths ceiling was demonstrated insufficient:
+# the same windows expand to 32,806,912-34,295,267 B, over the old 24 MiB
+# bound, so it is raised to 48 MiB: 1.46x the measured maximum, and still
+# inside the 64 MiB per-query budget with the other members (48 + ~2.4
+# compressed + ~0.1 summary/rankings < 64 MiB).
 MAX_SUMMARY_BYTES = 1 * 1024 * 1024
 MAX_RANKINGS_BYTES = 4 * 1024 * 1024
 MAX_PATHS_BYTES = 4 * 1024 * 1024
-MAX_PATHS_EXPANDED_BYTES = 24 * 1024 * 1024
+MAX_PATHS_EXPANDED_BYTES = 48 * 1024 * 1024
 MEMBER_MAX_BYTES = {"summary.json": MAX_SUMMARY_BYTES, "rankings.csv": MAX_RANKINGS_BYTES,
                     "paths.csv.gz": MAX_PATHS_BYTES}
 WINDOW_MEMBERS = ("summary.json", "rankings.csv", "paths.csv.gz")

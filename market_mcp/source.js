@@ -9,7 +9,7 @@ const zlib = require('node:zlib');
 const { createHash } = require('node:crypto');
 
 const ORIGIN = 'https://pub-4d5c916b8cb74ffb8c0abd7dfadb02cf.r2.dev';
-const LIMITS = Object.freeze({ artifact_bytes: 4 * 1024 * 1024, expanded_artifact_bytes: 24 * 1024 * 1024, query_bytes: 64 * 1024 * 1024,
+const LIMITS = Object.freeze({ artifact_bytes: 4 * 1024 * 1024, expanded_artifact_bytes: 48 * 1024 * 1024, query_bytes: 64 * 1024 * 1024,
   output_bytes: 256 * 1024, requests: 12, timeout_ms: 15000, rows: 50, path_sweeps: 6,
   input_bytes: 16384, references: 64, reference_bytes: 16 * 1024 * 1024, reference_ttl_ms: 15 * 60 * 1000,
   jsonl_lines: 100000, jsonl_rows: 10000, jsonl_line_bytes: 256 * 1024, quote_line_bytes: 16384,

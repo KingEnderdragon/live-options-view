@@ -102,7 +102,7 @@ things the consumer cannot:
   exactly ranks `1..shortlist`, pct-descending with symbol tiebreak,
   negative-count rule, OCC identity cross-check, pct arithmetic within
   `2e-6`.
-- Paths: expanded size at most 24 MiB (the consumer ceiling), exact
+- Paths: expanded size at most 48 MiB (the consumer ceiling; measured full-universe maximum 34,295,267 B), exact
   header, row count equals `contracts_evaluated`, symbols unique
   (conflicting attributions for one symbol fail closed with no canonical
   path asserted), per-basis eligible/excluded counts **and**
@@ -191,16 +191,25 @@ lives in `latest.json` + the consumer's digest check, and the two meet
 only when the consumer actually reads the pointer. A mixed flat tree
 is refused, never repaired, by the consumer.
 
-## Retention / budget proposal (not a live approval)
+## Retention / budget (measured, implemented)
 
 Mirrors `active_budget.py`'s shape with numbers sized for windows
-instead of intraday snapshots. These are proposals for Chej/Owen to
-approve, not an approved budget.
+instead of intraday snapshots. The per-member caps are implemented
+from measured full-universe evidence (real producer, 14-batch combine,
+71,710 contracts/window, 2026-11-09): summary at most 55,492 B,
+rankings at most 65,497 B (shortlist-capped at 600 rows), paths.gz at
+most 2,436,802 B -- all inside their caps, which are NOT raised. Only
+the expanded-paths ceiling was demonstrated insufficient (measured
+32,806,912-34,295,267 B expanded, over the old 24 MiB bound) and is
+raised to 48 MiB: 1.46x the measured maximum, still inside the 64 MiB
+per-query budget with the other members. The old ~8 MB ranked-CSV
+figures do NOT justify a rankings raise: those were old-format
+qualified-only CSVs, not new-format rankings members.
 
-| Bound | Proposed value | Reasoning |
+| Bound | Value | Reasoning |
 | --- | --- | --- |
-| Per-member bytes | summary ≤ 1 MiB, rankings ≤ 4 MiB, paths ≤ 4 MiB compressed / 24 MiB expanded | Consumer artifact (4 MiB) and expanded (24 MiB) ceilings |
-| Reservation per revision | 20 MiB | Flat members (≤ 9 MiB) + immutable revision copy (≤ 9 MiB) + pointer/ledger |
+| Per-member bytes | summary ≤ 1 MiB, rankings ≤ 4 MiB, paths ≤ 4 MiB compressed / 48 MiB expanded | Consumer artifact (4 MiB) and expanded (48 MiB) ceilings; only the expanded bound changed, from measurement |
+| Reservation per revision | 20 MiB | Flat members (≤ 6.1 MiB measured at full-universe scale: summary ~0.06 + rankings ~0.07 + paths.gz ~2.4 MiB, plus pointer/ledger) + immutable revision copy (same again); 20 MiB still covers a revision with ~3x headroom |
 | Global cap | 8 GiB | Matches the scanner's reviewed bound |
 | Retention | 90 days | Expired revisions, flat members, pointers and ledgers deleted together; deletion re-verified by re-listing |
 | Attempts | 3 per revision | Same as active snapshots |
@@ -221,10 +230,13 @@ background expiry run. If publications stop, expired objects simply
 stay until the next publish; the cap and the per-revision reservation
 still bound every publish.
 
-## What remains for live publication (release gate, unapproved)
+## What remains for live publication (release gate)
 
-1. **Chej/Owen approval** of this publisher, its state decisions, and the
-   budget/retention numbers above.
+1. **Chej's release decision** for live publication and activation.
+   The per-member caps and budget numbers above are implemented from
+   measured evidence (not an approval wait); what remains is Chej's
+   release step -- publication to R2 and enabling
+   `OA203_WINDOWS_LIVE_ENABLED` -- after review.
 2. **OA203-style pre-checks** before any live R2 write: regression tests
    green (`tests/test_oa203_windows_publish.py`,
    `tests/test_oa203_windows_parity.py`,

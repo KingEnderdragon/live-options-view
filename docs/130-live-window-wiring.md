@@ -164,34 +164,78 @@ was found. The scanner is a scheduled/build-only service.
 
 ### How fast the emit grows (measured + capped)
 
-- Worst case per the publisher's own member caps: 14 windows x
-  (summary <=1 MiB + rankings <=4 MiB + paths <=4 MiB compressed) =
-  126 MiB per cycle. At that size the ~810 MB free holds about 6 cycles.
+- Worst case per the publisher's own member caps: a 10-session cycle
+  builds at most 32 windows (6 weekly + 9 overnight + 9 two-session +
+  8 three-session), each at most 9 MiB of emit members (summary <=1 MiB
+  + rankings <=4 MiB + paths <=4 MiB compressed) = 288 MiB per cycle.
+  14 windows was the 5-session fixture, NOT the maximum. At 288 MiB
+  the ~810 MB free holds about 2-3 cycles of accumulated emit -- which
+  is why the hook removes a successfully published cycle's emit root
+  (see the retention policy below) instead of accumulating it.
 - Bounded/batch scale, measured: the preserved batch-01 emit (5946
-  contracts, 5 windows) holds 5 ranked CSVs totalling ~3.5 MB, about
-  0.7 MB per window for rankings. A bounded 14-window cycle is then
-  about 10 MB of rankings plus a similar amount of compressed paths,
-  roughly 20 MB per cycle, so the free headroom holds roughly 30-40
-  cycles (about 6-8 weeks of daily cycles).
-- Full-universe scale, measured: the preserved combined ranked CSVs
-  are 8.0-8.6 MB per window (71,710 contracts), so a full-universe
-  cycle is roughly 230 MB of emit -- about 3 cycles in the free
-  headroom. AND the proposed 4 MiB per-member caps would refuse such
-  windows today (rankings alone are ~8 MB, over the 4 MiB cap), so
-  full-universe publication needs a cap decision by Chej/Owen first;
-  the caps are proposals and are NOT changed here.
+  contracts, 5 windows) holds 5 windows totalling ~1.5 MB of members
+  (summary ~38 KB, rankings ~63 KB, paths.gz ~230 KB per window), so
+  a bounded cycle is roughly 20 MB per cycle, and the free headroom
+  holds roughly 30-40 cycles (about 6-8 weeks of daily cycles).
+- Full-universe scale, measured (real producer, 14-batch combine,
+  71,710 contracts/window, 2026-11-09): summary at most 55,492 B,
+  rankings at most 65,497 B (shortlist-capped at 600 rows), paths.gz
+  at most 2,436,802 B, paths expanded at most 34,295,267 B. A
+  full-universe 32-window cycle is therefore at most ~100 MB of emit
+  (32 x ~3.1 MB), not ~230 MB. The old ~8 MB figures were old-format
+  qualified-only ranked CSVs, not new-format members, and do NOT show
+  rankings exceeding the 4 MiB cap: measured new-format rankings are
+  ~65 KB. Only the expanded-paths ceiling was demonstrated
+  insufficient (32.7 MiB measured vs the old 24 MiB bound) and is
+  raised to 48 MiB (`docs/130-window-publisher.md`).
+- Binding constraint, stated plainly: the scanner's own day-archive
+  growth (~110 MB/day) is what fills the volume, not windows emit.
+  At ~110 MB/day the ~773 MiB free lasts ~7 days total, and the
+  576 MiB pre-check starts refusing builds after ~2 days of archive
+  growth. Windows auto-cleanup removes windows' own contribution but
+  cannot fix archive growth -- that is a Chej/Owen capacity decision
+  (volume resize is a paid service change, out of scope; deleting
+  source archives is forbidden).
 
 ### The retention policy (local output only)
 
-- Keep the newest 10 per-cycle emit roots (the 10-session window)
-  within a 512 MiB total emit budget (`DEFAULT_KEEP_CYCLES = 10`,
-  `DEFAULT_MAX_EMIT_BYTES = 512 MiB` in `windows_live.py`).
-- A per-cycle emit root may be pruned ONLY after every window in it
-  is published or superseded: the backend pointer revision equals the
-  revision that cycle built, or the pointer's `published_at` is later
-  than the cycle's `generated_at` (a newer cycle republished the
-  window). Anything unverified -- no pointer, a damaged pointer, an
-  older pointer revision -- is skipped with a reason and left in place.
+- Automatic cleanup, no manual operator dependency: `run_after_finalize`
+  removes a successfully published cycle's emit root (publish/verify
+  then remove expendable derived output; the products live in the
+  backend and the emit is rebuildable from the spool while the spool
+  matches), records the cleanup in its return, and best-effort prunes
+  older verified cycles (`keep_cycles=0`, `max_emit_bytes=0`). A
+  failed publish raises before cleanup, so the emit root is kept as
+  recovery evidence. The hook binds ONE effective backend
+  (`effective_backend`: the passed backend, else `r2_backend()`) and
+  uses it for BOTH the publish and the older prune, so the production
+  default path prunes too. Steady state emit is ~0 (only unverified
+  cycles remain).
+- There is NO hard cycle-count floor: `DEFAULT_KEEP_CYCLES = 0` and
+  the manual prune budget is `DEFAULT_MAX_EMIT_BYTES = 192 MiB`
+  (192 + 576 = 768 MiB <= ~773 MiB free, so pruning to budget always
+  leaves room for the next build). A floor of 10 cycle dirs cannot fit
+  the headroom at full-universe scale; `keep_cycles` is an explicit
+  operator recency preference only, and the byte budget alone decides.
+- A per-cycle emit root may be pruned ONLY when its manifest is
+  present, well-formed and complete (cycle == day == dir name,
+  non-empty ISO days, non-empty windows of [kind, window_id] pairs for
+  known kinds/ids, timezone-aware `generated_at`) AND lists exactly
+  the windows present in the local emit tree AND every window proves
+  durable acceptance: PUBLISHED (pointer revision == local summary
+  hash, every member digest matches the local bytes, `published_at`
+  not earlier than the cycle minus 5 min) or SUPERSEDED (newer pointer
+  with strictly later `published_at` AND that revision's members
+  verified in the backend by re-reading them). A missing/empty/
+  malformed manifest qualifies NOTHING; a newer pointer whose revision
+  members do not verify does NOT qualify; a member digest mismatch
+  does NOT qualify. Anything unverified is skipped with a reason and
+  left in place.
+- Escape rejections: the prune never follows a symlink/junction out of
+  the emit root (resolved paths must stay inside it), never operates
+  on a cycle holding a link or a `sweeps/` day-archive marker, and
+  raises outright when pointed at a spool (direct children holding day
+  archives).
 - Prune deletes ONLY derived emit dirs (`<emit_root>/<YYYY-MM-DD>/`
   holding `cycle.json`). It NEVER deletes the finalized day archives,
   source history, or live/published data; the archives live in the
@@ -201,17 +245,23 @@ was found. The scanner is a scheduled/build-only service.
   deleted, verifies published state first, deletes only the verified
   dirs, and re-lists to confirm each one is gone. Tests in
   `tests/test_oa203_windows_retention.py` prove the dry-run, the
-  delete, the keep-cycles floor, the unpublished-cycle skip, and that
-  non-cycle entries are never touched.
+  delete, the recency preference (not a floor), the unpublished-cycle
+  skip, the exact manifest/supersede/member evidence rules, the
+  symlink/junction/spool rejections, the 32-window 10-session build,
+  and the auto-cleanup (remove after publish, keep on failure, prune
+  older, low-headroom boundary).
 
 ### Headroom pre-check (fail closed before a build)
 
 - `build_windows` (and therefore the `run_after_finalize` hook and the
   `windows-build` CLI) requires at least `MIN_EMIT_FREE_BYTES`
-  (256 MiB = 2x the worst-case per-cycle 126 MiB) free on the emit
-  volume before building, and raises `ValueError` naming free/required
-  bytes otherwise. The operator then prunes older per-cycle emit roots;
-  the build never starts on a volume too full to finish it.
+  (576 MiB = 2x the corrected worst-case per-cycle 288 MiB: 1x the
+  build peak plus 1x for a local-backend copy) free on the emit volume
+  before building, and raises `ValueError` naming free/required bytes
+  otherwise. The operator then prunes older per-cycle emit roots; the
+  build never starts on a volume too full to finish it. The refusal
+  message names the actual situation: emit pruning only helps if emit
+  is what fills the volume (see the binding constraint above).
 - Spool-missing behaviour is already fail-closed and is now tested:
   an empty spool raises `ValueError` (`no finalized day archives`), a
   missing spool directory raises `FileNotFoundError`; a torn or

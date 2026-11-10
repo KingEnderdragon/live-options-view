@@ -73,8 +73,15 @@ deployment, no publication, no activation. Chej owns review/release.
    asserted. The paths row is located by a line scan without materializing
    the whole file, but the read still counts against the existing
    artifact/expanded/query byte limits: a full-universe `paths.csv.gz`
-   larger than the 24 MiB expanded ceiling fails closed with
-   `excessive_response` instead of returning a partial path.
+   larger than the 48 MiB expanded ceiling fails closed with
+   `excessive_response` instead of returning a partial path. Measured
+   full-universe paths expand to at most 34,295,267 B (32.7 MiB), so
+   the 48 MiB ceiling admits them with 1.46x headroom; the worst-case
+   detail query totals ~50.5 MiB (48 expanded + ~2.4 compressed +
+   ~0.1 summary/rankings/pointer), inside the 64 MiB query budget.
+   The 10,000-row `csv_rows` limit does not block pinned detail at
+   71,710 rows: `windowPathsRow` scans lines and parses only the header
+   plus the one matching row, never the whole file.
 8. **No window index.** There is no index of windows, so
    `discover_sources` advertises the fixed contract with availability
    `explicit_window_required` and never claims live data. The

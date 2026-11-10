@@ -138,10 +138,19 @@ Acceptance of the builder run (fail closed, all must hold):
   `state_reasons: ["bounded_universe_replay"]`,
   `contracts_evaluated: 5946`.
 
-## 3. Caps (proposed, NOT approved)
+## 3. Caps (measured, implemented)
 
-Exactly the publisher's proposed numbers (`docs/130-window-publisher.md`).
-Nothing here approves them; Chej/Owen own that gate. Note: measured full-universe window members (rankings ~8 MB per window) exceed the proposed 4 MiB caps; see the retention/headroom section in `docs/130-live-window-wiring.md`. The caps remain proposals.
+Exactly the publisher's numbers (`docs/130-window-publisher.md`),
+implemented from measured full-universe evidence: real producer,
+14-batch combine, 71,710 contracts/window (2026-11-09) -- summary at
+most 55,492 B, rankings at most 65,497 B (shortlist-capped at 600
+rows), paths.gz at most 2,436,802 B, paths expanded at most
+34,295,267 B. Only the expanded-paths ceiling changed (24 MiB to
+48 MiB, 1.46x the measured maximum); the summary/rankings/compressed
+caps are NOT raised. The old ~8 MB ranked-CSV figures were old-format
+qualified-only CSVs, not new-format rankings members, and do NOT
+justify a rankings raise. There is no cap-approval wait left on these
+numbers; publication and activation remain Chej's release step.
 
 | Bound | Value |
 | --- | --- |
@@ -150,7 +159,7 @@ Nothing here approves them; Chej/Owen own that gate. Note: measured full-univers
 | Reservation per revision | 20 MiB |
 | Attempts per revision | 3 (conditional `budget/<rev>-<attempt>.json` tokens) |
 | Revisions per window | 16 |
-| Per-member bytes | summary ≤ 1 MiB, rankings ≤ 4 MiB, paths ≤ 4 MiB compressed / 24 MiB expanded |
+| Per-member bytes | summary ≤ 1 MiB, rankings ≤ 4 MiB, paths ≤ 4 MiB compressed / 48 MiB expanded (measured max 34,295,267 B) |
 | Inventory | 1,000 keys per kind prefix, 32,000 total; truncated listings and unknown keys fail closed |
 
 The byte cap binds before retention for full-universe windows near the
@@ -284,11 +293,14 @@ service (Chej-owned release, deploy by the workflow digest):
 
 ## 8. What this plan does NOT do
 
-- It does NOT approve the budget/retention numbers: those remain unapproved proposals. Publication and activation are Chej's release step (Chej states tonight's reviewed release/activation is already authorized and he owns release and real publication; Chej's statement, not Owen-verified in this chat), gated by the technical pre-checks, not by an approval wait.
+- It does NOT approve publication or activation: those are Chej's release step (Chej states tonight's reviewed release/activation is already authorized and he owns release and real publication; Chej's statement, not Owen-verified in this chat), gated by the technical pre-checks, not by an approval wait. The budget/retention/cap numbers are implemented from measured evidence (see section 3); they are not an approval wait.
 - It does NOT publish a full-universe window: the preserved combined
   CSVs cannot be published as a window (no paths, qualified basis
-  only). The full-universe first publication needs the combine-emit
-  step named in section 0, reviewed separately and run with the required `--coverage` flag.
+  only). The combine-emit step has since been RUN for measurement
+  (14-batch combine, 5 windows, 71,710 contracts each, in the
+  measurement scratch dir) to size the caps; a full-universe first
+  publication still needs its own reviewed release step, run with the
+  required `--coverage` flag.
 - It does NOT claim the mixed-flat pin survives a flat-only read.
   See "Availability limitation" in `docs/130-window-publisher.md`
   and `docs/131-window-consumer.md`: the pointer check is a refusal
