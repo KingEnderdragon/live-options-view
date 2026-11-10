@@ -52,7 +52,7 @@ class DXLinkFeed:
         self._ts_error: Optional[str] = None
         self._ts_counts = {"received": 0, "accepted": 0, "corrected": 0,
                            "cancelled": 0, "out_of_order": 0, "invalid": 0,
-                           "unmatched": 0, "invalidated": 0}
+                           "unmatched": 0, "invalidated": 0, "duplicate": 0}
         self._data_logged         = False
         # lifecycle telemetry
         self._connected           = False
@@ -461,6 +461,25 @@ class DXLinkFeed:
             return f"id:{trade_id}"
         return None
 
+    @staticmethod
+    def _is_later(observed_dt, sequence, stored_dt, stored_sequence):
+        """Strict (time, sequence) ordering for a NEW print.
+
+        dxFeed orders time and sales by the unique index composed of time and
+        sequence, so a later print in the same millisecond is still later. When
+        either side lacks a sequence, an equal-time event cannot be proven later
+        and is refused (fail closed) rather than guessed at.
+        """
+        if stored_dt is None:
+            return True
+        if observed_dt > stored_dt:
+            return True
+        if observed_dt < stored_dt:
+            return False
+        if sequence is None or stored_sequence is None:
+            return False
+        return sequence > stored_sequence
+
     def _ingest_time_and_sale(self, s, event):
         """One trade print with documented transaction semantics.
 
@@ -534,9 +553,13 @@ class DXLinkFeed:
                 self._ts_counts["invalidated"] += 1
                 return
             self._ts_counts["corrected"] += 1
-            self._store_print(s, price=price, observed=observed, size=size,
-                              trade_id=trade_id, index=index, key=key,
-                              sequence=sequence, extended=extended, valid=valid)
+            self._store_print(
+                s, price=price, observed=observed, size=size,
+                trade_id=trade_id if trade_id is not None else s.get("ts_trade_id"),
+                index=index if index is not None else s.get("ts_index"),
+                key=key,
+                sequence=sequence if sequence is not None else s.get("ts_sequence"),
+                extended=extended, valid=valid)
             return
 
         if (observed is None or price is None or price <= 0
@@ -544,19 +567,18 @@ class DXLinkFeed:
             self._ts_counts["invalid"] += 1
             return
 
-        # NEW: only a genuinely newer print may replace the latest.
+        # NEW: a duplicate identity is not a later print, and only a genuinely
+        # later (time, sequence) event may replace the latest.
         if stored_key is not None and key is not None and key == stored_key:
-            self._ts_counts["corrected"] += 1
-            self._store_print(s, price=price, observed=observed, size=size,
-                              trade_id=trade_id, index=index, key=key,
-                              sequence=sequence, extended=extended, valid=valid)
+            self._ts_counts["duplicate"] += 1
             return
         if stored_time is not None:
             try:
-                newer = datetime.fromisoformat(observed) > datetime.fromisoformat(stored_time)
+                stored_dt = datetime.fromisoformat(stored_time)
             except (TypeError, ValueError):
-                newer = True
-            if not newer:
+                stored_dt = None
+            if not self._is_later(datetime.fromisoformat(observed), sequence,
+                                  stored_dt, stored_sequence):
                 self._ts_counts["out_of_order"] += 1
                 return
         self._ts_counts["accepted"] += 1
