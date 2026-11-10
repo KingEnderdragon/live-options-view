@@ -4,6 +4,8 @@ import { handleSettle, settleAllBots, settlementPriceServer, validateSettleReque
 import { handleBotIndexReconcile, handleBotMetadata, handleBots } from './bots.js';
 import { handleLogin, handleLogout, handleMe, handleRegister } from './auth.js';
 import { handlePaperTrade } from './paper-trade.js';
+import { cutoverFenceActive, handleMigration } from './migrate.js';
+import { createStorage } from './storage.js';
 
 // Re-exported from backend/common.js so the Worker's public API (the 31
 // exports pinned by tests/worker_logic.test.js) stays on backend/index.js.
@@ -12,6 +14,11 @@ export { settleAllBots, settlementPriceServer, validateSettleRequest } from './s
 export { EXECUTION_RESERVATION_LEASE_MS, exactShareQuote, executionIntentMatches, executionPriceForOrder, executionReservationExpired, existingExecutionResponse, finalizeExecutionRequest, renewExecutionReservation, reserveExecutionRequest, validateTradeIntent } from './execution.js';
 export { BOT_INDEX_KEY, handleBotIndexReconcile, handleBotMetadata, handleBots, netPositions, repairLegacyBotMarker, updateBotIndex } from './bots.js';
 export { MAX_PASSWORD_LEN, MIN_PASSWORD_LEN, USERNAME_RE, constantTimeEqual, derivePasswordHash, randomSaltBase64 } from './auth.js';
+
+const MUTATING_API_PATHS = new Set([
+  '/api/register', '/api/login', '/api/logout', '/api/paper-trade', '/api/settle',
+  '/api/bot-metadata', '/api/bot-index/reconcile',
+]);
 
 export default {
   async fetch(request, env) {
@@ -36,6 +43,20 @@ export default {
       return proxied;
     }
 
+    // Issue #208 cutover fence. While the migration is copying KV into D1 the
+    // additive revision still owns the writes, so the fence stops them in one
+    // place: every mutating route below answers 503 until the operator disarms
+    // it after the switch revision is live. Reads keep working throughout.
+    if (request.method === 'POST' && MUTATING_API_PATHS.has(url.pathname) &&
+        await cutoverFenceActive(env)) {
+      return new Response(JSON.stringify({
+        error: 'Cutover in progress; writes are paused. Retry in a moment.',
+      }), {
+        status: 503,
+        headers: { 'Content-Type': 'application/json', 'Retry-After': '30', 'Cache-Control': 'no-store' },
+      });
+    }
+
     if (request.method === 'POST' && url.pathname === '/api/register') {
       return handleRegister(request, env);
     }
@@ -56,9 +77,15 @@ export default {
       return handleBotMetadata(request, env);
     }
 
-    if (request.method === 'POST' && url.pathname === '/api/bot-index/reconcile') {
-      return handleBotIndexReconcile(request, env);
+    // Operator-only, issue #208 cutover route. Present only when
+    // MIGRATION_TOKEN is configured; handleMigration answers 404 otherwise, so
+    // an unconfigured deployment does not advertise it.
+    if (request.method === 'POST' && url.pathname === '/api/admin/migrate') {
+      return handleMigration(request, env, createStorage(env));
     }
+
+    if (request.method === 'POST' && url.pathname === '/api/bot-index/reconcile') {
+      return handleBotIndexReconcile(request, env);    }
 
     if (request.method === 'GET' && url.pathname === '/api/me') {
       return handleMe(request, env);
@@ -99,6 +126,12 @@ export default {
   // positions just piled up unsettled (issue #42). This sweeps every bot
   // account server-side on a schedule instead of relying on a viewer.
   async scheduled(event, env, ctx) {
+    // A settlement sweep during the cutover window would be a second writer
+    // racing the copy; skip it, loudly, and let the next cron pick it up.
+    if (await cutoverFenceActive(env)) {
+      console.log(JSON.stringify({ event: 'settlement_skipped_cutover_fence' }));
+      return;
+    }
     ctx.waitUntil(settleAllBots(env));
   },
 }
