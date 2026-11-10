@@ -85,6 +85,14 @@ MAX_PATHS_EXPANDED_BYTES = 24 * 1024 * 1024
 MEMBER_MAX_BYTES = {"summary.json": MAX_SUMMARY_BYTES, "rankings.csv": MAX_RANKINGS_BYTES,
                     "paths.csv.gz": MAX_PATHS_BYTES}
 WINDOW_MEMBERS = ("summary.json", "rankings.csv", "paths.csv.gz")
+# Flat consumer keys are published in this order, summary LAST: the summary
+# is the commit record for the set, so an interrupted publish leaves the old
+# summary (whose counts still describe the old rankings) rather than a new
+# summary over old rankings. The revision members are immutable, so their
+# order does not matter. (The consumer's pointer check is the load-bearing
+# guard against a mixed revision; this order is defence in depth for
+# readers that do not check the pointer.)
+FLAT_PUBLISH_ORDER = ("paths.csv.gz", "rankings.csv", "summary.json")
 
 WINDOW_ID = {
     "weekly_cheapest": re.compile(r"weekly-(\d{4})-W(\d{2})-cheapest\Z"),
@@ -765,6 +773,52 @@ def _is_token_key(key: str) -> bool:
             and re.fullmatch(r"rev_[0-9a-f]{64}-[123]\.json", parts[6]) is not None)
 
 
+_TOKEN_REV = re.compile(r"rev_([0-9a-f]{64})-[123]\.json\Z")
+
+
+def _window_revisions(window_objects: list[dict[str, Any]], prefix: str) -> set[str]:
+    """Distinct revisions for one window: immutable rev dirs plus revisions
+    with a pending budget token. A token counts because its attempt will
+    create at most one revision; retries of the same revision share one
+    entry, so a failed attempt does not consume an extra slot for its own
+    revision -- but a failed attempt's revision does occupy a slot until
+    retention cleanup, which is the fail-closed side of this bound."""
+    revisions: set[str] = set()
+    for obj in window_objects:
+        rel = obj["key"][len(prefix) + 1:]
+        first, _, rest = rel.partition("/")
+        match = REV_DIR.match(first)
+        if match:
+            revisions.add(match.group(1))
+        elif first == "budget":
+            token = _TOKEN_REV.match(rest)
+            if token:
+                revisions.add(token.group(1))
+    return revisions
+
+
+def _verify_reservation(backend: StorageBackend, kind: str, window_id: str, revision: str,
+                        budget: WindowBudget) -> None:
+    """Re-read the inventory after reserving: another publisher may have
+    reserved or published while this one was deciding, so the budget and
+    revision caps are checked against the inventory as it stands now, with
+    this reservation counted. Raises ValueError when a cap is exceeded;
+    the caller releases the token it just created. This is what makes the
+    global cap hold under a race: the decision is no longer based on a
+    possibly stale inventory read. It assumes the backend's listing
+    reflects a just-created token (true for the local backend and for
+    R2/S3 strong read-after-write consistency on list)."""
+    objects = _inventory(backend, budget)
+    tokens = [o for o in objects if _is_token_key(o["key"])]
+    charged = sum(o["size"] for o in objects) + len(tokens) * budget.reservation_bytes
+    if charged > budget.max_bytes:
+        raise ValueError("window remote storage budget exhausted")
+    prefix = window_prefix(kind, window_id)
+    window_objects = [o for o in objects if o["key"].startswith(prefix + "/")]
+    if len(_window_revisions(window_objects, prefix)) > budget.max_revisions_per_window:
+        raise ValueError("window revision budget exhausted")
+
+
 def clean_and_reserve(backend: StorageBackend, kind: str, window_id: str, revision: str,
                       budget: WindowBudget, now: datetime, dry_run: bool = False) -> dict[str, Any]:
     """Delete expired windows, charge the budget, and reserve one attempt.
@@ -789,9 +843,7 @@ def clean_and_reserve(backend: StorageBackend, kind: str, window_id: str, revisi
     if charged + budget.reservation_bytes > budget.max_bytes:
         raise ValueError("window remote storage budget exhausted")
     window_objects = [o for o in objects if o["key"].startswith(prefix + "/")]
-    revisions = {m.group(1) for o in window_objects
-                 for m in [REV_DIR.match(o["key"][len(prefix) + 1:].split("/", 1)[0])]
-                 if m}
+    revisions = _window_revisions(window_objects, prefix)
     if revision.removeprefix("rev_") not in revisions and len(revisions) >= budget.max_revisions_per_window:
         raise ValueError("window revision budget exhausted")
     if dry_run:
@@ -805,6 +857,14 @@ def clean_and_reserve(backend: StorageBackend, kind: str, window_id: str, revisi
                             "reserved_bytes": budget.reservation_bytes},
                            sort_keys=True) + "\n").encode()
         if backend.put_if_absent(key, body, "application/json"):
+            try:
+                _verify_reservation(backend, kind, window_id, revision, budget)
+            except ValueError:
+                try:
+                    backend.delete(key)
+                except Exception:
+                    pass
+                raise
             return {"reservation": key, "attempt": attempt, "retention_days": budget.retention_days,
                     "charged_bytes_before": charged, "max_bytes": budget.max_bytes,
                     "expired_objects": len(expired)}
@@ -892,7 +952,7 @@ def publish_window(source_root: Path, kind: str, window_id: str, backend: Storag
             key = f"{prefix}/{validated.revision}/{name}"
             backend.put(key, data, _content_type(name))
             _verify_readback(backend, key, validated.member_sha256[name])
-        for name in WINDOW_MEMBERS:
+        for name in FLAT_PUBLISH_ORDER:
             key = f"{prefix}/{name}"
             backend.put(key, validated.member_bytes[name], _content_type(name))
             _verify_readback(backend, key, validated.member_sha256[name])

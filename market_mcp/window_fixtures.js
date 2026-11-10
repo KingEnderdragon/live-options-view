@@ -177,6 +177,30 @@ function buildWindow({ kind, window_id, sessions, entry_sessions, exit_session, 
   return { prefix, summary, rankingsCsv, pathsCsv, counts };
 }
 
+// The publisher writes one latest.json pointer per window (see
+// market_data/options_scanner/windows_publish.py): schema_version 1,
+// revision rev_<sha256(summary.json)>, member digests for all three files.
+// Fixture windows carry a matching pointer so the consumer's revision-pin
+// check is exercised on the happy path.
+function pointerFor(w, summaryText, rankingsText, pathsGz) {
+  return { schema_version: 1, publisher: 'windows_publish/1', policy: POLICY.version,
+    kind: w.summary.kind, window_id: w.summary.window_id, state: w.summary.state,
+    state_reasons: w.summary.state_reasons,
+    revision: 'rev_' + hash(summaryText),
+    members: { 'summary.json': hash(summaryText), 'rankings.csv': hash(rankingsText),
+      'paths.csv.gz': hash(pathsGz) },
+    generated_at: w.summary.generated_at, published_at: w.summary.generated_at };
+}
+function addPointer(files, w) {
+  const summaryText = JSON.stringify(w.summary);
+  const pathsGz = gzipSync(w.pathsCsv);
+  files[w.prefix + 'summary.json'] = summaryText;
+  files[w.prefix + 'rankings.csv'] = w.rankingsCsv;
+  files[w.prefix + 'paths.csv.gz'] = pathsGz;
+  files[w.prefix + 'latest.json'] = JSON.stringify(pointerFor(w, summaryText, w.rankingsCsv, pathsGz));
+  return 'rev_' + hash(summaryText);
+}
+
 function windowFixtures() {
   const files = {};
   const json = (key, value) => { files[key] = JSON.stringify(value); };
@@ -216,10 +240,8 @@ function windowFixtures() {
         exec: excluded(['expires_before_exit']),
         qualified: excluded(['expires_before_exit']) } },
     ] });
-  json(w1.prefix + 'summary.json', w1.summary);
-  files[w1.prefix + 'rankings.csv'] = w1.rankingsCsv;
-  files[w1.prefix + 'paths.csv.gz'] = gzipSync(w1.pathsCsv);
-  windows.overnightFinal = { kind: 'overnight', window_id: 'overnight-2026-10-05_2026-10-06', prefix: w1.prefix, summary: w1.summary, counts: w1.counts };
+  const rev1 = addPointer(files, w1);
+  windows.overnightFinal = { kind: 'overnight', window_id: 'overnight-2026-10-05_2026-10-06', prefix: w1.prefix, summary: w1.summary, counts: w1.counts, revision: rev1 };
 
   // Sessions_3 Oct 5->7, partial with the real replay's bounded reason.
   const w2 = buildWindow({ kind: 'sessions_3', window_id: 'sessions3-2026-10-05_2026-10-07',
@@ -246,10 +268,8 @@ function windowFixtures() {
         exec: leg(1.10, 1.15, 1791229400000, 1791402300000, 0.90, 1.10, 1.15, 1.17),
         qualified: excluded(['entry_spread']) } },
     ] });
-  json(w2.prefix + 'summary.json', w2.summary);
-  files[w2.prefix + 'rankings.csv'] = w2.rankingsCsv;
-  files[w2.prefix + 'paths.csv.gz'] = gzipSync(w2.pathsCsv);
-  windows.sessions3Partial = { kind: 'sessions_3', window_id: 'sessions3-2026-10-05_2026-10-07', prefix: w2.prefix, summary: w2.summary, counts: w2.counts };
+  const rev2 = addPointer(files, w2);
+  windows.sessions3Partial = { kind: 'sessions_3', window_id: 'sessions3-2026-10-05_2026-10-07', prefix: w2.prefix, summary: w2.summary, counts: w2.counts, revision: rev2 };
 
   // Overnight Oct 7->8, partial: Oct 8's daily assessment is partial.
   const w3 = buildWindow({ kind: 'overnight', window_id: 'overnight-2026-10-07_2026-10-08',
@@ -272,10 +292,8 @@ function windowFixtures() {
         exec: leg(1.10, 1.12, 1791402300000, 1791466700000, 0.90, 1.10, 1.12, 1.14),
         qualified: excluded(['entry_spread']) } },
     ] });
-  json(w3.prefix + 'summary.json', w3.summary);
-  files[w3.prefix + 'rankings.csv'] = w3.rankingsCsv;
-  files[w3.prefix + 'paths.csv.gz'] = gzipSync(w3.pathsCsv);
-  windows.overnightPartial = { kind: 'overnight', window_id: 'overnight-2026-10-07_2026-10-08', prefix: w3.prefix, summary: w3.summary, counts: w3.counts };
+  const rev3 = addPointer(files, w3);
+  windows.overnightPartial = { kind: 'overnight', window_id: 'overnight-2026-10-07_2026-10-08', prefix: w3.prefix, summary: w3.summary, counts: w3.counts, revision: rev3 };
 
   // Weekly W41 cheapest, in_progress: Oct 8 has no final daily summary.
   const w4 = buildWindow({ kind: 'weekly_cheapest', window_id: 'weekly-2026-W41-cheapest',
@@ -295,10 +313,8 @@ function windowFixtures() {
         exec: leg(0.50, 0.48, 1791229300000, 1791575100000, 0.48, 0.50, 0.48, 0.50),
         qualified: leg(0.50, 0.45, 1791229300000, 1791575100000, 0.48, 0.50, 0.45, 0.47) } },
     ] });
-  json(w4.prefix + 'summary.json', w4.summary);
-  files[w4.prefix + 'rankings.csv'] = w4.rankingsCsv;
-  files[w4.prefix + 'paths.csv.gz'] = gzipSync(w4.pathsCsv);
-  windows.weeklyInProgress = { kind: 'weekly_cheapest', window_id: 'weekly-2026-W41-cheapest', prefix: w4.prefix, summary: w4.summary, counts: w4.counts };
+  const rev4 = addPointer(files, w4);
+  windows.weeklyInProgress = { kind: 'weekly_cheapest', window_id: 'weekly-2026-W41-cheapest', prefix: w4.prefix, summary: w4.summary, counts: w4.counts, revision: rev4 };
 
   // Unsupported producer policy: same v1 key path, summary claims v2.
   const unsupported = { schema_version: 1, kind: 'overnight', window_id: 'overnight-2026-10-06_2026-10-07',

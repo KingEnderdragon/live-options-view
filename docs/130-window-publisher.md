@@ -10,9 +10,15 @@ Chej owns review/release.
   `oa203/windows/` window against the consumer's exact contract
   (`market_mcp/consumer.js` `windowSummary` + rankings + paths-detail
   checks) and publishes it to a pluggable storage backend.
-- `tests/test_oa203_windows_publish.py`: 20 tests over a fake in-memory
+- `tests/test_oa203_windows_publish.py`: 25 tests over a fake in-memory
   backend and a local-filesystem backend. No network, no credentials, no
   live R2 in any test.
+- `tests/test_oa203_windows_parity.py` + `market_mcp/parity.test.js`:
+  producer-publisher-consumer parity for all 6 kinds x 3 bases x
+  final/partial (see `docs/131-window-consumer.md`).
+- `tests/test_oa203_windows_concurrency.py`: 7 tests proving the
+  same-window and global-budget races below with deterministic
+  one-shot interleaving hooks (no threads, no sleeps).
 - The real R2 backend reuses the scanner's existing upload client
   (`market_data.tradier.probe` via `market_data.options_scanner._probe`:
   `r2_client()` + `put_bytes_verified()`); no new credentials, host, or
@@ -34,22 +40,33 @@ oa203/windows/oa203-windows-v1/<kind>/<window_id>/
   budget/<rev>-<attempt>.json   # conditional reservation tokens (1..3)
 ```
 
-The consumer reads only the three flat keys
-(`market_mcp/source.js` allowlist); `rev_*/`, `latest.json`,
-`latest-attempt.json` and `budget/` are never queried by the consumer.
-The revision copy is immutable: a corrected republication writes a new
-`rev_<sha>/` and moves the pointer, so the old revision stays pinned and
-auditable. The flat keys are what the consumer reads, so they are
-overwritten on republication; the consumer's before/after digest check
-detects that rebuild and asks for a fresh query.
+The consumer reads the three flat keys plus `latest.json`
+(`market_mcp/source.js` allowlist); `rev_*/`, `latest-attempt.json`
+and `budget/` are never queried by the consumer. The pointer is what
+pins a consumer read to one revision: after its before/after digest
+check the consumer verifies the flat summary/rankings digests against
+the pointer's member digests and refuses a mismatch, and detail pins
+the paths bytes to the pointer the same way. The revision copy is
+immutable: a corrected republication writes a new `rev_<sha>/` and
+moves the pointer, so the old revision stays pinned and auditable.
+The flat keys are what the consumer reads, so they are overwritten on
+republication. The revision itself is `rev_<sha256(summary.json)>`:
+two emits with identical summaries but different rankings/paths
+collide on revision, so the pointer's member digests are the real
+distinguisher -- a retry with the same revision but different member
+digests fails closed (tampered pointer), and the consumer refuses any
+resulting mix.
 
 Upload order: revision members → flat members (paths, rankings, summary
-last, so an interruption leaves either the old complete window or a new
-one the consumer rejects on its digest check, never a mixed ranking) →
-`latest.json` pointer last → `latest-attempt.json` ledger. Every upload
-is verified by a full readback (GET + SHA-256), not just the uploader's
-HEAD length check. A readback mismatch fails closed with no pointer
-written; already-uploaded revision members are immutable and harmless.
+last, so an interrupted publish leaves the old summary -- whose counts
+still describe the old rankings -- rather than a new summary over old
+rankings) → `latest.json` pointer last → `latest-attempt.json` ledger.
+Every upload is verified by a full readback (GET + SHA-256), not just
+the uploader's HEAD length check. A readback mismatch fails closed with
+no pointer written; already-uploaded revision members are immutable
+and harmless. Note the flat order is defence in depth only: it cannot
+by itself prevent a mixed revision (see Concurrency below); the
+consumer's pointer check is the load-bearing guard.
 
 ## States (decision, recorded explicitly)
 
@@ -110,6 +127,37 @@ uploads nothing at all, including no ledger entry.
   after a successful publication is reported in the result, not treated
   as a failed publication.
 
+## Concurrency (proven offline, deterministic interleavings)
+
+- **Same window, same revision: safe.** Two publishers overlap, reserve
+  different attempt tokens, write identical bytes, and the pointer is
+  identical. A retry of the same window is `already_published`.
+- **Same window, different revisions: a mixed flat tree CAN be produced.**
+  If publisher B completes fully between A's member writes and A's
+  pointer write, the flat members end up B's revision while the pointer
+  claims A's. The publisher cannot detect this; the consumer's pointer
+  check refuses it (`source_changed`, never served). A crashed
+  publisher's late flat-paths write can likewise leave a paths-only
+  mix (summary/rankings match the pointer, paths do not); the detail
+  paths-pin refuses that one.
+- **Global budget race: fixed by reserve-then-verify.** The old
+  check-then-reserve let two publishers racing a nearly-full budget
+  both pass on a stale inventory read and over-commit. `clean_and_reserve`
+  now reserves the attempt token first, then re-reads the inventory and
+  checks the global byte cap (and the revision cap) with the reservation
+  counted; on failure it deletes the token it just created and raises,
+  so at most one reservation lands past the cap. This assumes the
+  backend's listing reflects a just-created token (true for the local
+  backend and for R2/S3 strong read-after-write consistency on list).
+- **Revision cap counts pending tokens.** Distinct revisions are rev
+  dirs plus revisions with a budget token, so a racing publisher cannot
+  slip a 17th distinct revision past the 16-revision cap. Retries of
+  the same revision share one entry; a failed attempt's revision does
+  occupy a slot until retention cleanup (fail-closed).
+- **Retention deletion race: benign.** Two publishers deleting the same
+  expired objects is idempotent, and deletion is re-verified by
+  re-listing.
+
 ## Retention / budget proposal (not a live approval)
 
 Mirrors `active_budget.py`'s shape with numbers sized for windows
@@ -138,11 +186,15 @@ policy-start floor is needed (unlike the scanner prefix).
    budget/retention numbers above.
 2. **OA203-style pre-checks** before any live R2 write: regression tests
    green (`tests/test_oa203_windows_publish.py`,
+   `tests/test_oa203_windows_parity.py`,
+   `tests/test_oa203_windows_concurrency.py`,
    `tests/test_oa203_windows.py`, `tests/test_oa203_windows_replay.py`,
    `node --test market_mcp/*.test.js`); a bounded builder for the
    publish run; an R2 conditional reservation, readback verification,
-   and delete of a trial window; a verified deployed revision; and a
-   saved activation flag naming the first window to publish.
+   and delete of a trial window (including a two-publisher race against
+   the trial budget, to verify the listing reflects a just-created
+   token); a verified deployed revision; and a saved activation flag
+   naming the first window to publish.
 3. **Live R2 verification**: published keys readable at the public
    origin; `window_rankings` for a real window (all three bases) plus
    pinned `result_detail` from an attached client once market_mcp is

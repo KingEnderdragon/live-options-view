@@ -209,7 +209,9 @@ test('window paging, bounds and filters follow producer rank', async () => {
   const puts = await f.consumer.call('window_rankings', { ...OVERNIGHT, basis: 'qualified', type: 'put' });
   assert.equal(puts.rows.length, 1);
   assert.equal(puts.rows[0].symbol, 'NBIS261009P00155000');
-  assert.ok(f.calls.length <= LIMITS.requests * 2);
+  // Five paged calls; each reads summary, rankings, both re-reads and the
+  // pointer: 5 x 5 artifact reads, each call inside the per-query limit.
+  assert.ok(f.calls.length <= 25);
 });
 
 test('window detail rejects future entry evidence; later windows do not change it', async () => {
@@ -236,6 +238,48 @@ test('window detail rejects future entry evidence; later windows do not change i
   const after = await g.consumer.call('window_rankings', { ...OVERNIGHT, basis: 'qualified' });
   assert.equal(stripRefs(after.rows), beforeRows);
   assert.equal(after.actual.summary_sha256, before.actual.summary_sha256);
+});
+
+test('window mixed-revision flat members are refused against the pointer', async () => {
+  const f = setup();
+  const prefix = f.windows.overnightFinal.prefix;
+  // A second revision with the same shape (same counts/shortlist) but
+  // different values: flat summary rev1 + flat rankings rev2. Without the
+  // pointer check the consumer serves the rev2 rows under the rev1 summary.
+  const key = prefix + 'rankings.csv';
+  f.files[key] = f.files[key].split('\n').map(l =>
+    l.startsWith('qualified,1,') ? l.replace(',2.2,0.15,', ',2,0.16,') : l).join('\n');
+  const out = await f.consumer.call('window_rankings', { ...OVERNIGHT, basis: 'qualified' });
+  assert.equal(out.status, 'failed');
+  assert.equal(out.errors[0].code, 'source_changed');
+  assert.equal(out.rows, undefined);
+});
+
+test('window without a pointer is served unverified with a warning', async () => {
+  const f = setup();
+  delete f.files[f.windows.overnightFinal.prefix + 'latest.json'];
+  const out = await f.consumer.call('window_rankings', { ...OVERNIGHT, basis: 'qualified' });
+  assert.equal(out.status, 'available');
+  assert.equal(out.rows[0].symbol, 'XLU261009C00040500');
+  assert.ok(out.warnings.some(w => w.includes('not revision-pinned')));
+});
+
+test('window detail pins paths to the published pointer', async () => {
+  const f = setup();
+  const first = await f.consumer.call('window_rankings', { ...OVERNIGHT, basis: 'qualified', limit: 1 });
+  const detail = await f.consumer.call('result_detail', { reference: first.rows[0].detail_reference });
+  assert.equal(detail.status, 'available');
+  assert.equal(detail.paths.verified, 'matches_published_pointer');
+  // Same paths text plus a trailing blank line, re-gzipped: the pinned row
+  // still matches, but the bytes are no longer the published revision's.
+  const g = setup();
+  const gFirst = await g.consumer.call('window_rankings', { ...OVERNIGHT, basis: 'qualified', limit: 1 });
+  const gKey = g.windows.overnightFinal.prefix + 'paths.csv.gz';
+  g.files[gKey] = gzipSync(gunzipSync(g.files[gKey]).toString() + '\n');
+  const changed = await g.consumer.call('result_detail', { reference: gFirst.rows[0].detail_reference });
+  assert.equal(changed.status, 'failed');
+  assert.equal(changed.errors[0].code, 'source_changed');
+  assert.equal(changed.path, undefined);
 });
 
 test('window discovery advertises the fixed contract without an index', async () => {
@@ -278,6 +322,7 @@ test('window allowlist admits only strict window keys', async () => {
   assert.doesNotThrow(() => permitted(base + 'summary.json'));
   assert.doesNotThrow(() => permitted(base + 'rankings.csv'));
   assert.doesNotThrow(() => permitted(base + 'paths.csv.gz'));
+  assert.doesNotThrow(() => permitted(base + 'latest.json'));
   assert.doesNotThrow(() => permitted('oa203/windows/oa203-windows-v1/weekly_cheapest/weekly-2026-W41-cheapest/summary.json'));
   assert.doesNotThrow(() => permitted('oa203/windows/oa203-windows-v1/sessions_3/sessions3-2026-10-05_2026-10-07/paths.csv.gz'));
   for (const key of [

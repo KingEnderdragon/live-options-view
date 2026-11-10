@@ -792,8 +792,24 @@ class Consumer {
     const baseline=q.evidence.slice(-2).map(e=>e.retrieved_sha256);
     await q.get(prefix+'summary.json');await q.get(prefix+'rankings.csv');
     check(q.evidence.slice(-2).every((e,i)=>e.retrieved_sha256===baseline[i]),'Selected window changed during rankings read; retry this window.','source_changed');
+    // The flat keys are written one at a time, so a concurrent republish
+    // can leave a stable mixed revision on disk (new summary, old rankings
+    // or vice versa) that the before/after check above cannot see: it only
+    // detects changes DURING this read. The publisher writes latest.json
+    // last with the member digests of the revision it just published, so a
+    // present pointer pins this read to one revision; a mismatch is a
+    // refusal, never a served mix. A window with no pointer keeps the old
+    // behaviour (served, with a warning): the publisher always writes one,
+    // so a missing pointer means a legacy or hand-placed window.
+    const pointer=await q.optionalJson(prefix+'latest.json');
+    if(pointer.value) {
+      check(object(pointer.value) && pointer.value.schema_version===1 && pointer.value.kind===a.kind &&
+        pointer.value.window_id===a.window_id && pointer.value.state===p.state && object(pointer.value.members) &&
+        pointer.value.members['summary.json']===baseline[0] && pointer.value.members['rankings.csv']===baseline[1],
+        'Published window pointer disagrees with the flat summary/rankings just read; the window is being republished.','source_changed');
+    } else out.warnings.push('No published window pointer for this window; the flat members are not revision-pinned.');
     out.actual.rankings_sha256=q.evidence.at(-1).retrieved_sha256;
-    out.warnings.push('Matching before/after summary/rankings digests detect observed rebuilds; no atomic producer window revision is available.');
+    out.warnings.push('Matching before/after summary/rankings digests detect observed rebuilds; the published pointer pins the read to one revision when present.');
     const filtered=rows.filter(r=>r.basis===basis && (!a.underlying||r.underlying===a.underlying) && (!a.type||r.option_type===a.type));
     filtered.sort((x,y)=>Number(x.rank)-Number(y.rank)); // producer rank, never re-score
     const paged=slice(filtered,limit,offset); out.pagination=paged.pagination;
@@ -842,6 +858,7 @@ class Consumer {
       check(q.evidence.at(-1).retrieved_sha256===v.digests.summary,'Pinned window summary changed.','source_changed');
       await q.get(v.prefix+v.board);
       check(q.evidence.at(-1).retrieved_sha256===v.digests.rankings,'Pinned window rankings changed.','source_changed');
+      const pointer=await q.optionalJson(v.prefix+'latest.json');
       out.summary=summary;out.coverage=summary.counts;out.window_state={state:summary.state,reasons:summary.state_reasons};
       out.producer_times={observation:null,acquisition_start:null,acquisition_end:null,publication:null,generated_at:summary.generated_at??null};
       out.freshness={status:'historical',basis:'exact pinned window summary and rankings'};
@@ -888,8 +905,18 @@ class Consumer {
             Math.abs(Number(pathsRow[`${v.basis}_pct`])-(Number(pathsRow[`${v.basis}_exit`])/Number(pathsRow[`${v.basis}_entry`])-1))<2e-6 &&
             Math.abs(Number(pathsRow[`${v.basis}_abs_change_per_contract`])-(Number(pathsRow[`${v.basis}_exit`])-Number(pathsRow[`${v.basis}_entry`]))*Number(pathsRow.contract_size))<1e-3,
             'Window path arithmetic disagrees with its own endpoints.');
-          pathsEvidence.checksum_verification='matches_pinned_ranking_row';
-          out.paths={digest:pathsEvidence.retrieved_sha256,verified:'matches_pinned_ranking_row'};
+          if(pointer.value) {
+            // The pointer pins the paths bytes to the published revision:
+            // a paths file from another revision is refused even when its
+            // row still matches the pinned ranking row.
+            check(object(pointer.value.members) && pointer.value.members['paths.csv.gz']===pathsEvidence.retrieved_sha256,
+              'Pinned window paths digest disagrees with the published pointer.','source_changed');
+            pathsEvidence.checksum_verification='matches_published_pointer';
+            out.paths={digest:pathsEvidence.retrieved_sha256,verified:'matches_published_pointer'};
+          } else {
+            pathsEvidence.checksum_verification='matches_pinned_ranking_row';
+            out.paths={digest:pathsEvidence.retrieved_sha256,verified:'matches_pinned_ranking_row'};
+          }
         }
       } catch(e) {
         if(e.code==='missing_artifact') {
