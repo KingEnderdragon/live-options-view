@@ -156,6 +156,38 @@ revoked session cannot be resurrected because an earlier pass remembered it.
 
 ## Bounded, resumable phases
 
+Workers CPU is the other per-invocation budget: 10 ms on the Free plan. Verify
+died in production with Cloudflare error 1102 against 38 accounts, 1,484 sessions
+and 32 markers, at `max_records` 20, 5 and 1. An earlier version of this record
+attributed that to the source-snapshot checkpoint growing past 200 KB. That
+attribution was wrong and is corrected here: production `phase:verify` was `NULL`
+after the failed calls, so the phase never persisted a first checkpoint and the
+large later-state checkpoint cannot explain a first-call failure. What the size
+data does show is that the first account alone is 333,634 bytes and the largest
+is 1,139,632 (38 accounts totalling 7,457,764 bytes), so the first verify record
+forces two canonical-JSON digests of a third of a megabyte.
+
+The plausible mechanism for the first-call failure is therefore per-record
+hashing cost, and the byte-equal fast path addresses it: when the stored D1 record
+is byte-identical to the legacy raw value (the copy preserves it verbatim), both
+canonical digests are skipped because equal bytes already prove equal content. The
+controller measured this on a synthetic 352,473-byte, 576-trade record: 14.49 ms
+wall on the old path versus 6.00 ms on the reviewed repair, with zero mismatch.
+Local CPU granularity is coarse, so that is not a provider pass; a real provider
+readback remains decisive.
+
+The source snapshot is still a constant-size SHA-256 hash chain over the scan —
+one link per key/value pair, 64 hex characters plus a count. That is scalability
+hardening for later state, not the proven cause of the first 1102: on the same
+shape it reduces a completion-time checkpoint from 206,491 bytes to 654 bytes with
+the same 79 bounded calls. Both changes are kept.
+
+The chain commits to the same information the entry list did (kind, identity and
+raw value or "absent"). Scan order is deterministic — KV lists lexicographically
+within a prefix and the phases walk users, then sessions, then markers — so
+verify, stabilize and postcheck compute the same chain for the same source. A
+source that only changed order would fail closed rather than be accepted.
+
 KV's Free plan also bills `list` requests separately — 1,000 per day, a much
 smaller allowance than the read/write budgets — and the copy walks a page one
 record at a time. A naive adapter therefore issues one `list` per record, which a
@@ -313,6 +345,11 @@ Each item is checkable without exposing an account, a record or a secret.
    is a separate decision.
 
 ## Evidence
+
+`tests/verify_bounded.test.mjs` (4 checks): a production-shaped source keeps the
+verify checkpoint under 4 KB, the digest is deterministic across a restart,
+verify and stabilize agree through finalize, and a late legacy write still fails
+finalize after the chain change.
 
 `tests/kv_page_cache.test.mjs` (5 checks): one list for repeated reads of the
 same page, prefix and token isolation, a new adapter seeing a fresh listing while
