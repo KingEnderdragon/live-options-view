@@ -53,6 +53,11 @@ import market_data.options_scanner.windows_combine as combine
 import market_data.options_scanner.windows_outputs as outputs
 import market_data.options_scanner.windows_publish as pub
 import market_data.options_scanner.windows_replay as replay
+from market_data.options_scanner.archive_cache import (
+    archive_cache_audit_enabled,
+    archive_cache_destructive_enabled,
+    run_archive_cache_audit,
+)
 from market_data.options_scanner.returns import ContractInfo, Observation
 
 MAX_UNDERLYINGS = 50
@@ -289,12 +294,31 @@ def run_after_finalize(spool_dir: Path | str, day, universe: Mapping[str, Any], 
         except Exception as exc:  # noqa: BLE001 - recorded, never masks a publish
             older = {"error": f"{type(exc).__name__}: {exc}"}
         cleanup["older_prune"] = older
+        # Bounded archive-cache audit, after successful window work.
+        # Runs only when OA203_ARCHIVE_CACHE_AUDIT_ENABLED=1 (Chej, OFF
+        # by default); dry-run report always, actual pruning only when
+        # OA203_ARCHIVE_CACHE_PRUNE_ENABLED=1 is also set. A lifecycle
+        # failure is isolated: it is recorded in the return and the
+        # persisted report, and never unfinalizes the day, unpublishes
+        # windows, or fails the finalize -- publication stands.
+        lifecycle: dict[str, Any] | None = None
+        if archive_cache_audit_enabled():
+            try:
+                lifecycle = run_archive_cache_audit(
+                    spool, effective_backend, day,
+                    dry_run=not archive_cache_destructive_enabled())
+            except Exception as exc:  # noqa: BLE001 - isolated, never fails finalize
+                lifecycle = {"enabled": True, "day": day.isoformat(), "dry_run": True,
+                             "decision": "error: audit failed",
+                             "errors": [{"day": day.isoformat(),
+                                         "errors": [f"{type(exc).__name__}: {exc}"]}],
+                             "report_path": None}
         return {"enabled": True, "cycle": cycle, "day": day.isoformat(), "days": [d.name for d in dirs],
                 "underlyings": sorted(unders), "emit_root": str(emit),
                 "emit_location": emit_location,
                 "scratch_root": (str(scratch_root) if scratch_root is not None else None),
                 "manifest": manifest, "build": report, "publish": results,
-                "cleanup": cleanup}
+                "cleanup": cleanup, "lifecycle": lifecycle}
     finally:
         # Scratch is removed on success AND on failure; a cleanup
         # failure must never mask the publish/build outcome.

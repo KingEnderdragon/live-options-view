@@ -198,8 +198,11 @@ was found. The scanner is a scheduled/build-only service.
   scanner's own archive mirror, not a windows problem -- that is a
   Chej/Owen capacity decision (volume resize is a paid service change,
   out of scope; deleting source archives is forbidden). A bounded
-  local cache lifecycle for the mirror is separate follow-up work,
-  not part of this change.
+  local cache lifecycle for the mirror is implemented below
+  (archive_cache.py): older local copies are pruned only after fresh
+  exact remote digest verification, newest 10 finalized sessions
+  retained, OFF by default behind OA203_ARCHIVE_CACHE_PRUNE_ENABLED=1
+  (Chej).
 
 ### The retention policy (local output only)
 
@@ -285,10 +288,160 @@ was found. The scanner is a scheduled/build-only service.
 - Spool-missing behaviour is already fail-closed and is now tested:
   an empty spool raises `ValueError` (`no finalized day archives`), a
   missing spool directory raises `FileNotFoundError`; a torn or
-  non-final day is still refused by the loader. No spool backup,
-  replication, or R2 read-back of day archives exists.
+  non-final day is still refused by the loader. A pruned day is
+  restored from R2 by `restore_day` (archive_cache.py, below),
+  digest-verified against the remote journal; there is no spool
+  backup or replication beyond the R2 mirror.
 
-## Remaining implementation (live-builder work done; release gates remain) (live-builder work done; release gates remain)
+### Bounded local archive-cache lifecycle (archive_cache.py)
+
+- The local mirror is bounded without deleting any remote evidence:
+  `prune_archive_cache(spool, backend)` retains the newest 10 finalized
+  sessions (the builder's lookback; `KEEP_FINALIZED_SESSIONS = 10`,
+  pinned equal to `windows_live.MAX_SESSIONS` by test) plus every
+  unfinalized, current or recovery-marked day, and prunes only older
+  redundant local copies.
+- Fresh exact verification at prune time, per candidate day
+  (`verify_day_remote`): every local artifact's SHA-256 must match both
+  the local journal and a fresh GET of the remote object; the remote
+  journal is fetched and checked for contradictions with the local
+  digests (a missing entry is noted, not blocking -- the remote journal
+  is legitimately stale for `windows_live.json`, pushed after the
+  journal). In-progress snapshots verify the same way (GET + SHA-256),
+  except the local-only upload-attempts ledger, corroborated by exact
+  set match against the remote budget tokens, and transient build debris
+  (`.build.lock`, `*.building`), which protects the day outright. The
+  journal's own upload check is length-only (PUT + HEAD ContentLength),
+  so the journal alone never proves a remote copy -- the fresh GET +
+  SHA-256 here is the first digest-level proof.
+- Hard remote budgets (`RemoteBudget`): every run is bounded by a
+  maximum number of remote requests, a maximum number of remote bytes
+  read, and a maximum wall-clock time (run defaults 1024 requests /
+  1 GiB / 600 s; per-day defaults 512 / 512 MiB / 300 s). The bounds
+  are enforced BEFORE / WHILE consuming, not after: the request count
+  and deadline are preflighted before any GET is issued (an exhausted
+  budget refuses without a remote call), and each object is read
+  through `_bounded_get`, which checks ContentLength against the
+  REMAINING byte budget before reading any body byte, streams in chunks
+  capped so the in-memory overshoot is at most one byte when the server
+  lies about the length, and always closes the body. `R2Backend` gained
+  an additive `get_stream` for this (its `get()` is unchanged; the
+  publisher's reads stay as they are); `list_keys` keeps its 1000-key
+  cap. Backends without a streaming read (local filesystem, test stubs)
+  read the whole object and charge afterward -- that is accounting-only,
+  not a hard resource bound, and the verification evidence says so
+  (`bounded_read: streaming` vs `accounting-only`). Any budget breach
+  fails the run closed: nothing deleted, failure recorded.
+- The current day is never prunable, even if its summary claims
+  final=true and even if it is otherwise malformed -- the date alone
+  protects it (checked before any other classification in the prune
+  and at the top of verification).
+- Before any whole-day delete, the ACTUAL local directory is enumerated
+  (rglob) and compared against the verified evidence set; any local
+  file the evidence does not explicitly account for aborts the day's
+  deletion, fail closed. The `DayArchive.artifacts()` listing is never
+  treated as the universe of what exists: it skips `*.tmp`, so a
+  `operator-recovery.tmp` left in a day dir used to be pruned silently
+  and now refuses the day (Chej's `review_unknown_tmp.py` repro
+  confirms: preserved, decision refused). The same check covers
+  root-level recovery/operator files and stray files at any level.
+- Pre-delete recheck: after verification and immediately before each
+  delete, the day is re-listed and re-hashed (`_recheck_day_unchanged`);
+  any added, removed, or modified file since verification stops the
+  run with nothing further deleted. No deletion ever happens on stale
+  evidence.
+- Fail closed: any verification failure means NOTHING is deleted in
+  that run and the failure is recorded. Protected, never candidates:
+  the current day, non-finalized days, days within the keep set, days
+  with pending uploads, days with recovery markers
+  (`interruptions.jsonl` / `recovery_errors.jsonl`), any day holding a
+  symlink/junction, and non-ISO-date entries (ignored). Deletion is
+  `shutil.rmtree` + re-list to confirm; `backend.delete` is never
+  called -- no R2 object is ever deleted or overwritten by this module.
+- Bounded operations: at most `max_days_per_run` (default 2) days and
+  `max_bytes_per_run` (default 512 MiB) per run, oldest first; verify
+  ALL selected days first, delete only if all verify. Dry-run evidence
+  first (the report lists exactly what would be deleted and the
+  verification evidence for each day). Deletion requires the explicit
+  switch `OA203_ARCHIVE_CACHE_PRUNE_ENABLED=1` (Chej) AND
+  `dry_run=False` (CLI `--confirm`); `keep_sessions` below 10 is
+  refused.
+- Production path: the same verification code and hard budgets serve
+  both backends. CLI `--r2` verifies against the real R2 backend
+  (`r2_backend()`); without it, `--backend-root` is verified.
+  `archive-cache-prune --spool /data/oa203 --r2 [--keep-sessions 10]
+  [--max-days 2] [--max-bytes-mb 512] [--max-remote-requests 1024]
+  [--max-remote-bytes-mb 1024] [--max-verify-seconds 600] [--confirm]`
+  (dry-run by default; deletion also requires
+  `OA203_ARCHIVE_CACHE_PRUNE_ENABLED=1`).
+- Normal finalize hook: `run_after_finalize` runs the lifecycle audit
+  after successful window work when `OA203_ARCHIVE_CACHE_AUDIT_ENABLED=1`
+  (Chej, OFF by default). The audit always produces a dry-run report;
+  actual pruning only when `OA203_ARCHIVE_CACHE_PRUNE_ENABLED=1` is
+  also set. Every run persists its report to
+  `<spool>/archive-cache-reports/<day>.json` (path in the return as
+  `lifecycle.report_path`). A lifecycle failure is isolated: recorded
+  in the return and the report, never unfinalizes the day, unpublishes
+  windows, or fails the finalize -- publication stands.
+- Operator dry run (production, nothing deleted): set
+  `OA203_ARCHIVE_CACHE_AUDIT_ENABLED=1` and run the normal finalize
+  flow, or run `python -m market_data.options_scanner
+  archive-cache-prune --spool /data/oa203 --r2`. The standalone CLI
+  prints its JSON report to stdout; save that output as the audit receipt.
+  The normal finalize hook persists its report at
+  `/data/oa203/archive-cache-reports/<day>.json`. To move from dry-run
+  to destructive enablement Chej additionally sets
+  `OA203_ARCHIVE_CACHE_PRUNE_ENABLED=1` after independent
+  review/dry-run.
+- Restoration recipe: `restore_day(spool, day, backend)` downloads
+  exactly the artifacts listed in the remote journal, verifying every
+  downloaded byte against the journal's SHA-256 and size before writing
+  it atomically (`archive.published()`); writes the local journal from
+  the remote journal bytes verbatim plus a fresh receipt, so
+  `pending_uploads()` is empty for the restored day; asserts the
+  restored summary is final; reports remote keys NOT in the journal
+  (notably `windows_live.json` and `inprogress/` members) as
+  `not_restored`. A restore with a non-empty `not_restored` is PARTIAL
+  (`complete: false`): the journaled artifacts are byte-identical, but
+  it is NOT a full restoration of the original local day from the
+  journal alone -- `windows_live.json` and `inprogress/` are not in
+  any journal and are not restored (they remain preserved on R2 under
+  their known keys). Any failure removes the partial restore and
+  raises. Restored days lack local `inprogress/` snapshots (the builder
+  reads only summary/universe/sweeps; active snapshots live on R2
+  under 30-day retention).
+- Tests in `tests/test_oa203_archive_cache.py` (53): the dry-run, the
+  confirm+env delete (newest 10 survive; remote untouched; `delete`
+  never called), remote digest mismatch / missing member / journal
+  contradiction refusals, pending / unfinalized / recovery / symlink
+  protection, per-run bounds, the env gate, the ledger corroboration,
+  build-debris protection, the restore round-trip (byte-identical for
+  journaled artifacts; `complete: false` with the standard fixture's
+  journal omissions, `complete: true` when the journal lists every
+  remote object) plus restore failures (missing member, digest
+  mismatch) removing the partial dir; hard budgets (request / byte /
+  time exceeded, each failing closed with nothing deleted, budget state
+  in the dry-run report) and the bounded-read gap (oversized body
+  refused before any body byte is read, lying ContentLength stopped at
+  the bound with the body closed, request/time preflight refusing
+  before any GET is issued, no deletion in any refusal); current-day
+  protection (final=true and a malformed-final variant); unrecognized
+  `.tmp` files at root, nested, and deep levels (Chej's repro) plus the
+  already-fixed unjournaled plain-file pending path; pre-delete recheck
+  (modified / added / removed, plus a mutation injected between
+  verification and deletion); the R2 path (stub backend through the
+  same verification code, CLI `--r2` wiring); and the finalize hook
+  (off by default, audit dry-run with persisted report, destructive
+  only with both flags, failure isolated from publication).
+
+## Historical implementation checklist
+
+The checklist below records the original implementation handoff. Window
+publication and connected-client readback subsequently shipped in PR211;
+PR212 isolated scratch and enabled the approved bounded second expiry.
+Current release receipts and remaining qualifying live observations are in
+the Feature Grab Bag quest Log. The archive-cache lifecycle above is the
+separate follow-up; older approval language below is not a new approval gate.
 
 1. **Live trigger — IMPLEMENTED offline (live-builder); owner Chej
    (release), gate: Owen/Chej activation approval.** `finalize` now
