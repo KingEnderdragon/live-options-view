@@ -202,8 +202,11 @@ class Runner:
         self.cycle_count = 0
         # Re-entry guard state for the exit layer (#86): a small durable record
         # of recent exits, so a restart immediately after a stop-out cannot
-        # re-open the contract it just closed.
-        self.exit_state = ExitStateStore(self.state_dir)
+        # re-open the contract it just closed. It is given the ledger directory
+        # so a corrupt state file can be rebuilt from durable exit rows.
+        self.exit_state = ExitStateStore(
+            self.state_dir, ledger_dir=self.ledger.paths.ledger.parent
+        )
         # Deployment-level switch for the exit policy. Off unless
         # CRASSUS_EXITS_ENABLED is set, so this branch is inert until the
         # reviewed thresholds and precedence are approved.
@@ -525,18 +528,6 @@ class Runner:
             flatten_decision = maybe_flatten(ctx, account.params)
             if flatten_decision is not None:
                 decision: Decision = flatten_decision
-            elif snapshot is None and getattr(strategy, "requires_snapshot", True):
-                # Ordinary strategy evaluation does need a snapshot -- only
-                # the mandatory flatten and a strategy that declares its own
-                # durable daily-bar source are exempt. No flatten fired above,
-                # so there's nothing safe to decide against this cycle.
-                self.ledger.record(
-                    **base,
-                    outcome_class=Outcome.RUNNER_ERROR,
-                    reason="No market snapshot available this cycle.",
-                    account_state_before=state_before,
-                )
-                return
             else:
                 # Configurable profit/protective exits (#86) sit between the
                 # mandatory flatten and the account's own strategy: session
@@ -556,9 +547,23 @@ class Runner:
                         account_state_before=state_before,
                     )
                     return
+                # Risk exits are decided from the book, the documented cost
+                # basis and a fresh liquidation quote -- not from the scanner
+                # snapshot. They are therefore evaluated *before* the snapshot
+                # gate below, so a snapshot outage cannot suspend a stop.
                 exit_decision = evaluate_exits(ctx, exit_policy, strategy_id=account.strategy_id)
                 if exit_decision is not None:
                     decision = exit_decision
+                elif snapshot is None and getattr(strategy, "requires_snapshot", True):
+                    # New entries do need a snapshot. No flatten and no exit
+                    # fired, so there's nothing safe to open this cycle.
+                    self.ledger.record(
+                        **base,
+                        outcome_class=Outcome.RUNNER_ERROR,
+                        reason="No market snapshot available this cycle.",
+                        account_state_before=state_before,
+                    )
+                    return
                 else:
                     decision = strategy(ctx)
                     # `exit_state` is created by __init__; a Runner assembled

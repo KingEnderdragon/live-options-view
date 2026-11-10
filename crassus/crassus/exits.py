@@ -66,6 +66,7 @@ after a fill cannot re-sell a position that no longer exists.
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 from dataclasses import asdict, dataclass
@@ -73,7 +74,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from .durability import atomic_json
 from .strategy import Decision, StrategyContext
+
+log = logging.getLogger("crassus.exits")
 
 STRATEGY_ID = "exit_policy"
 STRATEGY_VERSION = "1.1.0"
@@ -159,6 +163,23 @@ def _finite(value: Any, field_name: str) -> float:
     return number
 
 
+def _strict_bool(block: dict[str, Any], field_name: str, default: bool) -> bool:
+    """A precedence switch requires a real JSON boolean.
+
+    `bool("false")` is True, so accepting strings here would let a quoted value
+    silently invert the policy an operator thought they had set. The catalog is
+    JSON, so there is no reason to accept anything but `true`/`false`.
+    """
+    if field_name not in block:
+        return default
+    value = block[field_name]
+    if not isinstance(value, bool):
+        raise ExitConfigError(
+            f"exits.{field_name} must be true or false (JSON boolean), got {value!r}"
+        )
+    return value
+
+
 @dataclass(frozen=True)
 class ExitPolicy:
     profit_target_pct: float = DEFAULT_PROFIT_TARGET_PCT
@@ -223,9 +244,11 @@ def resolve_policy(
             block.get("reentry_cooldown_minutes", DEFAULT_REENTRY_COOLDOWN_MINUTES),
             "reentry_cooldown_minutes",
         ),
-        stop_bypasses_phelps=bool(block.get("stop_bypasses_phelps", DEFAULT_STOP_BYPASSES_PHELPS)),
-        profit_bypasses_phelps=bool(
-            block.get("profit_bypasses_phelps", DEFAULT_PROFIT_BYPASSES_PHELPS)
+        stop_bypasses_phelps=_strict_bool(
+            block, "stop_bypasses_phelps", DEFAULT_STOP_BYPASSES_PHELPS
+        ),
+        profit_bypasses_phelps=_strict_bool(
+            block, "profit_bypasses_phelps", DEFAULT_PROFIT_BYPASSES_PHELPS
         ),
         enabled=enabled,
     )
@@ -300,6 +323,11 @@ class Candidate:
     bid: float | None
     ask: float | None
     quote_age_s: float | None
+    #: How the Phelps window actually bore on this exit: "not_applicable",
+    #: "window_elapsed" or "bypassed_by_config". Recorded so the audit trail
+    #: states the precedence that was really applied rather than a fixed
+    #: sentence about the default.
+    window_state: str = "not_applicable"
 
     @property
     def priority(self) -> tuple[int, float]:
@@ -308,7 +336,7 @@ class Candidate:
         # position exits first.
         return (0 if self.trigger == "protective_stop" else 1, -abs(self.pnl_pct))
 
-    def metadata(self, policy: ExitPolicy) -> dict[str, Any]:
+    def metadata(self, policy: ExitPolicy, username: str | None = None) -> dict[str, Any]:
         return {
             "exit_trigger": self.trigger,
             "exit_symbol": self.symbol,
@@ -323,6 +351,11 @@ class Candidate:
                 policy.stop_loss_pct if self.trigger == "protective_stop"
                 else policy.profit_target_pct
             ),
+            "exit_phelps_window": self.window_state,
+            # The account's server-side identity, so a durable ledger row can
+            # reconstruct this exit's cooldown after a corrupt or lost state
+            # file (see ExitStateStore._recover_from_durable_sources).
+            "exit_account_username": username,
             "exit_policy": policy.as_metadata(),
         }
 
@@ -359,10 +392,17 @@ def evaluate(
 ) -> Decision | None:
     """A close decision for the most urgent triggered position, else None.
 
-    Returns a blocking `no_trade` when a trigger has fired but no held position
-    with a trigger has an executable quote: the position is waiting to be
-    closed, and letting the strategy open something else in the meantime is
-    exactly the "unintended re-entry" this layer exists to prevent.
+    Needs no market snapshot: a risk exit is decided from the held book, the
+    documented cost basis and a fresh liquidation-side quote. The scanner
+    snapshot feeds entry signals, not the decision to stop losing money, so a
+    snapshot outage must not suspend protective exits (the runner orders this
+    accordingly).
+
+    Returns a blocking `no_trade` when a trigger has fired but no triggered
+    position has an executable quote, or while the Phelps window withholds the
+    only triggered exit: the position is waiting to be closed, and letting the
+    strategy open something else in the meantime is exactly the "unintended
+    re-entry" this layer exists to prevent.
     """
     if not policy.enabled or ctx.book is None:
         return None
@@ -373,7 +413,8 @@ def evaluate(
     if not positions:
         return None
 
-    wanted = (strategy_id or "") and is_phelps(strategy_id or "")
+    wanted = bool(strategy_id) and is_phelps(strategy_id or "")
+    username = str((ctx.account_state or {}).get("username", "")) or None
     quotes: dict[str, Any] = {}
     try:
         quotes = ctx.quotes([p.symbol for p in positions]) or {}
@@ -386,37 +427,42 @@ def evaluate(
         )
 
     executable: list[Candidate] = []
-    pending: list[str] = []
+    pending: list[dict[str, str]] = []
     for position in positions:
         quote = quotes.get(position.symbol)
         # No quote, or no price on the side this exit would actually transact
         # at: the position cannot be valued at all this cycle, which is a
         # different condition from "valued but too stale to submit".
         if liquidation_price(quote, position.quantity) is None:
-            pending.append(position.symbol)
+            pending.append({"symbol": position.symbol, "reason": "missing_liquidation_quote"})
             continue
         candidate = _classify(position, quote, policy)
         if candidate is None:
             continue
         if not getattr(quote, "is_executable", False):
-            pending.append(position.symbol)
+            pending.append({"symbol": position.symbol, "reason": "stale_quote"})
             continue
-        if wanted and _deferred_by_phelps(ctx, candidate, policy):
-            pending.append(position.symbol)
-            continue
+        if wanted:
+            state, deferred = _window_state(ctx, candidate, policy)
+            candidate.window_state = state
+            if deferred:
+                pending.append({"symbol": position.symbol, "reason": "phelps_window"})
+                continue
         executable.append(candidate)
 
     if not executable:
         if pending:
+            reasons = ", ".join(f"{item['symbol']} ({item['reason']})" for item in pending)
             return Decision.no_trade(
                 reason=(
-                    f"Exit triggered but no executable liquidation quote for {pending}; "
-                    f"waiting rather than holding or adding to the book."
+                    f"Exit pending for {reasons}; waiting rather than holding or "
+                    f"adding to the book."
                 ),
                 strategy_id=STRATEGY_ID,
                 strategy_version=STRATEGY_VERSION,
                 metadata={
-                    "exit_pending_symbols": pending,
+                    "exit_pending": pending,
+                    "exit_pending_symbols": [item["symbol"] for item in pending],
                     "exit_quote_max_age_s": 15.0,
                 },
             )
@@ -424,40 +470,57 @@ def evaluate(
 
     best = min(executable, key=lambda c: c.priority)
     action = "sell" if best.quantity > 0 else "buy"
-    window_note = ""
-    if wanted:
-        window_note = (
-            f" (Phelps window {'bypassed' if best.trigger == 'protective_stop' else 'respected'})"
-        )
     return Decision(
         action=action,
         symbol=best.symbol,
         quantity=abs(best.quantity),
         reason=(
             f"Exit policy: {best.trigger} at {best.pnl_pct:+.1%} of {best.cost_basis:.2f} "
-            f"cost basis, liquidating at {best.price:.2f}{window_note}."
+            f"cost basis, liquidating at {best.price:.2f}"
+            f"{_window_phrase(best)}."
         ),
         strategy_id=STRATEGY_ID,
         strategy_version=STRATEGY_VERSION,
-        metadata=best.metadata(policy),
+        metadata=best.metadata(policy, username),
     )
 
 
-def _deferred_by_phelps(ctx: StrategyContext, candidate: Candidate, policy: ExitPolicy) -> bool:
-    """Whether the Phelps window withholds this exit this cycle.
+def _window_phrase(candidate: Candidate) -> str:
+    """The audit sentence for the precedence that was actually applied."""
+    if candidate.window_state == "bypassed_by_config":
+        which = "stop_bypasses_phelps" if candidate.trigger == "protective_stop" \
+            else "profit_bypasses_phelps"
+        return f" (Phelps window bypassed by configuration: {which}=true)"
+    if candidate.window_state == "window_elapsed":
+        return " (Phelps window already elapsed)"
+    if candidate.window_state == "no_entry_time":
+        return " (Phelps window not applied: entry time unavailable)"
+    return ""
 
-    If the fill time cannot be established the window is *not* applied: an
-    unparseable trade record must not be able to hold a losing position open
-    past its stop.
+
+def _window_state(ctx: StrategyContext, candidate: Candidate, policy: ExitPolicy) -> tuple[str, bool]:
+    """How the Phelps window bears on this candidate, and whether to defer it.
+
+    Returns `(state, deferred)` where state is one of `window_elapsed`,
+    `bypassed_by_config`, `no_entry_time` or the deferral itself. The state is
+    reported from the *configured* policy, so an audit row can never claim a
+    stop bypassed a window it was configured to respect.
+
+    If the fill time cannot be established the window is not applied: an
+    unparseable trade record must not hold a losing position open past its
+    stop. That case is still narrated honestly as `no_entry_time` rather than
+    passed off as an elapsed window.
     """
-    if candidate.trigger == "protective_stop" and policy.stop_bypasses_phelps:
-        return False
-    if candidate.trigger == "profit_target" and policy.profit_bypasses_phelps:
-        return False
+    bypass = (policy.stop_bypasses_phelps if candidate.trigger == "protective_stop"
+              else policy.profit_bypasses_phelps)
     elapsed = _elapsed_minutes(ctx, candidate.symbol)
     if elapsed is None:
-        return False
-    return elapsed < _phelps_window_minutes(ctx.params)
+        return "no_entry_time", False
+    if elapsed >= _phelps_window_minutes(ctx.params):
+        return "window_elapsed", False
+    if bypass:
+        return "bypassed_by_config", False
+    return "deferred", True
 
 
 # --------------------------------------------------------------------------
@@ -466,47 +529,205 @@ def _deferred_by_phelps(ctx: StrategyContext, candidate: Candidate, policy: Exit
 
 
 class ExitStateStore:
-    """Small durable record of recent exits, used to block immediate re-entry.
+    """Durable record of recent exits, used to block immediate re-entry.
 
-    Keyed by account username and contract symbol. Persisted because the guard
-    must survive the restarts the runner already recovers positions across;
-    without that, a crash immediately after a stop-out would re-open the
-    contract on the next boot.
+    Two failure modes get deliberately different treatment.
+
+    A **write** must never leave a half-serialized file, because a truncated
+    record is indistinguishable from "no exit happened" on the next boot --
+    exactly the state that permits re-buying a contract that was just stopped
+    out. Saves therefore go through `durability.atomic_json`: temp file, fsync,
+    atomic replace, directory sync, the same mechanism the execution intent and
+    the decision ledger already use. A crash mid-save leaves the previous good
+    file intact.
+
+    A **missing or corrupt file** means the cooldown record cannot be trusted,
+    so the store rebuilds from the durable sources that already exist: the
+    ledger's exit rows (written after every resolved exit) and any in-flight
+    intent (written before every submission). That reconstruction is sound for
+    the failure that matters -- an exit that actually filled necessarily has
+    either a ledger row or an intent on disk, because the intent is fsynced
+    before the order is sent. If those sources cannot be read at all, the
+    store declares itself untrusted, and an untrusted store blocks *new
+    entries* while leaving protective exits untouched (see `reentry_blocked`).
     """
 
-    def __init__(self, state_dir: Path, *, now: Callable[[], datetime] | None = None):
-        self.path = Path(state_dir) / STATE_FILE_NAME
+    def __init__(
+        self,
+        state_dir: Path,
+        *,
+        now: Callable[[], datetime] | None = None,
+        ledger_dir: Path | None = None,
+        intent_dir: Path | None = None,
+    ):
+        self.state_dir = Path(state_dir)
+        self.path = self.state_dir / STATE_FILE_NAME
+        self.ledger_dir = Path(ledger_dir) if ledger_dir is not None else None
+        self.intent_dir = Path(intent_dir) if intent_dir is not None else self.state_dir
         self._now = now or (lambda: datetime.now(timezone.utc))
         self._data: dict[str, dict[str, dict[str, Any]]] = {}
+        #: None means trustworthy; any string is the reason it is not.
+        self.degraded_reason: str | None = None
+        #: Set when a corrupt file was rebuilt from ledger/intents.
+        self.recovered_from: str | None = None
         self._load()
 
+    @property
+    def trusted(self) -> bool:
+        return self.degraded_reason is None
+
+    # -- loading ----------------------------------------------------------
+
     def _load(self) -> None:
+        raw: Any = None
+        missing = False
         try:
             raw = json.loads(self.path.read_text())
-        except (OSError, ValueError):
-            return
-        if not isinstance(raw, dict) or raw.get("schema") != STATE_SCHEMA:
-            return
-        accounts = raw.get("accounts")
-        if isinstance(accounts, dict):
-            self._data = {
-                str(account): {
-                    str(symbol): dict(record)
-                    for symbol, record in (entries or {}).items()
-                    if isinstance(record, dict)
-                }
-                for account, entries in accounts.items()
-                if isinstance(entries, dict)
-            }
+        except FileNotFoundError:
+            missing = True
+        except OSError as exc:
+            self.degraded_reason = f"state_unreadable:{type(exc).__name__}"
+            log.warning("exit state unreadable (%s); rebuilding from durable sources",
+                        type(exc).__name__)
+        except ValueError:
+            self.degraded_reason = "state_corrupt"
+            log.warning("exit state is corrupt JSON; rebuilding from durable sources")
 
-    def _save(self) -> None:
+        if not missing and self.degraded_reason is None:
+            accounts = raw.get("accounts") if isinstance(raw, dict) else None
+            if (isinstance(raw, dict) and raw.get("schema") == STATE_SCHEMA
+                    and isinstance(accounts, dict)):
+                self._data = self._normalize(accounts)
+                self._prune()
+                return
+            self.degraded_reason = "state_unrecognized"
+            log.warning("exit state has an unrecognised shape; rebuilding from durable sources")
+
+        if missing:
+            self._data = {}
+            return
+
+        recovered, sources_readable = self._recover_from_durable_sources()
+        self._data = recovered
+        if not sources_readable:
+            # Nothing durable to rebuild from; block new entries until an
+            # operator resolves it rather than risk a duplicate re-entry.
+            self.degraded_reason = self.degraded_reason or "state_unrecoverable"
+            log.error(
+                "exit state is unusable and no ledger/intent evidence was readable; "
+                "new entries are blocked until this is resolved"
+            )
+            return
+        self.recovered_from = "durable_sources"
+        if self._save():
+            self.degraded_reason = None
+
+    @staticmethod
+    def _normalize(accounts: dict[str, Any]) -> dict[str, dict[str, dict[str, Any]]]:
+        return {
+            str(account): {
+                str(symbol): dict(record)
+                for symbol, record in (entries or {}).items()
+                if isinstance(record, dict)
+            }
+            for account, entries in accounts.items()
+            if isinstance(entries, dict)
+        }
+
+    def _recover_from_durable_sources(self) -> tuple[dict[str, dict[str, dict[str, Any]]], bool]:
+        """Rebuild recent exits from the ledger and in-flight intents.
+
+        Returns `(records, sources_readable)`. An empty record set with readable
+        sources is meaningful: every submitted exit is fsynced as an intent
+        before it is sent, so no fill can be hiding unrecorded.
+        """
+        found: dict[str, dict[str, dict[str, Any]]] = {}
+        readable = False
+
+        if self.ledger_dir is not None:
+            try:
+                paths = sorted(Path(self.ledger_dir).glob("decisions-*.jsonl"))
+                readable = True
+            except OSError:
+                paths = []
+            for path in paths:
+                try:
+                    lines = path.read_text(encoding="utf-8").splitlines()
+                except OSError:
+                    continue
+                for line in lines:
+                    try:
+                        record = json.loads(line)
+                    except ValueError:
+                        continue
+                    self._absorb(found, record.get("decision"), record.get("timestamp_utc"))
+
         try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            payload = {"schema": STATE_SCHEMA, "accounts": self._data}
-            self.path.write_text(json.dumps(payload, indent=2, sort_keys=True))
+            intents = sorted(Path(self.intent_dir).glob("*.inflight.json"))
+            readable = True
         except OSError:
-            # A read-only state volume must not turn an exit into a crash.
-            pass
+            intents = []
+        for path in intents:
+            try:
+                intent = json.loads(path.read_text(encoding="utf-8"))
+                stamp = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+            except (OSError, ValueError):
+                continue
+            self._absorb(found, intent.get("decision"), stamp.isoformat(timespec="seconds"))
+
+        return found, readable
+
+    @staticmethod
+    def _absorb(found: dict[str, dict[str, dict[str, Any]]], decision: Any, stamp: Any) -> None:
+        if not isinstance(decision, dict):
+            return
+        metadata = decision.get("metadata") or {}
+        if not isinstance(metadata, dict) or not metadata.get("exit_trigger"):
+            return
+        symbol = decision.get("symbol") or metadata.get("exit_symbol")
+        username = metadata.get("exit_account_username")
+        if not symbol or not username:
+            return
+        try:
+            exited_at = datetime.fromisoformat(str(stamp))
+        except (TypeError, ValueError):
+            return
+        if exited_at.tzinfo is None:
+            exited_at = exited_at.replace(tzinfo=timezone.utc)
+        previous = found.setdefault(str(username), {}).get(str(symbol))
+        if previous is not None:
+            try:
+                if datetime.fromisoformat(str(previous["exited_at"])) >= exited_at:
+                    return
+            except (KeyError, ValueError):
+                pass
+        found[str(username)][str(symbol)] = {
+            "exited_at": exited_at.isoformat(timespec="seconds"),
+            "trigger": str(metadata.get("exit_trigger")),
+            "quantity": decision.get("quantity"),
+            "decision_id": metadata.get("decision_id"),
+            "recovered": True,
+        }
+
+    # -- saving -----------------------------------------------------------
+
+    def _save(self) -> bool:
+        payload = {"schema": STATE_SCHEMA, "accounts": self._data}
+        try:
+            atomic_json(self.path, payload)
+        except OSError as exc:
+            if self.degraded_reason is None:
+                log.warning(
+                    "exit state could not be persisted (%s); new entries are blocked "
+                    "until a save succeeds", type(exc).__name__,
+                )
+            self.degraded_reason = f"state_write_failed:{type(exc).__name__}"
+            return False
+        if self.degraded_reason and self.degraded_reason.startswith("state_write_failed"):
+            self.degraded_reason = None
+        return True
+
+    # -- mutation ---------------------------------------------------------
 
     def record(self, username: str, symbol: str, *, trigger: str, quantity: int,
                decision_id: str | None = None) -> None:
@@ -519,6 +740,8 @@ class ExitStateStore:
         }
         self._prune()
         self._save()
+
+    # -- queries ----------------------------------------------------------
 
     def exited_at(self, username: str, symbol: str) -> datetime | None:
         record = self._data.get(str(username), {}).get(symbol)
@@ -566,11 +789,12 @@ def reentry_blocked(
     """Convert an entry into a no_trade while an exit cooldown is live.
 
     Only entries are blocked -- a decision that reduces an existing position is
-    never suppressed by this guard. Returns None when the decision may proceed.
+    never suppressed by this guard, so protective liquidation keeps working
+    even when the cooldown record itself is unusable. An untrusted store blocks
+    every new entry rather than silently permitting the one it cannot rule out.
+    Returns None when the decision may proceed.
     """
-    if not policy.enabled or policy.reentry_cooldown_minutes <= 0:
-        return None
-    if not decision.is_trade or not decision.symbol:
+    if not policy.enabled or not decision.is_trade or not decision.symbol:
         return None
     position = book.position(decision.symbol) if book is not None else None
     held = position.quantity if position is not None else 0
@@ -579,6 +803,27 @@ def reentry_blocked(
         (held < 0 and decision.action == "sell")
     )
     if not opens_or_adds:
+        return None
+
+    if not store.trusted:
+        return Decision.no_trade(
+            reason=(
+                f"Exit state is untrusted ({store.degraded_reason}); refusing a new "
+                f"position in {decision.symbol} rather than risk re-entering a "
+                f"contract that may have just been exited. Protective exits are "
+                f"unaffected."
+            ),
+            strategy_id=decision.strategy_id,
+            strategy_version=decision.strategy_version,
+            metadata={
+                "exit_state_degraded": store.degraded_reason,
+                "blocked_action": decision.action,
+                "blocked_symbol": decision.symbol,
+                "blocked_strategy_id": decision.strategy_id,
+            },
+        )
+
+    if policy.reentry_cooldown_minutes <= 0:
         return None
     remaining = store.cooldown_remaining_s(username, decision.symbol,
                                            policy.reentry_cooldown_minutes)

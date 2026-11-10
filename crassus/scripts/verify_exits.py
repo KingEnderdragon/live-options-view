@@ -277,6 +277,49 @@ class PrecedenceTests(unittest.TestCase):
             strategy_id="reddit_sentiment_qqq_phelps",
         )
         self.assertEqual(decision.action, "no_trade")
+        self.assertEqual(decision.metadata["exit_pending"][0]["reason"], "phelps_window")
+
+    def test_audit_names_the_precedence_that_was_actually_applied(self):
+        # A stop configured to bypass says so, and a profit target configured
+        # to bypass says *that* -- the sentence follows the policy rather than
+        # asserting the default in both directions.
+        params = {"phelps_minutes": 27.5,
+                  "exits": {"stop_bypasses_phelps": True, "profit_bypasses_phelps": True}}
+        policy = resolve_policy("reddit_sentiment_qqq_phelps", params, activated=True)
+
+        stop = evaluate(
+            ctx(book(long_trade(ts="2024-01-01T11:55:00Z")), {SYMBOL: quote(0.40, 0.45)},
+                params=params),
+            policy, strategy_id="reddit_sentiment_qqq_phelps",
+        )
+        self.assertEqual(stop.metadata["exit_phelps_window"], "bypassed_by_config")
+        self.assertIn("stop_bypasses_phelps=true", stop.reason)
+
+        profit = evaluate(
+            ctx(book(long_trade(ts="2024-01-01T11:55:00Z")), {SYMBOL: quote(1.60, 1.65)},
+                params=params),
+            policy, strategy_id="reddit_sentiment_qqq_phelps",
+        )
+        self.assertEqual(profit.metadata["exit_phelps_window"], "bypassed_by_config")
+        self.assertIn("profit_bypasses_phelps=true", profit.reason)
+
+    def test_audit_says_window_elapsed_when_it_really_elapsed(self):
+        params = {"phelps_minutes": 27.5}
+        mature = book(long_trade(ts="2024-01-01T11:00:00Z"))
+        decision = evaluate(
+            ctx(mature, {SYMBOL: quote(0.40, 0.45)}, params=params),
+            resolve_policy("reddit_sentiment_qqq_phelps", params, activated=True),
+            strategy_id="reddit_sentiment_qqq_phelps",
+        )
+        self.assertEqual(decision.metadata["exit_phelps_window"], "window_elapsed")
+        self.assertIn("already elapsed", decision.reason)
+
+    def test_non_phelps_strategy_records_no_window(self):
+        decision = evaluate(ctx(book(long_trade()), {SYMBOL: quote(0.40, 0.45)}),
+                            resolve_policy("reddit_sentiment_qqq", {}, activated=True),
+                            strategy_id="reddit_sentiment_qqq")
+        self.assertEqual(decision.metadata["exit_phelps_window"], "not_applicable")
+        self.assertNotIn("Phelps", decision.reason)
 
     def test_unknown_entry_time_does_not_hold_a_stop_open(self):
         params = {"phelps_minutes": 27.5}
@@ -347,6 +390,26 @@ class PolicyTests(unittest.TestCase):
         with self.assertRaises(ExitConfigError):
             resolve_policy("reddit_sentiment_qqq", {"exits": []})
 
+    def test_precedence_switches_require_real_booleans(self):
+        # bool("false") is True: a quoted value would silently invert the
+        # policy, so strings are rejected rather than coerced.
+        for field in ("stop_bypasses_phelps", "profit_bypasses_phelps"):
+            for value in ("false", "true", 0, 1, None, "yes"):
+                with self.subTest(field=field, value=value):
+                    with self.assertRaises(ExitConfigError):
+                        resolve_policy(
+                            "reddit_sentiment_qqq",
+                            {"exits": {field: value}},
+                            activated=True,
+                        )
+        policy = resolve_policy(
+            "reddit_sentiment_qqq",
+            {"exits": {"stop_bypasses_phelps": False, "profit_bypasses_phelps": True}},
+            activated=True,
+        )
+        self.assertFalse(policy.stop_bypasses_phelps)
+        self.assertTrue(policy.profit_bypasses_phelps)
+
     def test_audit_metadata_carries_the_whole_decision(self):
         decision = evaluate(ctx(book(long_trade()), {SYMBOL: quote(0.40, 0.45)}), ExitPolicy())
         metadata = decision.metadata
@@ -416,6 +479,128 @@ class _null:
 
     def __exit__(self, *exc):
         return False
+
+
+class DurableStateTests(unittest.TestCase):
+    """The cooldown record must survive a crash, a corrupt file and a full disk."""
+
+    def _policy(self):
+        return ExitPolicy(reentry_cooldown_minutes=15.0)
+
+    def _buy(self, symbol=SYMBOL):
+        return Decision(action="buy", symbol=symbol, quantity=1, reason="signal",
+                        strategy_id="reddit_sentiment_qqq", strategy_version="1")
+
+    def test_a_failed_save_keeps_the_previous_state_and_blocks_new_entries(self):
+        directory = _tmpdir()
+        store = ExitStateStore(directory)
+        store.record("crassus_test", "A", trigger="protective_stop", quantity=1)
+        before = (directory / "exits.json").read_text()
+
+        # atomic_json writes a temp file and replaces; a failure before the
+        # replace must leave the previous record intact.
+        with mock.patch.object(exits, "atomic_json", side_effect=OSError("disk full")):
+            store.record("crassus_test", "B", trigger="profit_target", quantity=1)
+
+        self.assertEqual((directory / "exits.json").read_text(), before)
+        self.assertFalse(store.trusted)
+        self.assertTrue(store.degraded_reason.startswith("state_write_failed"))
+        blocked = reentry_blocked(self._buy("NEW"), username="crassus_test", store=store,
+                                  policy=self._policy(), book=book())
+        self.assertEqual(blocked.action, "no_trade")
+        self.assertIn("exit_state_degraded", blocked.metadata)
+        # The in-memory record still blocks its own contract.
+        self.assertGreater(store.cooldown_remaining_s("crassus_test", "B", 15.0), 0)
+
+        # A later successful save repairs the file and clears the block.
+        store.record("crassus_test", "B", trigger="profit_target", quantity=1)
+        self.assertTrue(store.trusted)
+        self.assertIsNone(reentry_blocked(self._buy("NEW"), username="crassus_test",
+                                          store=store, policy=self._policy(), book=book()))
+
+    def test_a_corrupt_state_file_is_rebuilt_from_the_ledger(self):
+        directory = _tmpdir()
+        ledger_dir = directory / "logs"
+        ledger_dir.mkdir()
+        state_dir = directory / "state"
+        state_dir.mkdir()
+        stamp = datetime(2024, 1, 2, 12, 0, tzinfo=timezone.utc)
+        record = {
+            "decision_id": "d-1",
+            "decision": {
+                "action": "sell",
+                "symbol": SYMBOL,
+                "quantity": 1,
+                "metadata": {
+                    "exit_trigger": "protective_stop",
+                    "exit_symbol": SYMBOL,
+                    "exit_account_username": "crassus_test",
+                },
+            },
+            "timestamp_utc": stamp.isoformat(timespec="seconds"),
+        }
+        (ledger_dir / "decisions-run1.jsonl").write_text(json.dumps(record) + "\n")
+        (state_dir / "exits.json").write_text("{ this is not json")
+
+        store = ExitStateStore(state_dir, ledger_dir=ledger_dir, now=lambda: stamp)
+        self.assertTrue(store.trusted, store.degraded_reason)
+        self.assertEqual(store.recovered_from, "durable_sources")
+        self.assertGreater(store.cooldown_remaining_s("crassus_test", SYMBOL, 15.0), 0)
+        self.assertEqual(store.cooldown_remaining_s("crassus_test", "OTHER", 15.0), 0)
+        # The rebuilt file is valid again, so the next boot is normal.
+        self.assertEqual(json.loads((state_dir / "exits.json").read_text())["schema"],
+                         "exit_state.v1")
+
+    def test_a_corrupt_state_file_is_rebuilt_from_an_inflight_intent(self):
+        directory = _tmpdir()
+        state_dir = directory
+        (state_dir / "exits.json").write_text("[]")
+        intent = {
+            "execution_request_id": "req-9",
+            "decision": {
+                "action": "sell",
+                "symbol": SYMBOL,
+                "quantity": 1,
+                "metadata": {
+                    "exit_trigger": "profit_target",
+                    "exit_account_username": "crassus_test",
+                },
+            },
+        }
+        (state_dir / "Luigi.inflight.json").write_text(json.dumps(intent))
+        store = ExitStateStore(state_dir)
+        self.assertTrue(store.trusted, store.degraded_reason)
+        self.assertEqual(store.recovered_from, "durable_sources")
+        self.assertGreater(store.cooldown_remaining_s("crassus_test", SYMBOL, 15.0), 0)
+
+    def test_unrecoverable_state_blocks_entries_without_blocking_protective_exits(self):
+        directory = _tmpdir()
+        (directory / "exits.json").write_text("{ broken")
+        with mock.patch.object(ExitStateStore, "_recover_from_durable_sources",
+                               return_value=({}, False)):
+            store = ExitStateStore(directory)
+        self.assertFalse(store.trusted)
+
+        # Protective liquidation is unaffected by the guard's distrust.
+        decision = evaluate(ctx(book(long_trade()), {SYMBOL: quote(0.40, 0.45)}),
+                            ExitPolicy())
+        self.assertEqual(decision.action, "sell")
+
+        blocked = reentry_blocked(self._buy("NEW"), username="crassus_test", store=store,
+                                  policy=self._policy(), book=book())
+        self.assertEqual(blocked.action, "no_trade")
+        self.assertIn("untrusted", blocked.reason)
+
+    def test_reducing_trades_still_pass_while_the_store_is_degraded(self):
+        directory = _tmpdir()
+        (directory / "exits.json").write_text("{ broken")
+        with mock.patch.object(ExitStateStore, "_recover_from_durable_sources",
+                               return_value=({}, False)):
+            store = ExitStateStore(directory)
+        sell = Decision(action="sell", symbol=SYMBOL, quantity=1, reason="reduce",
+                        strategy_id="reddit_sentiment_qqq", strategy_version="1")
+        self.assertIsNone(reentry_blocked(sell, username="crassus_test", store=store,
+                                          policy=self._policy(), book=book(long_trade())))
 
 
 class RunnerWiringTests(unittest.TestCase):
@@ -594,6 +779,28 @@ class RunnerWiringTests(unittest.TestCase):
             raw=b"{}",
         )
 
+    def test_protective_exit_fires_without_a_market_snapshot(self):
+        # A scanner outage must not suspend risk control: the exit is decided
+        # from the book and a fresh liquidation quote.
+        directory = _tmpdir()
+        runner, account, submitted = self._runner(directory)
+        runner._run_account(account, None, "open")
+        self.assertEqual(len(submitted), 1)
+        self.assertEqual(submitted[0]["strategy_id"], "exit_policy")
+
+    def test_new_entries_still_wait_for_the_snapshot(self):
+        directory = _tmpdir()
+        runner, account, submitted = self._runner(directory, trades=[])
+        buy = Decision(action="buy", symbol=SYMBOL, quantity=1, reason="signal",
+                       strategy_id="reddit_sentiment_qqq", strategy_version="1")
+        with mock.patch("crassus.runner.get_strategy", return_value=lambda ctx: buy):
+            runner._run_account(account, None, "open")
+        self.assertEqual(submitted, [])
+        ledger = sorted(directory.glob("decisions-*.jsonl"))[-1].read_text().strip().splitlines()
+        record = json.loads(ledger[-1])
+        self.assertEqual(record["outcome_class"], "runner_error")
+        self.assertIn("No market snapshot", record["reason"])
+
     def test_invalid_exit_config_records_an_error_instead_of_trading(self):
         directory = _tmpdir()
         runner, account, submitted = self._runner(
@@ -618,7 +825,7 @@ if __name__ == "__main__":
     loader = unittest.defaultTestLoader
     suite = unittest.TestSuite()
     for case in (BoundaryTests, QuoteTests, PrecedenceTests, PolicyTests,
-                 ReentryTests, RunnerWiringTests):
+                 ReentryTests, DurableStateTests, RunnerWiringTests):
         suite.addTests(loader.loadTestsFromTestCase(case))
     result = unittest.TextTestRunner(verbosity=2).run(suite)
     print("=" * 66)
