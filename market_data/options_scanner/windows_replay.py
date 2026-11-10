@@ -154,7 +154,8 @@ def validate_contract_identity(symbol: str, row: dict) -> None:
         raise RuntimeError(f"OCC symbol disagrees with archive contract metadata: {symbol}")
 
 
-def load_session(day: str, underlyings: set[str], rows_by_symbol: dict, sampled: dict) -> dict:
+def load_session(day: str, underlyings: set[str], rows_by_symbol: dict, sampled: dict, *,
+                 max_row_bytes: int | None = None) -> dict:
     prefix = f"oa203/scanner/{day}/"
     summary = json.loads(fetch(prefix + "summary.json"))
     if summary.get("trade_date") != day or not summary.get("final"):
@@ -185,7 +186,13 @@ def load_session(day: str, underlyings: set[str], rows_by_symbol: dict, sampled:
         in_session_counts: dict[tuple[str, str], int] = defaultdict(int)
         raw_count = 0
         raw = gzip.GzipFile(fileobj=io.BytesIO(fetch(prefix + "sweeps/" + entry["file"])))
-        for line in io.TextIOWrapper(raw, encoding="utf-8"):
+        # Live builds bound even a corrupt, highly compressible JSON line.
+        text = io.TextIOWrapper(raw, encoding="utf-8")
+        lines = (iter(lambda: text.readline(max_row_bytes + 1), "")
+                 if max_row_bytes is not None else text)
+        for line in lines:
+            if max_row_bytes is not None and len(line.encode("utf-8")) > max_row_bytes:
+                raise ValueError(f"{day}: window row byte budget exceeded")
             if not line.strip():
                 continue
             raw_count += 1

@@ -59,6 +59,7 @@ from market_data.options_scanner.archive_cache import (
     run_archive_cache_audit,
 )
 from market_data.options_scanner.returns import ContractInfo, Observation
+from market_data.options_scanner.windows_spool import BuildLimits, WindowSpool
 
 MAX_UNDERLYINGS = 50
 MAX_UNDERLYINGS_FULL = 500  # live universe size (Config.universe_size default)
@@ -96,7 +97,9 @@ DEFAULT_MAX_EMIT_BYTES = 192 * 1024 * 1024
 
 
 def load_local_session(day_dir: Path, underlyings: set[str],
-                       rows_by_symbol: dict, sampled: dict) -> dict:
+                       rows_by_symbol: dict, sampled: dict, *,
+                       max_source_bytes: int | None = None,
+                       max_row_bytes: int | None = None) -> dict:
     """Load one finalized local day archive through the replay loader.
 
     ``day_dir`` must be named for its ISO date (e.g. ``2026-10-05``) and
@@ -118,7 +121,13 @@ def load_local_session(day_dir: Path, underlyings: set[str],
         path = day_dir / key[len(prefix):]
         if not path.is_file():
             raise RuntimeError(f"{day}: missing local archive file: {key[len(prefix):]}")
-        body = path.read_bytes()
+        if max_source_bytes is None:
+            body = path.read_bytes()
+        else:
+            with path.open("rb") as source:
+                body = source.read(max_source_bytes + 1)
+            if len(body) > max_source_bytes:
+                raise ValueError(f"window source byte budget exceeded: {key}")
         sources.append({"key": key, "sha256": hashlib.sha256(body).hexdigest(),
                         "bytes": len(body), "local": True})
         return body
@@ -126,18 +135,28 @@ def load_local_session(day_dir: Path, underlyings: set[str],
     original_fetch = replay.fetch
     replay.fetch = fetch  # type: ignore[method-assign]
     try:
-        meta = replay.load_session(day, underlyings, rows_by_symbol, sampled)
+        meta = replay.load_session(day, underlyings, rows_by_symbol, sampled,
+                                   max_row_bytes=max_row_bytes)
     finally:
         replay.fetch = original_fetch
     meta["sources"] = sources
     return meta
 
 
-def selected_underlyings(day_dirs: Sequence[Path]) -> set[str]:
+def _bounded_local_read(path: Path, max_bytes: int) -> bytes:
+    with path.open("rb") as source:
+        body = source.read(max_bytes + 1)
+    if len(body) > max_bytes:
+        raise ValueError(f"window source byte budget exceeded: {path.name}")
+    return body
+
+
+def selected_underlyings(day_dirs: Sequence[Path], *,
+                         max_source_bytes: int = BuildLimits.max_source_bytes) -> set[str]:
     """Union of selected underlyings across local day archives."""
     out: set[str] = set()
     for d in day_dirs:
-        universe = json.loads((Path(d) / "universe.json").read_text(encoding="utf-8"))
+        universe = json.loads(_bounded_local_read(Path(d) / "universe.json", max_source_bytes).decode("utf-8"))
         out.update(u["underlying"] for u in universe.get("selected", []))
     return out
 
@@ -165,7 +184,7 @@ def finalized_day_dirs(spool: Path, *, through_day: date | None = None,
         if not summary_path.is_file():
             continue
         try:
-            if not json.loads(summary_path.read_text(encoding="utf-8")).get("final"):
+            if not json.loads(_bounded_local_read(summary_path, BuildLimits.max_source_bytes).decode("utf-8")).get("final"):
                 continue
         except ValueError:
             continue
@@ -333,7 +352,36 @@ def build_windows(day_dirs: list[Path] | tuple[Path, ...], underlyings: set[str]
                   emit_root: Path, *, top: int = 15, full_universe: bool = False,
                   generated_at: datetime | str | None = None,
                   min_free_bytes: int = MIN_EMIT_FREE_BYTES,
-                  scratch_emit: bool = False) -> dict[str, Any]:
+                  scratch_emit: bool = False,
+                  limits: BuildLimits | None = None) -> dict[str, Any]:
+    """Build unchanged full-universe products with bounded working sets.
+
+    Raw observations and evaluated results live in a disposable SQLite spool
+    below emit_root. One complete symbol (all attributions) is evaluated at a
+    time; then one complete window is combined and globally ranked at a time.
+    Resource limits refuse the whole build, never omit contracts. See
+    _build_windows for archive validation and stable product identity.
+    """
+    root = Path(emit_root)
+    _check_emit_headroom(root, min_free_bytes=min_free_bytes, scratch=scratch_emit)
+    root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".windows-spool-", dir=root) as tmp:
+        spool = WindowSpool(Path(tmp) / "rows.sqlite", limits or BuildLimits())
+        try:
+            return _build_windows(day_dirs, underlyings, root, top=top,
+                                  full_universe=full_universe, generated_at=generated_at,
+                                  min_free_bytes=min_free_bytes, scratch_emit=scratch_emit,
+                                  spool=spool)
+        finally:
+            spool.close()
+
+
+def _build_windows(day_dirs: list[Path] | tuple[Path, ...], underlyings: set[str],
+                  emit_root: Path, *, top: int = 15, full_universe: bool = False,
+                  generated_at: datetime | str | None = None,
+                  min_free_bytes: int = MIN_EMIT_FREE_BYTES,
+                  scratch_emit: bool = False,
+                  spool: WindowSpool) -> dict[str, Any]:
     """Evaluate every supported window kind over local finalized days.
 
     ``day_dirs`` are finalized day-archive directories (sorted by date,
@@ -384,7 +432,7 @@ def build_windows(day_dirs: list[Path] | tuple[Path, ...], underlyings: set[str]
             raise ValueError(f"bounded build: union over at most {MAX_SESSIONS} sessions x "
                              f"{MAX_UNDERLYINGS_FULL} underlyings, got {len(unders)}")
         for d in dirs:
-            selected = len(selected_underlyings([d]))
+            selected = len(selected_underlyings([d], max_source_bytes=spool.limits.max_source_bytes))
             if selected > MAX_UNDERLYINGS_FULL:
                 raise ValueError(f"full_universe: {d.name} selects {selected} underlyings, "
                                  f"over the per-day cap {MAX_UNDERLYINGS_FULL}")
@@ -392,13 +440,15 @@ def build_windows(day_dirs: list[Path] | tuple[Path, ...], underlyings: set[str]
         raise ValueError(f"bounded build: 1..{MAX_UNDERLYINGS} underlyings, got {len(underlyings)}")
     if [d.name for d in dirs] != sorted(d.name for d in dirs) or len({d.name for d in dirs}) != len(dirs):
         raise ValueError("day directories must be unique and sorted by date")
-    rows_by_symbol: dict[str, list] = defaultdict(list)
+    rows_by_symbol = spool
     sampled: dict[str, set] = defaultdict(set)
-    sessions_meta = [load_local_session(d, unders, rows_by_symbol, sampled) for d in dirs]
+    sessions_meta = [load_local_session(d, unders, rows_by_symbol, sampled,
+                                        max_source_bytes=spool.limits.max_source_bytes,
+                                        max_row_bytes=spool.limits.max_row_bytes) for d in dirs]
     sessions = [m["session"] for m in sessions_meta]
     if full_universe:
         for d in dirs:
-            missing = selected_underlyings([d]) - unders
+            missing = selected_underlyings([d], max_source_bytes=spool.limits.max_source_bytes) - unders
             if missing:
                 raise ValueError(f"full_universe: {d.name} selected underlyings not covered: {sorted(missing)[:5]}")
     complete_weeks = replay.validate_calendar(sessions)
@@ -417,7 +467,7 @@ def build_windows(day_dirs: list[Path] | tuple[Path, ...], underlyings: set[str]
     # path: each attribution is evaluated separately and resolved by
     # windows_combine (pure duplicate -> one row; differing evidence ->
     # all attributions excluded, conflict recorded).
-    candidates: list[tuple[ContractInfo, list[Observation], str]] = []
+    candidate_count = 0
     for symbol, rs in rows_by_symbol.items():
         by_under: dict[str, list] = defaultdict(list)
         for r in rs:
@@ -437,13 +487,16 @@ def build_windows(day_dirs: list[Path] | tuple[Path, ...], underlyings: set[str]
                                 ask_ms=r.get("ask_ms"), underlying_price=r.get("spot"),
                                 bid_size=r.get("bid_size"), ask_size=r.get("ask_size"),
                                 volume=r.get("volume"), open_interest=r.get("oi")) for r in urs]
-            candidates.append((info, path, under))
+            candidate_count += 1
+            seen = {s.day for s in sessions for o in path if s.open_ms <= o.t < s.close_ms}
+            cd = seen & sampled.get((info.underlying, info.expiration), set())
+            for win in windows:
+                if cd & {s.day for s in win.sessions}:
+                    spool.add_result(win.window_id, under, w.evaluate(win, info, path, cd, policy))
+            del path
+        # Do not retain the previous symbol while materializing the next one.
+        del rs, by_under, urs
 
-    def contract_days(info: ContractInfo, path: list[Observation]) -> set[str]:
-        seen = {s.day for s in sessions for o in path if s.open_ms <= o.t < s.close_ms}
-        return seen & sampled.get((info.underlying, info.expiration), set())
-
-    candidate_days = [contract_days(info, path) for info, path, _ in candidates]
     all_sources = [s for m in sessions_meta for s in m["sources"]]
     status = {m["day"]: {"final": m["final"], "assessment": m["assessment"],
                          "assessment_reasons": m.get("assessment_reasons", []),
@@ -456,6 +509,7 @@ def build_windows(day_dirs: list[Path] | tuple[Path, ...], underlyings: set[str]
         generated = str(generated_at)
     universe_scope = "full_universe" if full_universe else "bounded_subset"
     all_conflicts: list[dict] = []
+    conflict_bytes = 0
     kept_total = 0
     report: dict[str, Any] = {"builder": "windows_live", "mode": "live_archive",
                               "generated_at": generated,
@@ -465,7 +519,7 @@ def build_windows(day_dirs: list[Path] | tuple[Path, ...], underlyings: set[str]
                               "policy": policy.as_dict(),
                               "sessions": [{k: v for k, v in m.items() if k not in ("session", "sources")}
                                            for m in sessions_meta],
-                              "underlyings": sorted(unders), "contracts": len(candidates),
+                              "underlyings": sorted(unders), "contracts": candidate_count,
                               "contracts_kept": 0, "conflicts": all_conflicts,
                               "conflicting_symbols": 0,
                               "skipped_weeks": skipped, "windows": []}
@@ -477,14 +531,16 @@ def build_windows(day_dirs: list[Path] | tuple[Path, ...], underlyings: set[str]
         # first sampled on an unrelated later day (or rotated out of the
         # window's days) contributes no row here, so unrelated universe
         # rotation cannot leak rows into a historical window.
-        evaluated = [(under, w.evaluate(win, info, path, cd, policy))
-                     for (info, path, under), cd in zip(candidates, candidate_days)
-                     if cd & days]
+        evaluated = spool.results(win.window_id)
         rows, conflicts, _stats = combine.combine_rows(
             win.window_id, [(under, [row]) for under, row in evaluated])
         for c in conflicts:
-            all_conflicts.append({"window_id": win.window_id, "symbol": c["symbol"],
-                                  "attributions": c["attributions"]})
+            conflict = {"window_id": win.window_id, "symbol": c["symbol"],
+                        "attributions": c["attributions"]}
+            conflict_bytes += len(json.dumps(conflict, separators=(",", ":")).encode("utf-8"))
+            if conflict_bytes > spool.limits.max_conflict_bytes:
+                raise ValueError("window conflict report budget exceeded")
+            all_conflicts.append(conflict)
         kept_total += len(rows)
         srcs = [x for x in all_sources if x["key"].split("/")[2] in days]
         # Stable canonical summary bytes (retry fix): the summary is a
@@ -499,7 +555,8 @@ def build_windows(day_dirs: list[Path] | tuple[Path, ...], underlyings: set[str]
         # metadata in the report, not a window input.
         win_generated = datetime.fromtimestamp(
             win.sessions[-1].close_ms / 1000, tz=timezone.utc).isoformat()
-        win_unders = sorted(selected_underlyings([dir_by_day[d] for d in days]) & unders)
+        win_unders = sorted(selected_underlyings([dir_by_day[d] for d in days],
+                                                  max_source_bytes=spool.limits.max_source_bytes) & unders)
         outputs.write_window(Path(emit_root), win, rows, policy,
                              {d: status[d] for d in days}, srcs, win_generated,
                              {"mode": "live_archive", "universe_scope": universe_scope,
@@ -522,6 +579,7 @@ def build_windows(day_dirs: list[Path] | tuple[Path, ...], underlyings: set[str]
                               "top": [{"rank": r[f"{basis}_rank"], "symbol": r["symbol"],
                                        "pct": r[basis]["pct"]} for r in elig[:top]]}
         report["windows"].append(summary)
+        del evaluated, rows, ranked, elig
     report["contracts_kept"] = kept_total
     report["conflicting_symbols"] = len({c["symbol"] for c in all_conflicts})
     return report
