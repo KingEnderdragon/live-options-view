@@ -22,6 +22,10 @@ from .config import log
 
 class DXLinkFeed:
     _DXLINK_VERSION = "0.1-js/1.0.0"
+    # Channel 1 carries the existing quote/trade/greeks events. Time and sale
+    # gets its own channel and its own FEED_SETUP so a field or event-type
+    # rejection there cannot disturb the accepted market feed.
+    _TIMESALE_CHANNEL = 2
 
     def __init__(self, url: str, token: str):
         self._url   = url
@@ -34,6 +38,11 @@ class DXLinkFeed:
         self._pending_option_subs: list[dict] = []
         self._subscription_error: Optional[str] = None
         self._subscribed          = False
+        self._timesale_symbols: list[str] = []
+        self._ts_subscribed       = False
+        self._ts_error: Optional[str] = None
+        self._ts_counts = {"received": 0, "accepted": 0, "corrected": 0,
+                           "cancelled": 0, "out_of_order": 0, "invalid": 0}
         self._data_logged         = False
         # lifecycle telemetry
         self._connected           = False
@@ -54,7 +63,8 @@ class DXLinkFeed:
         # does this feed actually send", instead of an inference from absence.
         self._event_fields: dict[str, list[str]] = {}
 
-    def set_subscriptions(self, option_symbols: list[str], price_symbols: list[str]):
+    def set_subscriptions(self, option_symbols: list[str], price_symbols: list[str],
+                          timesale_symbols: list[str] | None = None):
         self._subs = []
         for sym in option_symbols:
             for event_type in ("Quote", "Summary", "Trade", "Greeks"):
@@ -62,6 +72,8 @@ class DXLinkFeed:
         for sym in price_symbols:
             for event_type in ("Quote", "Trade", "TradeETH", "Summary"):
                 self._subs.append({"type": event_type, "symbol": sym})
+        # Held separately: sent on its own channel with its own FEED_SETUP.
+        self._timesale_symbols = [sym for sym in (timesale_symbols or []) if sym]
 
     def add_option_subscriptions(self, option_symbols: list[str]):
         """Add the fixed SPY window after a fresh spot arrives; retain it on reconnect."""
@@ -122,6 +134,12 @@ class DXLinkFeed:
                 "quote_time_counts": dict(self._quote_time_counts),
                 "event_fields": {name: list(fields)
                                  for name, fields in self._event_fields.items()},
+                "timesale": {
+                    "requested": bool(self._timesale_symbols),
+                    "subscribed": self._ts_subscribed,
+                    "error": self._ts_error,
+                    "counts": dict(self._ts_counts),
+                },
             }
 
     def needs_reauth(self) -> bool:
@@ -180,6 +198,8 @@ class DXLinkFeed:
         with self._lock:
             self._connected = True
             self._subscribed  = False  # reset so FEED_CONFIG re-subscribes after reconnect
+            self._ts_subscribed = False
+            self._ts_error = None
             self._data_logged = False
             if self._first_connect_seen:
                 self._reconnect_count += 1
@@ -191,6 +211,35 @@ class DXLinkFeed:
             "keepaliveTimeout": 60,
             "acceptKeepaliveTimeout": 60,
         })
+
+    def _send_timesale_setup(self):
+        """Channel-2 FEED_SETUP: trade prints with provider time and session flag."""
+        if not self._timesale_symbols:
+            return
+        self._send({
+            "type": "FEED_SETUP", "channel": self._TIMESALE_CHANNEL,
+            "acceptDataFormat": "FULL",
+            "acceptEventFields": {
+                "TimeAndSale": ["eventType", "eventSymbol", "time", "price", "size",
+                                "tradeId", "extendedTradingHours", "type"],
+            },
+        })
+
+    def _subscribe_timesale(self):
+        with self._lock:
+            if self._ts_subscribed:
+                return
+            self._ts_subscribed = True
+            symbols = list(self._timesale_symbols)
+        subscriptions = [{"type": "TimeAndSale", "symbol": sym} for sym in symbols]
+        for i in range(0, len(subscriptions), 200):
+            batch = subscriptions[i:i + 200]
+            self._send({
+                "type": "FEED_SUBSCRIPTION", "channel": self._TIMESALE_CHANNEL,
+                "reset": i == 0, "add": batch,
+            })
+        log.info(f"subscribed to {len(subscriptions)} TimeAndSale symbols "
+                 f"on channel {self._TIMESALE_CHANNEL}")
 
     def _on_message(self, ws, raw: str):
         try:
@@ -224,6 +273,11 @@ class DXLinkFeed:
                 log.debug(f"DXLink awaiting auth: {msg}")
 
         elif mtype == "CHANNEL_OPENED":
+            channel = msg.get("channel")
+            if channel == self._TIMESALE_CHANNEL:
+                log.info(f"DXLink channel {channel} open -- sending TimeAndSale FEED_SETUP")
+                self._send_timesale_setup()
+                return
             with self._lock:
                 self._channel_open = True
             log.info("DXLink channel 1 open -- sending FEED_SETUP")
@@ -238,8 +292,17 @@ class DXLinkFeed:
                     "Greeks":   ["eventType", "eventSymbol", "volatility", "delta", "gamma", "theta", "vega"],
                 },
             })
+            if self._timesale_symbols:
+                self._send({
+                    "type": "CHANNEL_REQUEST", "channel": self._TIMESALE_CHANNEL,
+                    "service": "FEED", "parameters": {"contract": "AUTO"},
+                })
 
         elif mtype == "FEED_CONFIG":
+            channel = msg.get("channel")
+            if channel == self._TIMESALE_CHANNEL:
+                self._subscribe_timesale()
+                return
             # Server acknowledged FEED_SETUP. Subscribe once only — server
             # may send multiple FEED_CONFIGs (one per batch ack), so guard
             # with a flag to avoid repeated resets.
@@ -275,6 +338,10 @@ class DXLinkFeed:
 
         elif mtype == "ERROR":
             log.error(f"DXLink server error: {msg}")
+            if msg.get("channel") == self._TIMESALE_CHANNEL:
+                with self._lock:
+                    self._ts_error = str(msg.get("error") or msg.get("message")
+                                         or "timesale_channel_error")[:200]
 
     @staticmethod
     def _to_int(val):
@@ -317,6 +384,79 @@ class DXLinkFeed:
             return (datetime(1970, 1, 1) + timedelta(days=int(days))).date().isoformat()
         except (TypeError, ValueError, OverflowError):
             return None
+
+    @staticmethod
+    def _to_bool(value):
+        """Tri-state boolean: True/False, or None when the field is absent/invalid."""
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            try:
+                if float(value) == 1.0:
+                    return True
+                if float(value) == 0.0:
+                    return False
+            except (TypeError, ValueError):
+                return None
+            return None
+        text = str(value).strip().lower()
+        if text in ("true", "1", "yes", "y"):
+            return True
+        if text in ("false", "0", "no", "n"):
+            return False
+        return None
+
+    def _ingest_time_and_sale(self, s, event):
+        """One trade print with documented correction/cancellation semantics.
+
+        dxFeed's TimeAndSale carries each execution with its own provider time,
+        an `extendedTradingHours` flag, and a `type` that marks a new event, a
+        correction or a cancellation against the same `tradeId`. Only a
+        positive, provider-timed print is stored; the receipt clock is never
+        substituted. A correction replaces the stored print for its tradeId, a
+        cancellation removes that print, and an older unattributed print is
+        ignored rather than allowed to move the price backwards.
+        """
+        self._ts_counts["received"] += 1
+        price = self._to_float(event.get("price"))
+        size = self._to_float(event.get("size"))
+        observed = self._event_time(event.get("time"))
+        trade_id = self._to_int(event.get("tradeId"))
+        kind = str(event.get("type") or "").strip().upper()
+        extended = self._to_bool(event.get("extendedTradingHours"))
+        if observed is None or price is None:
+            self._ts_counts["invalid"] += 1
+            return
+        stored_id = s.get("ts_trade_id")
+        cancelled = (kind.startswith("CANCEL") or price <= 0
+                     or (size is not None and size <= 0))
+        if cancelled:
+            self._ts_counts["cancelled"] += 1
+            if trade_id is not None and trade_id == stored_id:
+                for key in ("ts_price", "ts_time", "ts_size", "ts_trade_id",
+                            "ts_extended", "ts_received_at"):
+                    s.pop(key, None)
+            return
+        observed_dt = datetime.fromisoformat(observed)
+        previous_dt = None
+        if s.get("ts_time"):
+            try:
+                previous_dt = datetime.fromisoformat(s["ts_time"])
+            except (TypeError, ValueError):
+                previous_dt = None
+        correction = (kind.startswith("CORRECTION")
+                      or (trade_id is not None and trade_id == stored_id))
+        if previous_dt is not None and observed_dt < previous_dt and not correction:
+            self._ts_counts["out_of_order"] += 1
+            return
+        self._ts_counts["corrected" if correction else "accepted"] += 1
+        s["ts_price"] = price
+        s["ts_time"] = observed
+        if size is not None:
+            s["ts_size"] = size
+        s["ts_trade_id"] = trade_id
+        s["ts_extended"] = extended
+        s["ts_received_at"] = datetime.now(timezone.utc).isoformat()
 
     def _ingest(self, data):
         if not isinstance(data, list):
@@ -384,6 +524,8 @@ class DXLinkFeed:
                         s["last_ts"] = now.isoformat()
                         s["last_observed_at"] = self._event_time(event.get("time"))
                         s["last_session"] = "extended" if et == "TradeETH" else "regular"
+                elif et == "TimeAndSale":
+                    self._ingest_time_and_sale(s, event)
                 elif et == "Greeks":
                     for field in ("volatility", "delta", "gamma", "theta", "vega"):
                         v = self._to_float(event.get(field))

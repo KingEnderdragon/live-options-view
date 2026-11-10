@@ -28,6 +28,7 @@ from .config import (
     PRICE_LANE_HEALTH_SECS, PRICE_LANE_MAX_AUTH_CYCLES,
     PRICE_LANE_MAX_BACKOFF_SECS, PRICE_LANE_MIN_BACKOFF_SECS,
     PRICE_LANE_CONTRACT_REFRESH_SECS, PRICE_LANE_RETRY_WINDOW_SECS,
+    PRICE_LANE_TIMESALE,
     CONTRACT_RESOLVE_RETRY_MIN_SECS, CONTRACT_RESOLVE_RETRY_MAX_SECS, R2_BUCKET,
     log,
 )
@@ -245,6 +246,21 @@ class PriceLane:
             symbols.append("SPY")
         return list(dict.fromkeys(symbols))
 
+    def _timesale_symbols(self) -> list[str]:
+        """US equity/ETF prints only: futures and crypto already carry time."""
+        if not PRICE_LANE_TIMESALE:
+            return []
+        symbols = []
+        for label, symbol in PRICE_TICKERS.items():
+            if not symbol:
+                continue
+            instrument = INSTRUMENTS_BY_LABEL.get(label) or {}
+            if instrument.get("asset_class") in ("equity", "etf"):
+                symbols.append(symbol)
+        if COLLECT_SPY:
+            symbols.append("SPY")
+        return list(dict.fromkeys(symbols))
+
     def _auth_budget_allows(self, now: datetime) -> bool:
         if self._auth_window_start is None or now - self._auth_window_start > self._retry_window:
             self._auth_window_start = now
@@ -274,7 +290,7 @@ class PriceLane:
         self._record_resolution_outcome(now)
         symbols = self._price_symbols()
         feed = self._feed_factory(auth["streamer_url"], auth["streamer_token"])
-        feed.set_subscriptions([], symbols)  # Option symbols are never part of this lane.
+        feed.set_subscriptions([], symbols, self._timesale_symbols())  # Option symbols are never part of this lane.
         feed.start()
         feed.wait_ready(timeout=30)
         self._feed = feed
@@ -425,7 +441,7 @@ class PriceLane:
         try:
             new_feed = self._feed_factory(self._auth_payload["streamer_url"],
                                           self._auth_payload["streamer_token"])
-            new_feed.set_subscriptions([], symbols)
+            new_feed.set_subscriptions([], symbols, self._timesale_symbols())
             new_feed.start()
             if not new_feed.wait_ready(timeout=30):
                 raise RuntimeError("price_lane_feed_not_ready")

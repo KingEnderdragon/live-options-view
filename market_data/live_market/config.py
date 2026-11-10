@@ -61,6 +61,10 @@ WEEKLY_R2_PREFIX = "raw/weekly"
 # PRICE_LANE_ENABLED=0 restores the legacy in-session publisher; both paths are
 # mutually exclusive, so prices.json always has exactly one writer.
 PRICE_LANE_ENABLED = os.environ.get("PRICE_LANE_ENABLED", "1") != "0"
+# Trade prints for extended-hours equity prices, on a separate DXLink channel so
+# a field/event rejection cannot disturb the accepted quote/trade feed. Set 0 to
+# disable the probe without reverting the release.
+PRICE_LANE_TIMESALE = os.environ.get("PRICE_LANE_TIMESALE", "1") != "0"
 PRICE_LANE_HEALTH_KEY = "intraday/price_lane_health.json"
 PRICE_LANE_HEALTH_SECS = 30
 PRICE_LANE_MIN_BACKOFF_SECS = 60
@@ -199,6 +203,7 @@ __all__ = [
     "R2_BUCKET",
     "WEEKLY_R2_PREFIX",
     "PRICE_LANE_ENABLED",
+    "PRICE_LANE_TIMESALE",
     "PRICE_LANE_HEALTH_KEY",
     "PRICE_LANE_HEALTH_SECS",
     "PRICE_LANE_MIN_BACKOFF_SECS",

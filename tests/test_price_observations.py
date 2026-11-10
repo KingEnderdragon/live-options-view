@@ -494,6 +494,150 @@ class FeedEventEvidence(unittest.TestCase):
         self.assertEqual(fields["TradeETH"], ["price", "time"],
                          "the first observed TradeETH sample is preserved")
 
+    def test_timesale_uses_its_own_channel_setup_and_subscription(self):
+        feed = DXLinkFeed("unused", "unused")
+        sent = []
+        feed._send = sent.append
+        feed.set_subscriptions([], ["QQQ"], ["QQQ", "SPY"])
+        for message in (
+            {"type": "CHANNEL_OPENED", "channel": 1},
+            {"type": "CHANNEL_OPENED", "channel": 2},
+            {"type": "FEED_CONFIG", "channel": 1},
+            {"type": "FEED_CONFIG", "channel": 2},
+        ):
+            feed._on_message(None, json.dumps(message))
+        base_setup = [m for m in sent if m.get("type") == "FEED_SETUP" and m.get("channel") == 1]
+        self.assertIn("Quote", base_setup[0]["acceptEventFields"])
+        self.assertNotIn("TimeAndSale", base_setup[0]["acceptEventFields"])
+        ts_setup = [m for m in sent if m.get("type") == "FEED_SETUP" and m.get("channel") == 2]
+        self.assertEqual(ts_setup[0]["acceptEventFields"]["TimeAndSale"][:2],
+                         ["eventType", "eventSymbol"])
+        self.assertIn("extendedTradingHours", ts_setup[0]["acceptEventFields"]["TimeAndSale"])
+        ts_subs = [m for m in sent if m.get("type") == "FEED_SUBSCRIPTION"
+                   and m.get("channel") == 2]
+        self.assertTrue(ts_subs[0]["reset"])
+        self.assertEqual([entry["symbol"] for entry in ts_subs[0]["add"]], ["QQQ", "SPY"])
+        base_subs = [m for m in sent if m.get("type") == "FEED_SUBSCRIPTION"
+                     and m.get("channel") == 1]
+        self.assertEqual([entry["type"] for entry in base_subs[0]["add"]][:4],
+                         ["Quote", "Trade", "TradeETH", "Summary"])
+        self.assertTrue(feed.get_health()["timesale"]["subscribed"])
+
+    def test_timesale_channel_error_does_not_touch_the_market_feed(self):
+        feed = DXLinkFeed("unused", "unused")
+        sent = []
+        feed._send = sent.append
+        feed.set_subscriptions([], ["QQQ"], ["QQQ"])
+        feed._on_message(None, json.dumps({"type": "CHANNEL_OPENED", "channel": 2}))
+        feed._on_message(None, json.dumps({"type": "ERROR", "channel": 2,
+                                           "error": "unknown event type"}))
+        health = feed.get_health()["timesale"]
+        self.assertEqual(health["error"], "unknown event type")
+        self.assertFalse(feed.needs_reauth())
+        self.assertEqual(feed.get_health()["connected"], False)
+
+    def test_timesale_print_correction_cancellation_and_ordering(self):
+        feed = DXLinkFeed("unused", "unused")
+        millis = int(datetime.fromisoformat("2026-11-09T22:00:00+00:00").timestamp() * 1000)
+        feed._ingest([{"eventType": "TimeAndSale", "eventSymbol": "QQQ", "price": 680.1,
+                       "size": 100, "time": millis, "tradeId": 7,
+                       "extendedTradingHours": True, "type": "NEW"}])
+        print_state = feed.get_state()["QQQ"]
+        self.assertEqual((print_state["ts_price"], print_state["ts_extended"],
+                          print_state["ts_trade_id"]), (680.1, True, 7))
+        feed._ingest([{"eventType": "TimeAndSale", "eventSymbol": "QQQ", "price": 679.0,
+                       "size": 10, "time": millis - 5000, "tradeId": 8,
+                       "extendedTradingHours": True, "type": "NEW"}])
+        self.assertEqual(feed.get_state()["QQQ"]["ts_price"], 680.1)
+        self.assertEqual(feed.get_health()["timesale"]["counts"]["out_of_order"], 1)
+        feed._ingest([{"eventType": "TimeAndSale", "eventSymbol": "QQQ", "price": 680.2,
+                       "size": 100, "time": millis, "tradeId": 7,
+                       "extendedTradingHours": True, "type": "CORRECTION"}])
+        self.assertEqual(feed.get_state()["QQQ"]["ts_price"], 680.2)
+        self.assertEqual(feed.get_health()["timesale"]["counts"]["corrected"], 1)
+        feed._ingest([{"eventType": "TimeAndSale", "eventSymbol": "QQQ", "price": 0,
+                       "size": 0, "time": millis, "tradeId": 7,
+                       "extendedTradingHours": True, "type": "CANCEL"}])
+        self.assertNotIn("ts_price", feed.get_state()["QQQ"])
+        self.assertEqual(feed.get_health()["timesale"]["counts"]["cancelled"], 1)
+
+
+class ExtendedPrintSelection(unittest.TestCase):
+    """A provider-timed extended print replaces the unknown-time midpoint."""
+
+    def setUp(self):
+        self.old_last = copy.deepcopy(p._last_prices)
+        p._last_prices.clear()
+        self.now = datetime(2026, 11, 9, 21, 30, tzinfo=UTC)
+        self.start = "2026-11-09T21:00:00+00:00"
+
+    def tearDown(self):
+        p._last_prices.clear()
+        p._last_prices.update(self.old_last)
+
+    def publish(self, state):
+        sink = Sink()
+        context = {"writer_id": "test-writer", "summary": {"mode": "equities"},
+                   "sessions": {"QQQ": "afterhours"}, "session_starts": {"QQQ": self.start}}
+        with patch.object(entry, "fetch_yf_prices_bounded", return_value={}):
+            p.push_prices(sink, Feed(state), entry.Counters(), lane_context=context,
+                          now_utc=self.now)
+        return sink.payload["prices"]["QQQ"]
+
+    def raw(self, **extra):
+        state = {"last": 678.78, "last_ts": "2026-11-09T20:59:59.916000+00:00",
+                 "last_observed_at": "2026-11-09T20:59:59.916000+00:00",
+                 "last_session": "regular", "bid": 679.58, "ask": 679.61,
+                 "bid_ts": "2026-11-09T21:29:59+00:00",
+                 "ask_ts": "2026-11-09T21:29:59+00:00",
+                 "prev_close": 675.0, "prev_close_date": "2026-11-06"}
+        state.update(extra)
+        return state
+
+    def test_extended_print_replaces_the_unknown_time_midpoint(self):
+        row = self.publish({"QQQ": self.raw(
+            ts_price=679.9, ts_time="2026-11-09T21:29:55+00:00", ts_trade_id=11,
+            ts_extended=True, ts_received_at="2026-11-09T21:29:56+00:00")})
+        self.assertEqual(row["price"], 679.9)
+        self.assertEqual(row["price_basis"], "last_trade")
+        self.assertEqual(row["observed_at"], "2026-11-09T21:29:55+00:00")
+        self.assertEqual(row["quote_ts"], "2026-11-09T21:29:56+00:00")
+        self.assertEqual(row["session"], "extended")
+
+    def test_regular_session_print_is_not_used_after_hours(self):
+        row = self.publish({"QQQ": self.raw(
+            ts_price=679.9, ts_time="2026-11-09T21:29:55+00:00",
+            ts_extended=False, ts_received_at="2026-11-09T21:29:56+00:00")})
+        self.assertEqual(row["price_basis"], "bid_ask_midpoint")
+        self.assertIsNone(row["observed_at"])
+
+    def test_print_before_the_session_starts_is_ignored(self):
+        row = self.publish({"QQQ": self.raw(
+            ts_price=600.0, ts_time="2026-11-09T20:30:00+00:00",
+            ts_extended=True, ts_received_at="2026-11-09T21:29:56+00:00")})
+        self.assertEqual(row["price_basis"], "bid_ask_midpoint")
+
+    def test_a_newer_snapshot_trade_beats_an_older_print(self):
+        row = self.publish({"QQQ": self.raw(
+            last_observed_at="2026-11-09T21:29:58+00:00",
+            last_ts="2026-11-09T21:29:58+00:00",
+            ts_price=679.0, ts_time="2026-11-09T21:29:55+00:00",
+            ts_extended=True, ts_received_at="2026-11-09T21:29:56+00:00")})
+        self.assertEqual(row["price"], 678.78)
+        self.assertEqual(row["observed_at"], "2026-11-09T21:29:58+00:00")
+
+    def test_print_without_the_flag_is_accepted_inside_the_session(self):
+        row = self.publish({"QQQ": self.raw(
+            ts_price=679.7, ts_time="2026-11-09T21:29:50+00:00",
+            ts_received_at="2026-11-09T21:29:51+00:00")})
+        self.assertEqual(row["price"], 679.7)
+        self.assertEqual(row["observed_at"], "2026-11-09T21:29:50+00:00")
+
+    def test_midpoint_fallback_survives_without_a_print(self):
+        row = self.publish({"QQQ": self.raw()})
+        self.assertEqual(row["price_basis"], "bid_ask_midpoint")
+        self.assertIsNone(row["observed_at"], "receipt time never becomes observation time")
+
 
 if __name__ == "__main__":
     unittest.main()

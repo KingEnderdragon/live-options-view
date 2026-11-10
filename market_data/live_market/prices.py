@@ -295,6 +295,34 @@ def _midpoint_input(raw):
     }
 
 
+def _print_selection(raw, *, market_session, session_start, trade_observed):
+    """A provider-timed TimeAndSale print for the active extended session.
+
+    Only extended sessions consult prints. The print must carry its own
+    provider time inside the session, must not be marked regular-session by the
+    provider, and must be newer than the snapshot Trade event; otherwise the
+    caller keeps its existing selection. The collector receipt is carried
+    separately as the row's quote/receipt time and never becomes the
+    observation time.
+    """
+    if market_session not in EXTENDED_STATUSES:
+        return None
+    price = _positive(raw.get("ts_price"))
+    observed = _parse_instant(raw.get("ts_time"))
+    receipt = _parse_instant(raw.get("ts_received_at"))
+    if price is None or observed is None or receipt is None:
+        return None
+    start = _parse_instant(session_start) if session_start else None
+    if start is not None and observed < start:
+        return None
+    if raw.get("ts_extended") is False:
+        return None
+    if trade_observed is not None and observed <= trade_observed:
+        return None
+    return {"price": price, "receipt": _iso(receipt), "observed": _iso(observed),
+            "basis": "last_trade", "reason": None, "session": "extended"}
+
+
 def _select_price_input(raw, *, market_session=None, session_start=None, now=None):
     """Select the price for the active session with its exact provenance.
 
@@ -314,9 +342,19 @@ def _select_price_input(raw, *, market_session=None, session_start=None, now=Non
         trade_current = last_observed is not None and (
             start is None or last_observed >= start)
         if trade_current:
+            print_input = _print_selection(
+                raw, market_session=market_session, session_start=session_start,
+                trade_observed=last_observed)
+            if print_input is not None:
+                return print_input
             return {"price": last, "receipt": _iso(last_receipt),
                     "observed": _iso(last_observed), "basis": "last_trade",
                     "reason": None, "session": raw.get("last_session")}
+        print_input = _print_selection(
+            raw, market_session=market_session, session_start=session_start,
+            trade_observed=last_observed)
+        if print_input is not None:
+            return print_input
         if market_session in EXTENDED_STATUSES:
             quote = _qualified_extended_quote(raw, now)
             if quote is not None:
@@ -325,6 +363,11 @@ def _select_price_input(raw, *, market_session=None, session_start=None, now=Non
                 "observed": _iso(last_observed), "basis": "last_trade",
                 "reason": None if last_observed else "provider_event_time_unavailable",
                 "session": raw.get("last_session")}
+    print_input = _print_selection(
+        raw, market_session=market_session, session_start=session_start,
+        trade_observed=None)
+    if print_input is not None:
+        return print_input
     return _midpoint_input(raw)
 
 

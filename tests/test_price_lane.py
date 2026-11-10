@@ -56,9 +56,10 @@ class FakeFeed:
         self.reauth = False
         self.dead_restarts = 0
 
-    def set_subscriptions(self, option_symbols, price_symbols):
+    def set_subscriptions(self, option_symbols, price_symbols, timesale_symbols=None):
         self.option_symbols = list(option_symbols)
         self.price_symbols = list(price_symbols)
+        self.timesale_symbols = list(timesale_symbols or [])
 
     def start(self):
         self.started = True
@@ -503,6 +504,19 @@ class LaneRuntime(unittest.TestCase):
         self.assertTrue(self.feeds[0].stopped)
         self.assertIn("/GCG27:XCEC", self.feeds[1].price_symbols)
         self.assertNotIn(True, force_calls, "the drift check does not need another auth or provider call")
+
+    def test_timesale_subscriptions_cover_equities_and_can_be_disabled(self):
+        lane = self.make_lane()
+        lane.cycle()
+        symbols = self.feed.timesale_symbols
+        self.assertIn("QQQ", symbols)
+        self.assertIn("SPY", symbols)
+        self.assertTrue(all(":" not in symbol for symbol in symbols),
+                        "futures and crypto already carry provider-timed trades")
+        with patch.object(price_lane, "PRICE_LANE_TIMESALE", False):
+            disabled = self.make_lane()
+            disabled.cycle()
+        self.assertEqual(disabled._feed.timesale_symbols, [])
 
     def test_writer_plan_is_single_valued(self):
         from market_data.live_market import runner

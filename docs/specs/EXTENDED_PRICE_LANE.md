@@ -157,6 +157,30 @@ If no qualified quote exists, the stale close is retained rather than replaced.
 Regular-session rows are unchanged, and futures/crypto/FX/daily families keep
 their provider-timed or explicitly dated selection.
 
+### Extended trade prints (TimeAndSale)
+
+The lane also probes the documented same-feed `TimeAndSale` route rather than
+declaring the provider incapable. It subscribes trade prints for US equity/ETF
+symbols only, on a **separate DXLink channel with its own `FEED_SETUP`**, so a
+field or event-type rejection there cannot disturb the accepted quote/trade
+feed. `PRICE_LANE_TIMESALE=0` disables the probe without reverting the release.
+
+A print is usable only when it carries its own provider `time` and a positive
+price. The parser applies dxFeed's documented transaction semantics: `type`
+NEW accepts, CORRECTION replaces the stored print for the same `tradeId`,
+CANCEL removes it, and an older print without a matching id is ignored as
+out-of-order. The collector receipt is stored beside the print but never
+substitutes for the provider time.
+
+Selection uses a print only in premarket/after-hours, only when the print's
+provider time is inside the active session, only when the provider did not mark
+it regular-session, and only when it is newer than the snapshot Trade event.
+Otherwise the qualified-quote or stale-close path above is unchanged. Health
+reports `timesale.requested/subscribed/error/counts` and the observed event
+fields, so a deployment states whether prints arrive with real timestamps
+instead of inferring it. Local access evidence (no session credential, Railway
+unauthorized) is in `docs/evidence/timesale-probe/2026-11-09-access.md`.
+
 Provider evidence, and what it does not prove: the lane subscribes Quote, Trade,
 TradeETH and Summary, and requests `bidTime`/`askTime` on Quote and `time` on
 both trade types. In the observed 2.7-hour after-hours window no TradeETH event
