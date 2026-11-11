@@ -13,6 +13,7 @@ const vm = require('node:vm');
 const { createHash } = require('node:crypto');
 const shared = require('../site/shared.js');
 const { chainLatestPath, occRoot, validateChainPayload, ChainSelection, relativeOiRanges, summarizeSpyHealth } = shared;
+const sharedFormat = require('../site/shared/format.js');
 
 const NOW = Date.now();
 function snapshot(symbol, { declare = true, price = symbol === 'SPY' ? 670.2 : 600.1, rows, ts = new Date(NOW).toISOString(), date = '2026-10-06', expiration = date } = {}) {
@@ -328,6 +329,9 @@ function harness(saved = 'QQQ') {
     updateQqqMomentumLine: (um) => calls.momentum.push(um?.symbol),
     updateQuoteInterests: () => calls.published.push('interests'),
     renderPaper: () => { calls.paper++; },
+    // #178: the dot's freshness judgment and the header's snapshot line are
+    // the same shipped formatter, so the harness must inject the real one.
+    formatChainSnapshot: sharedFormat.formatChainSnapshot,
     renderHeatmap: (data, symbol) => {
       calls.heatmap.push({ symbol, dataSymbol: data.symbol, price: data.underlying_price });
       el('heatmap-body').innerHTML = `rows:${data.symbol}`;
@@ -370,6 +374,27 @@ const settle = () => new Promise(r => setImmediate(r));
     assert.equal(h.el('title').textContent, 'QQQ 0DTE Live OI');
     assert.deepEqual(h.calls.heatmap.at(-1), { symbol: 'QQQ', dataSymbol: 'QQQ', price: 600.1 });
     assert.equal(h.el('underlying-select').value, 'QQQ');
+  }
+
+  // #178: the status dot and the header line share one freshness judgment, so a
+  // chain that stopped collecting is not marked live just because its rows
+  // still carry bids.
+  {
+    const h = harness();
+    h.routes['intraday/latest.json'] = h.reply(snapshot('QQQ'));
+    await h.api.fetchLatest();
+    assert.equal(h.el('status-dot').className, 'live', 'a current snapshot is marked live');
+    assert.equal(h.el('status-text').textContent, '10:30 ET', 'the status text stays the producer timestamp label');
+    assert.equal(sharedFormat.formatChainSnapshot(h.scope.chainState.QQQ.data).state, 'live');
+  }
+  {
+    const h = harness();
+    h.routes['intraday/latest.json'] = h.reply(snapshot('QQQ', { ts: new Date(Date.now() - 6 * 60_000).toISOString() }));
+    await h.api.fetchLatest();
+    assert.equal(h.el('status-dot').className, 'stale', 'a six-minute-old chain is not marked live');
+    const frozen = sharedFormat.formatChainSnapshot(h.scope.chainState.QQQ.data);
+    assert.equal(frozen.state, 'retained', 'and the header calls it a retained reading');
+    assert.match(frozen.text, /^snapshot 10:30 ET · Regular session · 6m ago · retained$/);
   }
 
   // A delayed SPY reply that lands after switching back to QQQ is dropped.

@@ -509,18 +509,25 @@ class AutoCleanupTests(unittest.TestCase):
         self.assertFalse(Path(hook["emit_root"]).exists())
 
     def test_low_headroom_cycle_that_published_still_cleans_up(self):
-        # The pre-check passes at the boundary; headroom then drops to
-        # zero mid-cycle. Cleanup never consults disk_usage, so the
-        # published cycle's emit is still removed.
+        # Headroom drops after publication, not while the disk-backed
+        # builder still requires scratch. Cleanup must not need headroom.
         calls = {"n": 0}
+        published = {"done": False}
+        original_publish = live.publish_windows
+
+        def publish_then_fill(*args, **kwargs):
+            result = original_publish(*args, **kwargs)
+            published["done"] = True
+            return result
 
         def fake_disk_usage(path):
             calls["n"] += 1
-            free = live.MIN_EMIT_FREE_BYTES if calls["n"] == 1 else 0
+            free = 0 if published["done"] else live.MIN_EMIT_FREE_BYTES
             return SimpleNamespace(total=5_000_000_000,
                                    used=5_000_000_000 - free, free=free)
 
-        with mock.patch.object(live.shutil, "disk_usage", fake_disk_usage):
+        with mock.patch.object(live.shutil, "disk_usage", fake_disk_usage), \
+                mock.patch.object(live, "publish_windows", publish_then_fill):
             report = live.run_after_finalize(
                 self.spool, "2026-10-09", self.universe,
                 backend=pub.LocalFilesystemBackend(self.backend_root),
