@@ -1,6 +1,10 @@
+import json
+import os
 import unittest
-from datetime import datetime, timezone, date
+from datetime import datetime, timezone, date, timedelta
 from unittest.mock import patch
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 from market_data.live_market import settlement_marks, quotes, chain
 from market_data.live_market import market as mkt
 from market_data.live_market.state import Counters, SnapshotTracker, UnderlyingSession
@@ -130,6 +134,81 @@ class MultiUnderlying(unittest.TestCase):
   self.assertEqual(closed['unavailable'],{'QQQ261110C00677000':'session_closed','NOTASYMBOL':'unknown_symbol'})
   self.assertEqual([q['symbol'] for q in closed['quotes']],['QQQ'],'tickers keep working from the price lane')
   self.assertEqual(closed['health']['state'],'offline')
+
+ def test_http_handler_separates_deliberate_stop_from_feed_failure(self):
+  # The review concern: `offline` covers three different situations -- no
+  # session yet, a session that died, and a session that ended on purpose.
+  # Mapping all of them to "closed" would hide a trading-hours outage, so the
+  # handler must say which one it is, on the wire, and the answer must come
+  # from lifecycle state rather than from a clock. This drives the real
+  # ThreadingHTTPServer handler over real HTTP.
+  from market_data.live_market.quotes import start_live_quote_server
+  class Feed:
+   def __init__(self, live=True): self.live=live; self.added=[]
+   def add_option_subscriptions(self,symbols): self.added+=symbols
+   def get_state(self): return {}
+   def get_health(self):
+    return {'last_feed_event_time':(datetime.now(timezone.utc) if self.live else None),
+            'connected':self.live,'authorized':self.live,'channel_open':self.live}
+  def get(port,path,symbols):
+   request=Request(f'http://127.0.0.1:{port}{path}?symbols={symbols}',
+                   headers={'X-Live-Quote-Key':access_key})
+   try:
+    with urlopen(request,timeout=10) as response:
+     return response.status, json.loads(response.read())
+   except HTTPError as error:
+    return error.code, json.loads(error.read())
+  access_key='test-key'
+  registry=quotes.LiveQuoteRegistry()
+  server=None
+  with patch.dict(os.environ,{'LIVE_QUOTE_KEY':access_key}):
+   server=start_live_quote_server(registry,port=0)
+  port=server.server_address[1]
+  try:
+   # 1. Before any session: uninitialized, not closed.
+   status,body=get(port,'/live-quotes','QQQ261110C00677000')
+   self.assertEqual(status,503)
+   self.assertEqual(body['health']['state'],'offline')
+   self.assertEqual(body['health']['session'],'uninitialized')
+
+   # 2. In-session but the feed is not delivering: a failure while the lane is
+   #    supposed to be up, and explicitly NOT a closed session.
+   registry.set_session(Feed(live=False),{})
+   status,body=get(port,'/live-quotes','QQQ261110C00677000')
+   self.assertEqual(status,503)
+   self.assertEqual(body['health']['session'],'open')
+   self.assertEqual(body['health']['state'],'connecting')
+
+   # 3. A session that died (auth circuit, token refresh, unhandled exception).
+   registry.clear_session(reason='session_failed')
+   status,body=get(port,'/live-quotes','QQQ261110C00677000')
+   self.assertEqual(status,503)
+   self.assertEqual(body['health']['session'],'session_failed')
+   self.assertEqual(body['health']['state'],'offline')
+
+   # 4. The deliberate end of the trading session: the only closed lane.
+   registry.set_session(Feed(),{})
+   registry.clear_session(reason='session_closed')
+   status,body=get(port,'/live-quotes','QQQ261110C00677000')
+   self.assertEqual(status,503)
+   self.assertEqual(body['health']['session'],'session_closed')
+   self.assertEqual(body['error'],'Live quote feed unavailable')
+
+   # 5. Tickers keep answering from the price lane in every one of those states,
+   #    which is why an option-only 503 never looked like a total outage.
+   registry.update_ticker_fallbacks({'QQQ':{'price':677.4,'quote_ts':'2026-11-10T23:30:00+00:00'}},
+                                    '2026-11-10T23:30:00+00:00')
+   status,body=get(port,'/live-quotes','QQQ')
+   self.assertEqual(status,200)
+   self.assertEqual(body['health']['session'],'session_closed')
+   self.assertEqual(body['quotes'][0]['symbol'],'QQQ')
+
+   # 6. Only the two known reasons are accepted, so a typo cannot invent a state.
+   with self.assertRaises(ValueError):
+    registry.clear_session(reason='offline')
+  finally:
+   if server is not None:
+    server.shutdown(); server.server_close()
 
  def test_provider_observed_pairs_price_with_its_own_event_time(self):
   # Unknown provider time: price is computable but there is no provider

@@ -301,7 +301,7 @@ class LiveQuotePoller {
     this.health = {
       state: 'idle', lastAttemptAt: null, lastSuccessAt: null,
       retryAt: null, quoteAgeMs: null, requested: 0, returned: 0,
-      httpStatus: null, serviceState: null, message: 'Waiting for quote interests',
+      httpStatus: null, serviceState: null, sessionState: null, message: 'Waiting for quote interests',
     };
     this.unsubscribeInterests = service.subscribeInterests(() => this.kick());
   }
@@ -400,18 +400,22 @@ class LiveQuotePoller {
         returned: quotes.length,
         httpStatus: 200,
         serviceState: payload.health?.state ?? null,
+        sessionState: payload.health?.session ?? null,
         message: stale ? 'Live quotes are stale' : partial ? 'Some live quotes are unavailable' : 'Live quotes healthy',
       });
       this._schedule(this._normalInterval());
     } catch (error) {
-      const serviceState = typeof error.body?.health?.state === 'string' ? error.body.health.state : null;
-      // 'offline' means the producer has no feed session at all: after the
-      // session stop it clears the session pointer and refuses option
-      // requests while still answering tickers from the price lane. Backing
-      // off exponentially against that is noise -- the lane is closed, and
-      // the honest thing to show is the closed state, probed gently in case
-      // the collector comes back.
-      const closed = serviceState === 'offline' && error.status === 503;
+      const health = error.body?.health || {};
+      const serviceState = typeof health.state === 'string' ? health.state : null;
+      const sessionState = typeof health.session === 'string' ? health.session : null;
+      // 'offline' alone is ambiguous: the producer reports it before the
+      // collector has opened a session, after a deliberate stop, and after a
+      // session died. Only an explicit `session: "session_closed"` -- the
+      // deliberate end of a trading session -- may be shown as a closed lane.
+      // Anything else offline is an outage while the lane should be up, and
+      // must keep the ordinary failure and backoff behaviour; labelling a
+      // trading-hours failure "session closed" would hide it.
+      const closed = error.status === 503 && sessionState === 'session_closed';
       if (!closed) this.failureCount += 1;
       const retryMs = closed
         ? this.closedIntervalMs
@@ -423,6 +427,7 @@ class LiveQuotePoller {
         returned: 0,
         httpStatus: error.status || null,
         serviceState,
+        sessionState,
         retryAt: new Date(this.nowFn() + retryMs).toISOString(),
         message: closed ? 'The option quote feed is closed for this session'
           : rateLimited ? 'Live quotes rate limited' : 'Live quotes unavailable',

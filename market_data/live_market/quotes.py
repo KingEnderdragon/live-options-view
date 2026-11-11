@@ -51,17 +51,35 @@ class LiveQuoteRegistry:
         self._contracts: dict[str, dict] = {}
         self._requested_contracts = set()
         self._ticker_fallbacks: dict[str, dict] = {}
+        # WHY a session is absent. `offline` alone cannot tell "the session
+        # finished on purpose" from "the process has not started one yet" or
+        # "the session died", and callers that treat them alike either hide a
+        # trading-hours outage or cry failure every evening. The value is
+        # explicit, never inferred from a clock.
+        self._session = "uninitialized"
 
     def set_session(self, feed: DXLinkFeed, contracts: dict[str, dict]):
         with self._lock:
             self._feed = feed
             self._contracts = dict(contracts)
             self._requested_contracts = set()
+            self._session = "open"
 
-    def clear_session(self):
+    def clear_session(self, reason: str = "session_closed"):
+        """Drop the session pointer, recording WHY it went.
+
+        `session_closed` is the deliberate end of a trading session and the
+        only value a client may show as a closed lane. `session_failed` is an
+        auth circuit, a token-refresh failure or an unhandled session
+        exception: the lane is down while it should be up, so callers must
+        keep treating it as a failure and keep backing off.
+        """
+        if reason not in ("session_closed", "session_failed"):
+            raise ValueError(f"unknown session end reason: {reason}")
         with self._lock:
             self._feed = None
             self._contracts = {}
+            self._session = reason
 
     def update_ticker_fallbacks(self, prices: dict[str, dict], observed_at: str):
         with self._lock:
@@ -73,9 +91,11 @@ class LiveQuoteRegistry:
     def health(self) -> dict:
         with self._lock:
             feed = self._feed
+            session = self._session
         now = datetime.now(timezone.utc)
         if feed is None:
-            return {"state": "offline", "last_quote_at": None, "server_ts": now.isoformat()}
+            return {"state": "offline", "session": session,
+                    "last_quote_at": None, "server_ts": now.isoformat()}
         feed_health = feed.get_health()
         last_event = feed_health["last_feed_event_time"]
         if not (feed_health["connected"] and feed_health["authorized"] and feed_health["channel_open"]):
@@ -88,6 +108,7 @@ class LiveQuoteRegistry:
             state = "live"
         return {
             "state": state,
+            "session": session,
             "last_quote_at": last_event.isoformat() if last_event else None,
             "server_ts": now.isoformat(),
         }
@@ -209,7 +230,7 @@ class LiveQuoteRegistry:
         }
 
 
-def start_live_quote_server(registry: LiveQuoteRegistry):
+def start_live_quote_server(registry: LiveQuoteRegistry, port: Optional[int] = None):
     access_key = os.environ.get("LIVE_QUOTE_KEY", "")
 
     class Handler(BaseHTTPRequestHandler):
@@ -258,10 +279,10 @@ def start_live_quote_server(registry: LiveQuoteRegistry):
         def log_message(self, format, *args):
             log.debug("live quote HTTP: " + format, *args)
 
-    server = ThreadingHTTPServer(("0.0.0.0", LIVE_QUOTE_PORT), Handler)
+    server = ThreadingHTTPServer(("0.0.0.0", port or LIVE_QUOTE_PORT), Handler)
     thread = threading.Thread(target=server.serve_forever, name="live-quote-http", daemon=True)
     thread.start()
-    log.info(f"live quote HTTP service started on port {LIVE_QUOTE_PORT}")
+    log.info(f"live quote HTTP service started on port {server.server_address[1]}")
     return server
 
 

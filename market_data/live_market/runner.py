@@ -282,7 +282,7 @@ def _run_session(token_manager: OAuthTokenManager, quote_registry: LiveQuoteRegi
         if feed.needs_reauth():
             if reauth_attempted:
                 feed.stop()
-                quote_registry.clear_session()
+                quote_registry.clear_session(reason="session_failed")
                 raise TastyAuthError(
                     "streamer-reauth-circuit",
                     detail="one-reauth-chain-already-used-this-session",
@@ -295,7 +295,7 @@ def _run_session(token_manager: OAuthTokenManager, quote_registry: LiveQuoteRegi
                 log.info("streamer token refreshed")
             except TastyAuthError:
                 feed.stop()
-                quote_registry.clear_session()
+                quote_registry.clear_session(reason="session_failed")
                 raise
         feed.restart_if_dead()
 
@@ -344,7 +344,9 @@ def _run_session(token_manager: OAuthTokenManager, quote_registry: LiveQuoteRegi
         finalize_rvol_baseline(s3, today, us)
 
     feed.stop()
-    quote_registry.clear_session()
+    # Deliberate end of a trading session: the only path a client may show as a
+    # closed lane. Every failure path below records session_failed instead.
+    quote_registry.clear_session(reason="session_closed")
 
 
 def main():
@@ -383,13 +385,13 @@ def main():
         try:
             _entry._run_session(token_manager, quote_registry)
         except TastyAuthError as exc:
-            quote_registry.clear_session()
+            quote_registry.clear_session(reason="session_failed")
             blocked_session_date = datetime.now(ET).date()
             log.critical(
                 f"{exc}; auth circuit open for exchange session {blocked_session_date}"
             )
         except Exception as e:
-            quote_registry.clear_session()
+            quote_registry.clear_session(reason="session_failed")
             blocked_session_date = datetime.now(ET).date()
             log.error(
                 f"session failed: {e}; startup circuit open for exchange session "
