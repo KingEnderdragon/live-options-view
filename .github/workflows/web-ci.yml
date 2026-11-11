@@ -90,6 +90,8 @@ jobs:
         run: python tests/test_changed_paths.py
       - name: bot registration probe contract
         run: node tests/preflight_worker_contract.test.js
+      - name: capture-prefix R2 write boundary (G4a)
+        run: node tests/capture_write_boundary.test.js
       - name: bot account closure and identity compatibility
         run: node tests/account_closure.test.js
       - name: automated tab panel
