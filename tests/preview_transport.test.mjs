@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import gateway from '../frontend/worker.mjs';
+import { handleBrowserData } from '../backend/browser-data.js';
 import { createPreview, startPreview, assetBinding, LOCAL_ORIGIN } from '../scripts/preview-local.mjs';
 import { buildAssets, verifyArtifact, ROOT, FLOOR } from '../scripts/build-assets.mjs';
 
@@ -73,4 +74,24 @@ test('tracked inventory excludes Git-ignored files and rejects misleading inside
   assert.throws(()=>buildAssets({root,out:resolve(root,'..release'),revision:FLOOR}),/outside source worktree/);
   const file=resolve(out,'release.json');manifest.schema=[];writeFileSync(file,JSON.stringify(manifest));
   assert.throws(()=>verifyArtifact(out,{...manifest,schema:[]}),/schema contract mismatch/);
+});
+test('preview public route preserves production method/key/query status contract',async()=>{
+  const original=globalThis.fetch,p=createPreview();
+  globalThis.fetch=async()=>Response.json({fixture:true}); // no actual upstream access
+  try {
+    for(const [path,method] of [
+      ['/browser-data/manifest.json','GET'], ['/browser-data/manifest.json?_=123','GET'],
+      ['/browser-data/manifest.json?url=https://production.invalid','GET'],
+      ['/browser-data/manifest.json?_=x','GET'], ['/browser-data/system/private.json','GET'],
+      ['/browser-data/raw/qqq_chain_20260230.csv','GET'], ['/browser-data/manifest.json','POST'],
+    ]){
+      const productionUrl=new URL('https://live-options-view.otmooper12.workers.dev'+path);
+      const expected=await handleBrowserData(new Request(productionUrl,{method}),productionUrl);
+      const actual=await p.fetch(new Request(LOCAL_ORIGIN+path,{method}));
+      assert.equal(actual.status,expected.status,method+' '+path);
+    }
+    p.env.ENVIRONMENT='production';
+    assert.equal((await p.fetch(request('/r2-proxy/manifest.json'))).status,403);
+    assert.equal(p.calls.api.length,0);
+  }finally{p.close();globalThis.fetch=original;}
 });

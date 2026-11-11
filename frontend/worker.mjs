@@ -17,6 +17,10 @@ export default {
   async fetch(request, env) {
     if (!['production', 'preview'].includes(env.ENVIRONMENT)) return error('Environment not configured', 503);
     const preview = env.ENVIRONMENT === 'preview';
+    if (!preview && (env.ISOLATION !== undefined || env.PREVIEW_ORIGIN !== undefined ||
+        env.API_ENVIRONMENT === 'preview' || env.PUBLIC_DATA_ENVIRONMENT === 'read-only')) {
+      return error('Production label conflicts with preview isolation signals', 403);
+    }
     if (preview) {
       const problem = previewError(request, env);
       if (problem) return error(problem, 403);
@@ -35,7 +39,11 @@ export default {
     } else if (url.pathname === '/browser-data' || url.pathname.startsWith('/browser-data/')) {
       if (preview) {
         if (request.method !== 'GET') response = error('Read only', 405);
-        else if (!publicReadAllowed(url)) response = error('Public artifact not approved', 404);
+        else if (!publicReadAllowed(url)) {
+          const keyOnly = new URL(url); keyOnly.search = '';
+          const status = publicReadAllowed(keyOnly) ? 400 : 404;
+          response = error(status === 400 ? 'Invalid query' : 'Public artifact not approved', status);
+        }
         else {
           // Strip all credentials before even the read-only service sees this request.
           const read = new Request(request.url, { method: 'GET', credentials: 'omit', redirect: 'manual' });

@@ -12,7 +12,7 @@ const request = (path, { method = 'GET', body, cookie, origin = LOCAL_ORIGIN, he
 test('preview rejects missing/mislabelled isolation, production origin and raw store/secret injection', async () => {
   const p = createPreview();
   try {
-    for (const change of [{ISOLATION:undefined}, {ISOLATION:'production'}, {API_ENVIRONMENT:'production'},
+    for (const change of [{ENVIRONMENT:'production'}, {ISOLATION:undefined}, {ISOLATION:'production'}, {API_ENVIRONMENT:'production'},
       {PUBLIC_DATA_ENVIRONMENT:undefined}, {PREVIEW_ORIGIN:'https://options.moopertonic.net'},
       {DB:{}}, {PAPER_TRADES:{}}, {USERS:{}}, {SESSIONS:{}}, {LIVE_QUOTE_KEY:'forbidden'}]) {
       assert.equal((await gateway.fetch(request('/api/register', {method:'POST',body:{}}), {...p.env,...change})).status, 403);
@@ -31,7 +31,7 @@ test('public read allowlist strips credentials, rejects bad query/date/key and c
     assert.deepEqual(p.calls.reads[0].headers,{});
     for (const path of ['/browser-data/system/a.json','/browser-data/raw/qqq_chain_20260230.csv','/browser-data/manifest.json?url=https://prod.test','/browser-data/../system/a.json']) {
       assert.equal(publicReadAllowed(new URL(LOCAL_ORIGIN + path)),false);
-      assert.equal((await p.fetch(request(path))).status,404);
+      assert.equal((await p.fetch(request(path))).status,path.includes('?url=')?400:404);
     }
     assert.equal((await p.fetch(request('/browser-data/manifest.json',{method:'POST',body:{}}))).status,405);
     assert.equal((await p.fetch(request('/r2-proxy/intraday/latest.json'))).status,403);
@@ -93,6 +93,20 @@ test('real D1 register/login/me/quote/execution/settle/logout stay local', async
     await assert.rejects(p.apiEnv.PAPER_TRADES.put('intraday/latest.json','bad'),/Capture write denied/);
     assert.throws(()=>fixtureNetwork('https://options.moopertonic.net/api/login'),/network denied/);
   } finally {p.close();globalThis.fetch=old;}
+});
+test('preview identifies fixture policy or reuses integrated G4a product validator',async()=>{
+  const p=createPreview();
+  try {
+    if(p.policySource==='g4a-product') {
+      const boundary=await import('../backend/operational-storage.js');
+      for(const key of ['intraday/latest.json','manifest.json','system/../intraday/latest.json']) {
+        await assert.rejects(()=>p.apiEnv.PAPER_TRADES.put(key,'bad'),boundary.CaptureWriteRefused);
+      }
+    } else {
+      assert.equal(p.policySource,'local-fixture-pending-g4a');
+      await assert.rejects(()=>p.apiEnv.PAPER_TRADES.put('intraday/latest.json','bad'),/Capture write denied/);
+    }
+  }finally{p.close();}
 });
 test('separate preview instances cannot share accounts, sessions or operational objects', async () => {
   const a=createPreview(), b=createPreview();
