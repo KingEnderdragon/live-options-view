@@ -99,8 +99,15 @@ export function fetchLiveQuotes(symbols, env) {
   }
   const upstreamUrl = new URL('/live-quotes', env.LIVE_QUOTE_ORIGIN);
   upstreamUrl.searchParams.set('symbols', symbols.join(','));
+  // Live quote data must never be served from an intermediate cache: the
+  // upstream URL is the cache key, and a stale cached 503 (pre-#222, no
+  // session field) kept the option lane backing off after the producer was
+  // redeployed, while new symbol lists returned fresh bodies. A per-request
+  // nonce forces a fresh origin read every time. The collector ignores
+  // unknown query params (it reads only `symbols`).
+  upstreamUrl.searchParams.set('_', `${Date.now()}-${Math.random().toString(36).slice(2)}`);
   return fetch(upstreamUrl, {
-    headers: { 'X-Live-Quote-Key': env.LIVE_QUOTE_KEY },
+    headers: { 'X-Live-Quote-Key': env.LIVE_QUOTE_KEY, 'Cache-Control': 'no-cache' },
     cf: { cacheTtl: 0, cacheEverything: false },
   });
 }
