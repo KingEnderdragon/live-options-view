@@ -23,9 +23,29 @@ function renderHeatmap(data, symbol = 'QQQ') {
   document.getElementById('chain-note').textContent = isQqq ? '' : 'OI colors relative to this snapshot · execution requires a fresh contract quote';
 
   // Header
-  document.getElementById('price').textContent = `$${spot?.toFixed(2) ?? '—'}`;
+  const priceEl = document.getElementById('price');
+  priceEl.textContent = `$${spot?.toFixed(2) ?? '—'}`;
+  // #178: the header price is the CHAIN SNAPSHOT's spot, not a live quote, and
+  // it used to carry no age at all -- a chain frozen at 16:14 ET read as
+  // current next to advancing Core Markets cards. Say which snapshot this is,
+  // which session it belongs to, how old it is, and mark it retained when
+  // collection has stopped. formatChainSnapshot judges the session from the
+  // producer's ET stamp and the age from the same instant the status dot uses.
+  const freshness = formatChainSnapshot(data);
+  priceEl.dataset.state = freshness.state;
+  priceEl.title = freshness.detail;
+  const priceAgeEl = document.getElementById('price-age');
+  priceAgeEl.textContent = freshness.text;
+  priceAgeEl.dataset.state = freshness.state;
+  priceAgeEl.title = freshness.detail;
+
   const tierBadge = document.getElementById('tier-badge');
-  tierBadge.textContent = (tier || '').replace('0DTE_', '');
+  // "Regular" alone is the 0DTE_Regular EXPIRY TIER, and beside a price it
+  // reads as a market session -- precisely the #178 misreading. Keep the tier
+  // name available, but label it as a tier; the session is the line above.
+  const tierLabel = (tier || '').replace('0DTE_', '');
+  tierBadge.textContent = tierLabel ? `${tierLabel} tier` : '';
+  tierBadge.title = tierLabel ? `Expiration tier ${tier} — not a market session` : '';
   tierBadge.style.color  = TIER_COLORS[tier] || '#c9d1d9';
   tierBadge.style.display = '';
 
