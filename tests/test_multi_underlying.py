@@ -75,6 +75,62 @@ class MultiUnderlying(unittest.TestCase):
   with patch.object(quotes,'COLLECT_IBIT',False): registry.quote_payload(['IBIT291221C00001000'])
   self.assertEqual(len(feed.added),100)
 
+ def test_quote_payload_explains_every_absent_contract(self):
+  # The 503 that made the option lane look broken was the service correctly
+  # refusing to quote outside a feed session. Inside a session the remaining
+  # ambiguity was silence: an expired contract, a later expiry the provider had
+  # not answered yet, an exhausted subscription budget and a missing ticker all
+  # looked identical (returned < requested). Each now carries a reason, and the
+  # ones that are not the caller's business to retry are named.
+  TODAY='2026-11-10'
+  class Feed:
+   def __init__(self): self.added=[]
+   def add_option_subscriptions(self,symbols): self.added+=symbols
+   def get_state(self):
+    return {'.QQQ261110C677':{'bid':1.0,'ask':1.2,'bid_ts':TODAY+'T14:30:00+00:00','ask_ts':TODAY+'T14:30:00+00:00'},
+            quotes.PRICE_TICKERS['QQQ']:{'last':677.4,'prev_close':679.0,'last_ts':TODAY+'T14:30:00+00:00'}}
+   def get_health(self): return {'last_feed_event_time':None,'connected':True,'authorized':True,'channel_open':True}
+  feed=Feed(); registry=quotes.LiveQuoteRegistry()
+  registry.set_session(feed,{
+   'QQQ261110C00677000':{'streamer_symbol':'.QQQ261110C677','strike':677.0,'type':'call','exp':TODAY},
+   'QQQ261110P00677000':{'streamer_symbol':'.QQQ261110P677','strike':677.0,'type':'put','exp':TODAY},
+  })
+  with patch.object(quotes,'COLLECT_IBIT',False):
+   payload=registry.quote_payload([
+    'QQQ261110C00677000',   # quoted
+    'QQQ261110P00677000',   # subscribed, provider has not answered yet
+    'QQQ241101C00677000',   # expired before today
+    'QQQ261120C00677000',   # later expiry: subscribes this request
+    'IBIT261120C00041000',  # IBIT not collected in this run
+    'NOTASYMBOL',           # never an instrument
+    'QQQ',                  # ticker, quoted from the feed
+   ])
+  self.assertEqual([q['symbol'] for q in payload['quotes']],['QQQ261110C00677000','QQQ'])
+  self.assertEqual(payload['returned'],2); self.assertEqual(payload['requested'],7)
+  self.assertEqual(payload['unavailable'],{
+   'QQQ261110P00677000':'no_quote_yet',
+   'QQQ241101C00677000':'expired',
+   'QQQ261120C00677000':'no_quote_yet',
+   'IBIT261120C00041000':'not_collected',
+   'NOTASYMBOL':'unknown_symbol',
+  })
+  self.assertEqual(len(feed.added),1, 'only the later expiry is subscribed; expired and uncollected contracts are not')
+
+  # The subscription budget names itself rather than dropping contracts silently.
+  with patch.object(quotes,'COLLECT_IBIT',True):
+   registry.set_session(Feed(),{})
+   overload=registry.quote_payload([f'IBIT261221C{n*1000:08}' for n in range(1,102)])
+  self.assertEqual(overload['unavailable'][f'IBIT261221C{101*1000:08}'],'subscription_limit')
+  self.assertEqual(overload['returned'],0)
+
+  # A closed feed session is definite, and says so on every option it refuses.
+  other=quotes.LiveQuoteRegistry()
+  other.update_ticker_fallbacks({'QQQ':{'price':677.4,'quote_ts':TODAY+'T14:30:00+00:00'}},TODAY+'T14:30:00+00:00')
+  closed=other.quote_payload(['QQQ261110C00677000','QQQ','NOTASYMBOL'])
+  self.assertEqual(closed['unavailable'],{'QQQ261110C00677000':'session_closed','NOTASYMBOL':'unknown_symbol'})
+  self.assertEqual([q['symbol'] for q in closed['quotes']],['QQQ'],'tickers keep working from the price lane')
+  self.assertEqual(closed['health']['state'],'offline')
+
  def test_provider_observed_pairs_price_with_its_own_event_time(self):
   # Unknown provider time: price is computable but there is no provider
   # event to stamp it with -- must not publish.

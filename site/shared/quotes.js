@@ -254,12 +254,26 @@ function sameSet(a, b) {
   return true;
 }
 
+// An error response's JSON body, without letting an empty or malformed one
+// replace the HTTP failure with a parse failure. The producer's error
+// documents are a few hundred bytes; nothing here buffers a quote payload.
+async function readErrorBody(response) {
+  try {
+    if (typeof response?.json !== 'function') return null;
+    const value = await response.json();
+    return value && typeof value === 'object' ? value : null;
+  } catch (error) {
+    return null;
+  }
+}
+
 class LiveQuotePoller {
   constructor(service, {
     fetchFn = (...args) => fetch(...args),
     endpoint = '/api/live-quotes',
     foregroundIntervalMs = 5_000,
     hiddenIntervalMs = 60_000,
+    closedIntervalMs = 60_000,
     maxQuoteAgeMs = 15_000,
     requestTimeoutMs = 8_000,
     maxBackoffMs = 120_000,
@@ -272,6 +286,7 @@ class LiveQuotePoller {
     this.endpoint = endpoint;
     this.foregroundIntervalMs = foregroundIntervalMs;
     this.hiddenIntervalMs = hiddenIntervalMs;
+    this.closedIntervalMs = closedIntervalMs;
     this.maxQuoteAgeMs = maxQuoteAgeMs;
     this.requestTimeoutMs = requestTimeoutMs;
     this.maxBackoffMs = maxBackoffMs;
@@ -286,7 +301,7 @@ class LiveQuotePoller {
     this.health = {
       state: 'idle', lastAttemptAt: null, lastSuccessAt: null,
       retryAt: null, quoteAgeMs: null, requested: 0, returned: 0,
-      httpStatus: null, message: 'Waiting for quote interests',
+      httpStatus: null, serviceState: null, message: 'Waiting for quote interests',
     };
     this.unsubscribeInterests = service.subscribeInterests(() => this.kick());
   }
@@ -355,6 +370,11 @@ class LiveQuotePoller {
         const error = new Error(`HTTP ${response.status}`);
         error.status = response.status;
         error.retryAfter = response.headers?.get?.('Retry-After');
+        // The collector answers an option request with 503 + a health block
+        // when its quote feed has no session. That is a definite answer
+        // ("closed"), not a transient failure, so the body has to survive
+        // into the handler instead of being discarded with the error.
+        error.body = await readErrorBody(response);
         throw error;
       }
       const payload = await response.json();
@@ -379,20 +399,33 @@ class LiveQuotePoller {
         requested: symbols.length,
         returned: quotes.length,
         httpStatus: 200,
+        serviceState: payload.health?.state ?? null,
         message: stale ? 'Live quotes are stale' : partial ? 'Some live quotes are unavailable' : 'Live quotes healthy',
       });
       this._schedule(this._normalInterval());
     } catch (error) {
-      this.failureCount += 1;
-      const retryMs = this._retryDelay(error);
+      const serviceState = typeof error.body?.health?.state === 'string' ? error.body.health.state : null;
+      // 'offline' means the producer has no feed session at all: after the
+      // session stop it clears the session pointer and refuses option
+      // requests while still answering tickers from the price lane. Backing
+      // off exponentially against that is noise -- the lane is closed, and
+      // the honest thing to show is the closed state, probed gently in case
+      // the collector comes back.
+      const closed = serviceState === 'offline' && error.status === 503;
+      if (!closed) this.failureCount += 1;
+      const retryMs = closed
+        ? this.closedIntervalMs
+        : this._retryDelay(error);
       const rateLimited = error.status === 429;
-      const unavailable = !rateLimited && this.failureCount === 1;
+      const unavailable = !rateLimited && !closed && this.failureCount === 1;
       this._setHealth({
-        state: rateLimited ? 'rate-limited' : unavailable ? 'unavailable' : 'backing-off',
+        state: closed ? 'closed' : rateLimited ? 'rate-limited' : unavailable ? 'unavailable' : 'backing-off',
         returned: 0,
         httpStatus: error.status || null,
+        serviceState,
         retryAt: new Date(this.nowFn() + retryMs).toISOString(),
-        message: rateLimited ? 'Live quotes rate limited' : 'Live quotes unavailable',
+        message: closed ? 'The option quote feed is closed for this session'
+          : rateLimited ? 'Live quotes rate limited' : 'Live quotes unavailable',
       });
       this._schedule(retryMs);
     } finally {

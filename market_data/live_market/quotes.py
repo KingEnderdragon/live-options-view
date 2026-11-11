@@ -35,6 +35,13 @@ from .feed import DXLinkFeed
 
 # -- ephemeral live quote HTTP service ----------------------------------------
 
+# Extra exact contracts the service will subscribe on its own initiative in a
+# session, beyond the chains the collector already collects. Bounds provider
+# subscription load; when it is reached the payload says so per symbol
+# ("subscription_limit") instead of silently omitting the contract.
+MAX_REQUESTED_CONTRACTS = 100
+
+
 class LiveQuoteRegistry:
     """Thread-safe session pointer behind the process-lifetime HTTP server."""
 
@@ -89,18 +96,40 @@ class LiveQuoteRegistry:
         # Held contracts outside today's fixed window remain quoteable. The
         # authenticated service adds at most 100 exact contracts per session,
         # on the existing connection, without expanding the collected chain.
+        #
+        # `unavailable` explains every requested symbol that produced no
+        # quote. Without it a caller sees only returned < requested and cannot
+        # tell an expired contract from a later expiry that the provider has
+        # not answered yet, an exhausted subscription budget, or a closed
+        # session -- which is exactly the ambiguity that made a silent empty
+        # response look like a broken quote lane.
+        skip_reason: dict[str, str] = {}
         with self._lock:
             for symbol in symbols:
-                if symbol in self._contracts or not self._feed or len(self._requested_contracts) >= 100:
+                if symbol in self._contracts:
                     continue
+                # Shape first: a malformed symbol is malformed in any session
+                # state, and saying "session_closed" about it would be a lie.
                 match = re.fullmatch(r"(QQQ|SPY|IBIT)(\d{6})([CP])(\d{8})", symbol)
-                if not match or (match[1] == "IBIT" and not COLLECT_IBIT):
+                if not match:
+                    skip_reason[symbol] = "unknown_symbol"
+                    continue
+                if not self._feed:
+                    skip_reason[symbol] = "session_closed"
+                    continue
+                if match[1] == "IBIT" and not COLLECT_IBIT:
+                    skip_reason[symbol] = "not_collected"
+                    continue
+                if len(self._requested_contracts) >= MAX_REQUESTED_CONTRACTS:
+                    skip_reason[symbol] = "subscription_limit"
                     continue
                 try:
                     expiry = datetime.strptime(match[2], "%y%m%d").date()
                 except ValueError:
+                    skip_reason[symbol] = "unknown_symbol"
                     continue
                 if expiry < datetime.now().date():
+                    skip_reason[symbol] = "expired"
                     continue
                 streamer = _dxlink_symbol(symbol)
                 self._feed.add_option_subscriptions([streamer])
@@ -114,6 +143,7 @@ class LiveQuoteRegistry:
         health = self.health()
         state = feed.get_state() if feed is not None else {}
         quotes = []
+        unavailable: dict[str, str] = {}
         for symbol in symbols:
             if symbol in PRICE_TICKERS or symbol == "SPY":
                 raw = state.get(PRICE_TICKERS.get(symbol, symbol), {})
@@ -141,9 +171,12 @@ class LiveQuoteRegistry:
                         **ticker_fallbacks[symbol], "kind": "ticker", "symbol": symbol,
                         "instrument_class": TICKER_CLASSES[symbol],
                     })
+                else:
+                    unavailable[symbol] = "ticker_unavailable"
                 continue
             contract = contracts.get(symbol)
             if not contract:
+                unavailable[symbol] = skip_reason.get(symbol, "unknown_symbol")
                 continue
             quote = state.get(contract["streamer_symbol"], {})
             bid = quote.get("bid")
@@ -152,6 +185,7 @@ class LiveQuoteRegistry:
             ask_ts = quote.get("ask_ts")
             observed = [ts for ts in (bid_ts, ask_ts) if ts]
             if bid is None or ask is None or not observed:
+                unavailable[symbol] = "no_quote_yet"
                 continue
             quotes.append({
                 "kind": "option",
@@ -169,6 +203,7 @@ class LiveQuoteRegistry:
             "quotes": quotes,
             "requested": len(symbols),
             "returned": len(quotes),
+            "unavailable": unavailable,
             "server_ts": health["server_ts"],
             "health": health,
         }

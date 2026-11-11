@@ -217,7 +217,70 @@ assert.equal(freshShareQuote({ ...shareTickers.get('AAPL'), bid_ts: '2026-07-30T
     assert.equal(svc.get('MINE').mid, 1.1, 'clearing bot interest leaves the user book intact');
   }
 
-  console.log('PASS live quote service polling, interests, health, and deduplication');
+  // ── A closed quote feed is an answer, not a failure ─────────────────────────
+  // The collector's option lane is session-scoped: after the stop it clears the
+  // feed pointer and answers option-only requests with 503 + health.state
+  // "offline", while ticker symbols keep working from the price lane. Treating
+  // that as an error walked the exponential ladder forever and showed
+  // "Options: unavailable / backing off" for a state that is simply closed.
+  {
+    const svc = new LiveQuoteService();
+    svc.setVisibleContracts(['QQQ261110C00677000']);
+    const CLOSED_NOW = Date.parse('2026-11-10T23:30:00Z');
+    const offline = () => ({
+      ok: false,
+      status: 503,
+      headers: { get: name => (name === 'Retry-After' ? '5' : null) },
+      json: async () => ({ error: 'Live quote feed unavailable', health: { state: 'offline', server_ts: '2026-11-10T23:30:00Z' } }),
+    });
+    let next = offline;
+    const poller = new LiveQuotePoller(svc, {
+      fetchFn: () => next(), nowFn: () => CLOSED_NOW, randomFn: () => 0.5, isHidden: () => false,
+    });
+    poller.running = true;
+    await poller.poll();
+    assert.equal(poller.health.state, 'closed', 'an offline producer closes the lane instead of failing it');
+    assert.equal(poller.health.serviceState, 'offline', 'the producer state is carried for the title');
+    assert.equal(poller.health.httpStatus, 503);
+    assert.equal(poller.health.message, 'The option quote feed is closed for this session');
+    assert.equal(poller.failureCount, 0, 'a closed lane is not a failure and must not escalate');
+    assert.equal(Date.parse(poller.health.retryAt) - CLOSED_NOW, 60_000,
+      'a closed lane is probed once a minute, not on the backoff ladder');
+    await poller.poll();
+    assert.equal(poller.health.state, 'closed', 'repeated closed answers stay closed');
+    assert.equal(poller.failureCount, 0);
+
+    // A bodiless 503 is still a genuine failure and still walks the ladder.
+    next = () => ({ ok: false, status: 503, headers: { get: () => null }, json: async () => ({ error: 'Live quote service unavailable' }) });
+    await poller.poll();
+    assert.equal(poller.health.state, 'unavailable', 'an unexplained 503 is still a failure');
+    assert.equal(poller.failureCount, 1);
+    await poller.poll();
+    assert.equal(poller.health.state, 'backing-off', 'the failure ladder is unchanged');
+    assert.equal(poller.failureCount, 2);
+
+    // A real answer clears both the failure and the closed state.
+    next = () => ({
+      ok: true,
+      status: 200,
+      headers: { get: () => null },
+      json: async () => ({
+        server_ts: '2026-11-10T23:30:00Z',
+        health: { state: 'live' },
+        quotes: [{
+          symbol: 'QQQ261110C00677000', bid: 1, ask: 1.2, strike: 677,
+          type: 'call', exp: '2026-11-10', quote_ts: '2026-11-10T23:30:00Z',
+        }],
+      }),
+    });
+    await poller.poll();
+    assert.equal(poller.health.state, 'live');
+    assert.equal(poller.health.serviceState, 'live');
+    assert.equal(poller.failureCount, 0);
+    poller.stop();
+  }
+
+  console.log('PASS live quote service polling, interests, health, closed-lane handling, and deduplication');
 })().catch(error => {
   console.error(error);
   process.exitCode = 1;

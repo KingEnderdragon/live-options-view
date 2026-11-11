@@ -225,6 +225,12 @@ assert.equal(els['quote-health'].className, 'transport-health live');
 assert.equal(els['quote-health'].textContent, 'Options: live · 4s');
 get('renderTransportHealth')('quote-health', 'Options', { state: 'stale', returned: 1, requested: 3, message: 'partial' });
 assert.equal(els['quote-health'].textContent, 'Options: stale · 1/3');
+// A closed quote feed is a named state, not a red failure: after the session
+// stop the producer refuses option requests while tickers stay live, and the
+// line has to say which of those happened.
+get('renderTransportHealth')('quote-health', 'Options', { state: 'closed', returned: 0, requested: 82, message: 'closed for this session' });
+assert.equal(els['quote-health'].className, 'transport-health closed');
+assert.equal(els['quote-health'].textContent, 'Options: session closed');
 
 const SYM = 'QQQ260918C600000';
 const INFO = { sym: SYM, strike: 600, type: 'call', exp: '2026-09-18' };

@@ -133,6 +133,7 @@ function renderTransportHealth(elementId, label, health) {
   const labels = {
     idle: 'waiting', connecting: 'connecting', live: 'live', stale: 'stale',
     'backing-off': 'backing off', 'rate-limited': 'rate limited', unavailable: 'unavailable',
+    closed: 'session closed',
   };
   el.className = `transport-health ${health.state}`;
   el.textContent = `${label}: ${labels[health.state] || health.state}${detail ? ` · ${detail}` : ''}`;

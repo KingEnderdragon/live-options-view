@@ -87,6 +87,7 @@
   .transport-health.live { color: #00a844; }
   .transport-health.stale, .transport-health.rate-limited { color: #d49a00; }
   .transport-health.backing-off, .transport-health.unavailable { color: #ee3300; }
+  .transport-health.closed { color: var(--dim); font-style: italic; }
 
   /* ── heatmap table ───────────────────────────────────────────────────── */
   #heatmap-wrap {
@@ -1238,7 +1239,7 @@
 <script src="shared.js?v=050c96a265673ac3"></script>
 <script src="shared/csv-ranges.js?v=2037c69afbe5d94b"></script>
 <script src="shared/heatmap.js?v=c4a883a5bc99b558"></script>
-<script src="shared/quotes.js?v=734ed3e60dc3333c"></script>
+<script src="shared/quotes.js?v=c8372442edb4ddfe"></script>
 <script src="shared/format.js?v=132e6deb03cda939"></script>
 <script src="shared/instruments.js?v=860821b9e03c4a08"></script>
 <script src="shared/quote-panel.js?v=3806793be069e8a7"></script>
@@ -1320,7 +1321,7 @@ let timerHandle = null;
 // so the page's script order is unchanged. The banner stays here as
 // the section's marker.
 </script>
-<script src="js/paper-trading.js?v=e818b25d06e43ab5"></script>
+<script src="js/paper-trading.js?v=54f0d2a51e7c4025"></script>
 <script>
 
 // ── auth ───────────────────────────────────────────────────────────────────────
