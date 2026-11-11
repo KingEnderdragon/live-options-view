@@ -231,6 +231,9 @@ assert.equal(freshShareQuote({ ...shareTickers.get('AAPL'), bid_ts: '2026-07-30T
       '/closed': { status: 503, retry: '5', body: {
         error: 'Live quote feed unavailable',
         health: { state: 'offline', session: 'session_closed', last_quote_at: null, server_ts: '2026-11-10T23:30:00Z' } } },
+      '/waiting': { status: 503, retry: '5', body: {
+        error: 'Live quote feed unavailable',
+        health: { state: 'offline', session: 'waiting_for_session', last_quote_at: null, server_ts: '2026-11-10T23:30:00Z' } } },
       '/failed': { status: 503, retry: '5', body: {
         error: 'Live quote feed unavailable',
         health: { state: 'offline', session: 'session_failed', last_quote_at: null, server_ts: '2026-11-10T23:30:00Z' } } },
@@ -283,6 +286,13 @@ assert.equal(freshShareQuote({ ...shareTickers.get('AAPL'), bid_ts: '2026-07-30T
     assert.equal(failed.state, 'unavailable', 'a session failure is a failure, not a closed lane');
     assert.equal(failed.sessionState, 'session_failed');
     assert.equal(Date.parse(failed.retryAt) - NOW, 5_000, 'the producer Retry-After still governs the retry');
+
+    // A cold restart after hours sits in the scheduler's deliberate wait for the
+    // next session: closed, and labelled as waiting rather than as an outage.
+    const waiting = await once('/waiting');
+    assert.equal(waiting.state, 'closed', 'a deliberate wait for the next session is a closed lane');
+    assert.equal(waiting.sessionState, 'waiting_for_session');
+    assert.equal(Date.parse(waiting.retryAt) - NOW, 60_000, 'and it is probed once a minute');
 
     const uninitialized = await once('/uninitialized');
     assert.equal(uninitialized.state, 'unavailable', 'a collector that has not opened a session is not "closed"');

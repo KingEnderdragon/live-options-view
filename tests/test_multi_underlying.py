@@ -131,9 +131,12 @@ class MultiUnderlying(unittest.TestCase):
   other=quotes.LiveQuoteRegistry()
   other.update_ticker_fallbacks({'QQQ':{'price':677.4,'quote_ts':TODAY+'T14:30:00+00:00'}},TODAY+'T14:30:00+00:00')
   closed=other.quote_payload(['QQQ261110C00677000','QQQ','NOTASYMBOL'])
-  self.assertEqual(closed['unavailable'],{'QQQ261110C00677000':'session_closed','NOTASYMBOL':'unknown_symbol'})
+  # A registry that has never opened a session is uninitialized, not closed:
+  # the reason map must agree with the lifecycle state rather than assume.
+  self.assertEqual(closed['unavailable'],{'QQQ261110C00677000':'uninitialized','NOTASYMBOL':'unknown_symbol'})
   self.assertEqual([q['symbol'] for q in closed['quotes']],['QQQ'],'tickers keep working from the price lane')
   self.assertEqual(closed['health']['state'],'offline')
+  self.assertEqual(closed['health']['session'],'uninitialized')
 
  def test_http_handler_separates_deliberate_stop_from_feed_failure(self):
   # The review concern: `offline` covers three different situations -- no
@@ -203,12 +206,78 @@ class MultiUnderlying(unittest.TestCase):
    self.assertEqual(body['health']['session'],'session_closed')
    self.assertEqual(body['quotes'][0]['symbol'],'QQQ')
 
-   # 6. Only the two known reasons are accepted, so a typo cannot invent a state.
+   # 6. A cold start after hours: the scheduler is deliberately waiting for the
+   #    next session, which is a closed lane and not an outage. The per-symbol
+   #    reason follows the lifecycle value instead of assuming session_closed.
+   registry.await_next_session()
+   status,body=get(port,'/live-quotes','QQQ261110C00677000')
+   self.assertEqual(status,503)
+   self.assertEqual(body['health']['session'],'waiting_for_session')
+   self.assertEqual(body['health']['state'],'offline')
+
+   # 7. Only the known reasons are accepted, so a typo cannot invent a state.
    with self.assertRaises(ValueError):
     registry.clear_session(reason='offline')
   finally:
    if server is not None:
     server.shutdown(); server.server_close()
+
+ def test_cold_afterhours_start_waits_but_startup_failure_does_not_close(self):
+  # main() builds the registry uninitialized and then blocks in
+  # wait_for_premarket. A cold restart after hours therefore sat at
+  # "uninitialized" all evening, so the closed state the collector was really
+  # in could never be shown. announce_scheduler_wait labels that deliberate
+  # wait, and must never do it after a session failure -- that wait is recovery,
+  # not a closed lane.
+  from market_data.live_market import runner
+  class Feed:
+   def add_option_subscriptions(self,symbols): pass
+   def get_state(self): return {}
+   def get_health(self):
+    return {'last_feed_event_time':datetime.now(timezone.utc),'connected':True,
+            'authorized':True,'channel_open':True}
+  registry=quotes.LiveQuoteRegistry()
+
+  # Cold start after hours: no session yet, scheduler about to wait.
+  self.assertEqual(registry.session_state(),'uninitialized')
+  self.assertEqual(registry.health()['session'],'uninitialized')
+  runner.announce_scheduler_wait(registry,None)
+  self.assertEqual(registry.session_state(),'waiting_for_session')
+  self.assertEqual(registry.health()['session'],'waiting_for_session')
+  self.assertEqual(registry.health()['state'],'offline')
+  self.assertEqual(registry.quote_payload(['QQQ261110C00677000'])['unavailable'],
+                   {'QQQ261110C00677000':'waiting_for_session'})
+  # A repeat wait is idempotent and cannot promote itself past a real state.
+  runner.announce_scheduler_wait(registry,None)
+  self.assertEqual(registry.session_state(),'waiting_for_session')
+
+  # Next session opens.
+  registry.set_session(Feed(),{})
+  self.assertEqual(registry.session_state(),'open')
+  self.assertEqual(registry.health()['state'],'live')
+
+  # In-session startup failure: the registry must NOT become a closed lane, and
+  # the blocked-session wait that follows must not relabel it either.
+  registry.clear_session(reason='session_failed')
+  self.assertEqual(registry.session_state(),'session_failed')
+  blocked=date(2026,11,10)
+  runner.announce_scheduler_wait(registry,blocked)
+  self.assertEqual(registry.session_state(),'session_failed',
+                   'a blocked-session wait is failure recovery, never a closed lane')
+  self.assertEqual(registry.health()['session'],'session_failed')
+  self.assertEqual(registry.quote_payload(['QQQ261110C00677000'])['unavailable'],
+                   {'QQQ261110C00677000':'session_failed'})
+
+  # Recovery: the next session opens normally.
+  registry.set_session(Feed(),{})
+  self.assertEqual(registry.session_state(),'open')
+
+  # Deliberate end, then the evening wait leaves the ended-session label alone.
+  registry.clear_session()
+  self.assertEqual(registry.session_state(),'session_closed')
+  runner.announce_scheduler_wait(registry,None)
+  self.assertEqual(registry.session_state(),'session_closed',
+                   'an ended session is not rewritten as "waiting"')
 
  def test_provider_observed_pairs_price_with_its_own_event_time(self):
   # Unknown provider time: price is computable but there is no provider

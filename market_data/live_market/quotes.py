@@ -81,6 +81,24 @@ class LiveQuoteRegistry:
             self._contracts = {}
             self._session = reason
 
+    def await_next_session(self):
+        """Record the scheduler's DELIBERATE wait for the next session.
+
+        main() builds the registry uninitialized and then blocks in
+        wait_for_premarket, so without this a cold start after hours would
+        report "uninitialized" all evening and no client could show the closed
+        state it is genuinely in. This is not a failure: it is the same
+        outside-session condition as a finished session, reached without one.
+        """
+        with self._lock:
+            self._feed = None
+            self._contracts = {}
+            self._session = "waiting_for_session"
+
+    def session_state(self) -> str:
+        with self._lock:
+            return self._session
+
     def update_ticker_fallbacks(self, prices: dict[str, dict], observed_at: str):
         with self._lock:
             self._ticker_fallbacks = {
@@ -136,7 +154,7 @@ class LiveQuoteRegistry:
                     skip_reason[symbol] = "unknown_symbol"
                     continue
                 if not self._feed:
-                    skip_reason[symbol] = "session_closed"
+                    skip_reason[symbol] = self._session
                     continue
                 if match[1] == "IBIT" and not COLLECT_IBIT:
                     skip_reason[symbol] = "not_collected"

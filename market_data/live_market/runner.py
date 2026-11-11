@@ -349,6 +349,24 @@ def _run_session(token_manager: OAuthTokenManager, quote_registry: LiveQuoteRegi
     quote_registry.clear_session(reason="session_closed")
 
 
+def announce_scheduler_wait(quote_registry: LiveQuoteRegistry, blocked_session_date: date | None) -> None:
+    """Label the runner's deliberate wait for the next session.
+
+    The registry is built uninitialized and main() then blocks in
+    wait_for_premarket, so a cold restart after hours would report
+    "uninitialized" until the next premarket -- an unexplained outage instead of
+    the closed lane the collector is actually in. Two guards keep that honest:
+    a wait that follows a blocked session is recovery from an auth or startup
+    fault, so the registry keeps session_failed and the client keeps backing
+    off; and a registry that already carries a known state (an ended session,
+    an open one) is left alone rather than overwritten.
+    """
+    if blocked_session_date is not None:
+        return
+    if quote_registry.session_state() == "uninitialized":
+        quote_registry.await_next_session()
+
+
 def main():
     try:
         token_manager = OAuthTokenManager.from_env()
@@ -381,9 +399,18 @@ def main():
 
     blocked_session_date: date | None = None
     while True:
+        # A cold start after hours leaves the registry uninitialized for the
+        # whole wait, which would show as an unexplained outage all evening.
+        # Label the deliberate wait -- but never overwrite a failure: a wait
+        # that follows a blocked session is recovery from an auth or startup
+        # fault and must keep reporting session_failed.
+        announce_scheduler_wait(quote_registry, blocked_session_date)
         _entry.wait_for_premarket(blocked_session_date)
         try:
             _entry._run_session(token_manager, quote_registry)
+            # The session ran and ended deliberately; the startup circuit from
+            # an earlier failure no longer applies.
+            blocked_session_date = None
         except TastyAuthError as exc:
             quote_registry.clear_session(reason="session_failed")
             blocked_session_date = datetime.now(ET).date()

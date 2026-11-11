@@ -409,13 +409,16 @@ class LiveQuotePoller {
       const serviceState = typeof health.state === 'string' ? health.state : null;
       const sessionState = typeof health.session === 'string' ? health.session : null;
       // 'offline' alone is ambiguous: the producer reports it before the
-      // collector has opened a session, after a deliberate stop, and after a
-      // session died. Only an explicit `session: "session_closed"` -- the
-      // deliberate end of a trading session -- may be shown as a closed lane.
+      // collector has opened a session, while the scheduler deliberately waits
+      // for the next one, after a session ended, and after one died. Only the
+      // two deliberate outside-session values may be shown as a closed lane:
+      // `session_closed` (a session ran and ended) and `waiting_for_session`
+      // (a cold start or the scheduler waiting outside the option session).
       // Anything else offline is an outage while the lane should be up, and
       // must keep the ordinary failure and backoff behaviour; labelling a
       // trading-hours failure "session closed" would hide it.
-      const closed = error.status === 503 && sessionState === 'session_closed';
+      const closed = error.status === 503 &&
+        (sessionState === 'session_closed' || sessionState === 'waiting_for_session');
       if (!closed) this.failureCount += 1;
       const retryMs = closed
         ? this.closedIntervalMs
