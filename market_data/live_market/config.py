@@ -138,18 +138,53 @@ MOMENTUM_MAX_ANCHOR_OVERSHOOT_MIN  = 10.0
 MOMENTUM_NEUTRAL_BAND_PCT          = 0.05  # display-only up/down/flat threshold
 MOMENTUM_RETAIN_MINUTES            = 24 * 60.0  # generous, decoupled from the configured lookback
 
-TICKER_CLASSES: dict[str, str] = {
-    "QQQ": "equity", "SPY": "equity", "USO": "equity", "SMH": "equity", "IGV": "equity",
-    "META": "equity", "GOOGL": "equity", "AMZN": "equity", "TSLA": "equity",
-    "MU": "equity", "SPCX": "equity", "AAPL": "equity",
-    "VIX": "index", "OVX": "index", "10Y": "yield", "JPY/USD": "futures",
-    "KOSPI": "international", "BTC/USD": "crypto",
-}
+# TICKER_CLASSES is derived from the canonical exact-100 universe below
+# (market_data/overview/universe.json). It was hand-written (17 entries) and
+# did not cover 82 of the 99 PRICE_TICKERS labels, so a priced ticker
+# crashed the quote handler with KeyError and the Worker returned HTTP 502
+# (NVDA, 2026-11-10). See _INSTRUMENT_TYPE_CLASSES.
 
 # Canonical release-gated registry owns producer requests. SPY retains its
 # separate existing subscription/tile path; disabled candidates request nothing.
-from market_data.overview import producer_maps
+from market_data.overview import INSTRUMENTS, producer_maps
 PRICE_TICKERS, YF_SYMBOL_MAP = producer_maps()
+
+# Display class per instrument_type (the universe's most specific field),
+# grounded in the pre-existing hand-written entries:
+#   stock / equity_etf / bond_etf / commodity_pool_etp / bullion_trust_etp
+#       -> "equity"   (exchange-traded equity securities; USO, a commodity
+#          pool ETP, was already "equity")
+#   volatility_index -> "index"   (VIX, OVX)
+#   cash_index / cash_index_gross_return -> "international"   (KOSPI; all are
+#          non-US indices: FTSE100, HSI, NIKKEI225, DAX)
+#   yield_index / daily_yield_series -> "yield"   (10Y)
+#   futures_active_contract_series -> "futures"   (JPY/USD)
+#   crypto_spot -> "crypto"   (BTC/USD)
+#   spot_fx -> "international"   (cross-border currency pairs; no live DXLink
+#          price, so they report ticker_unavailable unless a dated fallback
+#          provides a price)
+_INSTRUMENT_TYPE_CLASSES = {
+    "stock": "equity",
+    "equity_etf": "equity",
+    "bond_etf": "equity",
+    "commodity_pool_etp": "equity",
+    "bullion_trust_etp": "equity",
+    "volatility_index": "index",
+    "cash_index": "international",
+    "cash_index_gross_return": "international",
+    "yield_index": "yield",
+    "daily_yield_series": "yield",
+    "futures_active_contract_series": "futures",
+    "crypto_spot": "crypto",
+    "spot_fx": "international",
+}
+_missing_types = {r["instrument_type"] for r in INSTRUMENTS} - set(_INSTRUMENT_TYPE_CLASSES)
+if _missing_types:
+    raise ValueError(f"universe instrument_type has no ticker class: {sorted(_missing_types)}")
+TICKER_CLASSES: dict[str, str] = {
+    r["label"]: _INSTRUMENT_TYPE_CLASSES[r["instrument_type"]]
+    for r in INSTRUMENTS
+}
 
 # -- session clock ------------------------------------------------------------
 # Pure ET wall-clock helpers on the constants above. They lived in the

@@ -185,6 +185,15 @@ class LiveQuoteRegistry:
         unavailable: dict[str, str] = {}
         for symbol in symbols:
             if symbol in PRICE_TICKERS or symbol == "SPY":
+                # A priced ticker without a class must not crash the handler
+                # (NVDA returned HTTP 502): report it unavailable instead of
+                # raising KeyError. TICKER_CLASSES is derived from the
+                # universe, so this is defensive -- it only fires if the
+                # registry and the class map drift apart.
+                instrument_class = TICKER_CLASSES.get(symbol)
+                if instrument_class is None:
+                    unavailable[symbol] = "ticker_unavailable"
+                    continue
                 raw = state.get(PRICE_TICKERS.get(symbol, symbol), {})
                 bid, ask, last = raw.get("bid"), raw.get("ask"), raw.get("last")
                 mid = (bid + ask) / 2 if bid is not None and ask is not None else None
@@ -203,12 +212,12 @@ class LiveQuoteRegistry:
                         "quote_ts": max(observed),
                         "bid_ts": raw.get("bid_ts"), "ask_ts": raw.get("ask_ts"),
                         "source": "dxlink",
-                        "instrument_class": TICKER_CLASSES[symbol],
+                        "instrument_class": instrument_class,
                     })
                 elif ticker_fallbacks.get(symbol, {}).get("price") is not None:
                     quotes.append({
                         **ticker_fallbacks[symbol], "kind": "ticker", "symbol": symbol,
-                        "instrument_class": TICKER_CLASSES[symbol],
+                        "instrument_class": instrument_class,
                     })
                 else:
                     unavailable[symbol] = "ticker_unavailable"
