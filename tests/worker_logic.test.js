@@ -988,6 +988,51 @@ const UUID = '12345678-1234-4234-8234-123456789abc';
     assert.equal(afterRecovery.balance_cash, 50000 - 10 * 100, 'cash debited by the correct intrinsic value once recovered');
   }
 
+
+  // Live-quote transport must force a fresh origin read: a per-request nonce
+  // in the upstream URL, with symbols/auth/status unchanged. (A stale cached
+  // 503 with no session field kept the option lane backing off after the
+  // producer redeploy, while new symbol lists returned fresh bodies.)
+  {
+    const { fetchLiveQuotes, handleLiveQuotes } = await import('../backend/browser-data.js');
+    const env = { LIVE_QUOTE_ORIGIN: 'https://origin.invalid', LIVE_QUOTE_KEY: 'test-key' };
+    const calls = [];
+    const realFetch = global.fetch;
+    global.fetch = async (url, init) => {
+      calls.push({ url: String(url), init });
+      return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    };
+    try {
+      await fetchLiveQuotes(['QQQ', 'QQQ261110C00677000'], env);
+      await fetchLiveQuotes(['QQQ', 'QQQ261110C00677000'], env);
+    } finally {
+      global.fetch = realFetch;
+    }
+    assert.equal(calls.length, 2);
+    const [first, second] = calls.map(c => new URL(c.url));
+    assert.equal(first.pathname, '/live-quotes');
+    assert.equal(first.searchParams.get('symbols'), 'QQQ,QQQ261110C00677000');
+    assert.equal(second.searchParams.get('symbols'), 'QQQ,QQQ261110C00677000');
+    const nonce1 = first.searchParams.get('_');
+    const nonce2 = second.searchParams.get('_');
+    assert.ok(nonce1 && nonce2, 'upstream URL carries a nonce');
+    assert.notEqual(nonce1, nonce2, 'nonce is unique per request');
+    for (const c of calls) {
+      assert.equal(c.init.headers['X-Live-Quote-Key'], 'test-key');
+      assert.equal(c.init.headers['Cache-Control'], 'no-cache');
+      assert.equal(c.init.cf.cacheTtl, 0);
+    }
+    const realFetch2 = global.fetch;
+    global.fetch = async () => new Response(JSON.stringify({ error: 'x' }), { status: 503, headers: { 'Content-Type': 'application/json', 'Retry-After': '5' } });
+    try {
+      const res = await handleLiveQuotes(new URL('https://example.test/api/live-quotes?symbols=QQQ'), env);
+      assert.equal(res.status, 503);
+      assert.equal(res.headers.get('Cache-Control'), 'no-store');
+      assert.equal(res.headers.get('Retry-After'), '5');
+    } finally {
+      global.fetch = realFetch2;
+    }
+  }
   console.log('PASS worker.js auth/trade/settlement logic');
 })().catch(error => {
   console.error(error);
