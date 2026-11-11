@@ -1,13 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
-import { buildAssets, verifyArtifact, FLOOR } from '../scripts/build-assets.mjs';
+import { buildAssets, verifyArtifact, FLOOR, ROOT } from '../scripts/build-assets.mjs';
+import { createHash } from 'node:crypto';
 import { createPreview, LOCAL_ORIGIN } from '../scripts/preview-local.mjs';
 import { pathToFileURL } from 'node:url';
 import { assetBinding } from '../scripts/preview-local.mjs';
-import { prepareRelease } from '../scripts/prepare-asset-release.mjs';
+import { prepareRelease, validateAssetConfig, verifyStage } from '../scripts/prepare-asset-release.mjs';
 
 function artifacts() {
   const parent=mkdtempSync(resolve(tmpdir(),'musef-rollback-'));
@@ -74,4 +75,103 @@ test('rollback refuses tampered payload and unmanifested operational file',()=>{
   assert.throws(()=>verifyArtifact(old),/Hash mismatch/);
   writeFileSync(resolve(current,'collector.py'),'not an asset');
   assert.throws(()=>verifyArtifact(current),/inventory mismatch/);
+});
+
+const proposedConfig=readFileSync(resolve(ROOT,'patches/musef-225/wrangler.assets.toml.proposed'),'utf8');
+function configFixture() {
+  const parent=mkdtempSync(resolve(tmpdir(),'musef-config-')),root=resolve(parent,'source');
+  mkdirSync(resolve(root,'patches/musef-225'),{recursive:true});
+  writeFileSync(resolve(root,'patches/musef-225/wrangler.assets.toml.proposed'),proposedConfig);
+  return {root,out:resolve(parent,'stage')};
+}
+test('stage explicitly identifies proposal fallback before config integration',()=>{
+  const {old}=artifacts(),{root,out}=configFixture();
+  const plan=prepareRelease({artifact:old,out,configRoot:root});
+  assert.equal(plan.config_state,'proposal-only');
+  assert.equal(plan.config_source,'patches/musef-225/wrangler.assets.toml.proposed');
+  assert.equal(plan.config_sha256,createHash('sha256').update(proposedConfig).digest('hex'));
+});
+test('stage uses actual applied config, not stale proposal, and records exact bytes/hash',()=>{
+  const {old}=artifacts(),{root,out}=configFixture();
+  const applied=proposedConfig.replace('2026-06-23','2026-06-24');
+  writeFileSync(resolve(root,'wrangler.assets.toml'),applied);
+  writeFileSync(resolve(root,'patches/musef-225/wrangler.assets.toml.proposed'),'invalid proposal must be ignored');
+  const plan=prepareRelease({artifact:old,out,configRoot:root});
+  assert.equal(plan.config_state,'applied-source'); assert.equal(plan.config_source,'wrangler.assets.toml');
+  assert.equal(plan.config_sha256,createHash('sha256').update(applied).digest('hex'));
+  assert.equal(readFileSync(resolve(out,'wrangler.assets.toml'),'utf8'),applied);
+});
+test('invalid applied config cannot silently fall back to valid proposal or leave a stage',()=>{
+  const {old}=artifacts(),{root,out}=configFixture();
+  writeFileSync(resolve(root,'wrangler.assets.toml'),proposedConfig+'\n[triggers]\ncrons = ["* * * * *"]\n');
+  assert.throws(()=>prepareRelease({artifact:old,out,configRoot:root}),/Unsupported asset config/);
+  assert.equal(existsSync(out),false);
+});
+test('asset config rejects operational targets, bindings, paths, dates, labels and revision drift',()=>{
+  const manifest={targets:{assets:'live-options-view',api:'live-options-api'},revision:'a'.repeat(40)};
+  assert.doesNotThrow(()=>validateAssetConfig(proposedConfig,manifest));
+  const changes=[
+    ['name = "live-options-view"','name = "live-options-api"'],
+    ['main = "payload/frontend/worker.mjs"','main = "../../backend/index.js"'],
+    ['directory = "payload/site"','directory = "../../site"'],
+    ['run_worker_first = true','run_worker_first = false'],
+    ['ENVIRONMENT = "production"','ENVIRONMENT = "preview"'],
+    ['service = "live-options-api"','service = "other-provider-service"'],
+    ['binding = "API"','binding = "DB"'],
+    ['compatibility_date = "2026-06-23"','compatibility_date = "2026-02-30"'],
+    ['compatibility_date = "2026-06-23"',''],
+    ['[vars]','[vars]\nISOLATION = "disposable"'],
+    ['[vars]','[vars]\nASSET_REVISION = "wrong"'],
+    ['[assets]','[assets]\nbinding = "DUPLICATE"'],
+  ];
+  for(const [oldValue,newValue] of changes) {
+    assert.throws(()=>validateAssetConfig(proposedConfig.replace(oldValue,newValue),manifest),/Asset config|Unexpected asset config/);
+  }
+  for(const extra of ['\n[[d1_databases]]\nbinding = "DB"', '\n[[r2_buckets]]\nbinding = "PAPER_TRADES"',
+    '\n[[kv_namespaces]]\nbinding = "USERS"','\n[triggers]\ncrons = ["0 * * * *"]',
+    '\n[[services]]\nbinding = "EXTRA"', '\n[env.production]\nname = "other"']) {
+    assert.throws(()=>validateAssetConfig(proposedConfig+extra,manifest),/Unsupported asset config|duplicate table/);
+  }
+});
+test('applied config directory junction cannot disclose another source root',()=>{
+  const {old}=artifacts(),{root,out}=configFixture();
+  const outside=mkdtempSync(resolve(tmpdir(),'musef-config-outside-'));
+  symlinkSync(outside,resolve(root,'wrangler.assets.toml'),'junction');
+  assert.throws(()=>prepareRelease({artifact:old,out,configRoot:root}),/regular source file/);
+  assert.equal(existsSync(out),false);
+});
+test('stage verification pins config bytes, command, target, metadata, actions and payload',()=>{
+  const {old}=artifacts();
+  const mutations=[
+    stage=>writeFileSync(resolve(stage,'wrangler.assets.toml'),proposedConfig.replace('2026-06-23','2026-06-24')),
+    ...[
+      p=>p.proposed_command='wrangler deploy --config backend.toml',
+      p=>p.asset_target='live-options-api', p=>p.producer_actions=['collector'],
+      p=>p.config_source='other.toml', p=>p.asset_revision='b'.repeat(40),
+      p=>p.artifact='other-payload',
+    ].map(change=>stage=>{
+      const path=resolve(stage,'plan.json'), plan=JSON.parse(readFileSync(path,'utf8'));
+      change(plan); writeFileSync(path,JSON.stringify(plan));
+    }),
+    stage=>writeFileSync(resolve(stage,'payload/frontend/worker.mjs'),'tampered'),
+  ];
+  for(const mutate of mutations){
+    const {root,out}=configFixture(); prepareRelease({artifact:old,out,configRoot:root});
+    assert.equal(verifyStage(out).asset_target,'live-options-view');
+    mutate(out); assert.throws(()=>verifyStage(out),/contract mismatch|Hash mismatch/);
+  }
+});
+test('proposed PowerShell command quotes stage metacharacters literally, without execution',()=>{
+  const {old}=artifacts(),{root,out}=configFixture();
+  const path=out+"-reader's-$(not-a-command)";
+  const plan=prepareRelease({artifact:old,out:path,configRoot:root});
+  assert.ok(plan.proposed_command.includes("reader''s-$(not-a-command)"));
+  assert.ok(plan.proposed_command.includes("--config '"));
+  assert.deepEqual(verifyStage(path),plan);
+});
+test('unsupported configuration diagnostics do not print raw secrets',()=>{
+  const secret='not-a-real-secret-should-not-be-logged';
+  assert.throws(()=>validateAssetConfig('unsupported '+secret,{}),error=>{
+    assert.doesNotMatch(error.message,new RegExp(secret)); return /Unsupported asset config/.test(error.message);
+  });
 });

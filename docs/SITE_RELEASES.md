@@ -7,7 +7,7 @@ Proposed operating procedure, pending Nova's G3b/G4b receipts and provider revie
 Use an isolated LF worktree at the reviewed revision (Node 24; Node 22 needs --experimental-sqlite). Run:
 
 ```
-node --test tests/asset_boundary.test.mjs tests/preview_isolation.test.mjs tests/preview_transport.test.mjs tests/asset_rollback.test.mjs
+node --test tests/asset_boundary.test.mjs tests/preview_isolation.test.mjs tests/preview_transport.test.mjs tests/asset_rollback.test.mjs tests/preview_storage_boundary.test.mjs
 node scripts/preview-local.mjs
 ```
 
@@ -32,11 +32,12 @@ From a clean worktree at the full reviewed SHA, choose a NEW output directory OU
 node scripts/build-assets.mjs --revision FULL_REVIEWED_SHA --out OUT
 node scripts/build-assets.mjs --verify OUT
 node scripts/prepare-asset-release.mjs --artifact OUT --out STAGE
+node scripts/prepare-asset-release.mjs --verify-stage STAGE
 ```
 
 The CLI refuses dirty/wrong-HEAD/pre-floor source, copies tracked assets only (not ignored/unreviewed local files), stamps BUILD_ID, copies the tiny gateway/policy, and writes a hash inventory and same-origin-d1-v1/schema contract. It excludes backend code, producer code, Wrangler configs, credentials and Markdown prose. The library's synthetic-ID test helper is not a source attestation; production packaging uses the CLI. Preserve the original release.json separately with the approved revision and provider receipt; a self-hashed manifest is not a signature.
 
-Staging re-verifies every payload hash and schema, places the verified artifact under payload/, and adds the separate proposed asset config and plan.json. The plan has one asset target, unchanged API target, and empty producer/schema/recovery action lists; it DOES NOT execute its proposed command. Nova must review/apply the shared configuration and ordered workflow patches. Build and staging do not grant deployment authority.
+Staging prefers the actual applied root wrangler.assets.toml; only while that file is absent does it use the proposed template, labelled proposal-only. It never ignores an invalid present applied file by falling back. The plan records selected source/state and staged-config SHA256; the staged bytes, not a stale proposal, are authoritative. A narrow fail-closed TOML subset admits only the named gateway, payload/site assets, one API binding, production identity, date and optional exact revision. Operational bindings, schedules, extra environments/fields, target/path drift and duplicate fields/tables require explicit review and are refused before stage creation. Config links/escapes are refused. Staging re-verifies payload/schema, copies under payload/ and writes plan.json with one asset target, unchanged API and empty producer/schema/recovery actions. --verify-stage rechecks config/payload/plan/command before any separately authorized use; the recorded command is PowerShell-literal quoted. No command is executed. Nova must review/apply the shared configuration and ordered workflow patches. Build and staging do not grant deployment authority.
 
 ## One-time transition and provider gates (Nova C2)
 
@@ -48,7 +49,7 @@ Auth has an existing split worth preserving, not inventing away: checkOrigin cur
 
 ## Ordinary release after transition acceptance
 
-Run the exact-revision checks, package, verify and stage. Nova's ordered gate must select/test the same SHA it promotes and serialize promotions, including explicit manual bypasses; the current combined deploy.yml is not that gate. Only under the applicable existing production authority, execute the proposed asset-only Wrangler command from STAGE/plan.json. Confirm provider success/version and public BUILD_ID/X-Asset-Revision against the retained artifact, unchanged API service revision/config/cron, public reads and an isolated/nonmutating auth check. Record canary/receipt under A2; no collector restart is part of this procedure. Asset, API and producer promotion are separate actions. Account/execution/settlement code changes require their own API candidate, tests and authorization; routine asset release must not publish them.
+Run the exact-revision checks, package, verify and stage; re-run --verify-stage immediately before the authorized promotion, and match config_source/config_sha256 and applied-source state to Nova's accepted config receipt. A proposal-only stage is review material, not production-ready configuration. Nova's ordered gate must select/test the same SHA it promotes and serialize promotions, including explicit manual bypasses; the current combined deploy.yml is not that gate. Only under the applicable existing production authority, execute the proposed asset-only Wrangler command from STAGE/plan.json. Confirm provider success/version and public BUILD_ID/X-Asset-Revision against the retained artifact, unchanged API service revision/config/cron, public reads and an isolated/nonmutating auth check. Record canary/receipt under A2; no collector restart is part of this procedure. Asset, API and producer promotion are separate actions. Account/execution/settlement code changes require their own API candidate, tests and authorization; routine asset release must not publish them.
 
 ## Website-only rollback and D1 floor
 
@@ -58,6 +59,7 @@ Choose an accepted previously retained asset artifact, not an arbitrary old Git 
 node scripts/build-assets.mjs --verify OLD_ARTIFACT
 node scripts/build-assets.mjs --verify CURRENT_ARTIFACT
 node scripts/prepare-asset-release.mjs --artifact OLD_ARTIFACT --current CURRENT_ARTIFACT --out NEW_ROLLBACK_STAGE
+node scripts/prepare-asset-release.mjs --verify-stage NEW_ROLLBACK_STAGE
 node --test tests/asset_rollback.test.mjs
 ```
 
@@ -73,4 +75,4 @@ Root docs/tests changes test but do not promote a runtime. Markdown prose under 
 
 ## Remaining finalization gates
 
-G5 is draft pending Brian's concrete follow-up omissions and Nova's G3b/G4b/promotion/provider contracts. Brian's G1-adjusted e41745d7 receipt arrived (62/62); cross-review returned staging-template/prepare-script classification, actual new-suite CI execution, complete tracked-input coverage controls, and separate rendered-evidence staleness. See ASSET_BOUNDARY.md. The web-ci-only proposal supplies CI selection/commands without changing promotion; Nova reconciles its overlapping web-ci hunks with Brian's patch rather than stacking both. Steve1312c5f's authored preview suite is attached: fixture base6 pass/1 todo; product-module integration remains explicitly outstanding. A1 has local emulation evidence only until those dependencies are accepted; hosted preview/provider routing/IAM and exact real accepted-history rollback remain unverified, not inferred from local tests. Independent R1/R2 producer repairs are deliberately outside site acceptance.
+G5 is draft pending Brian's remaining follow-ups and Nova's G3b/G4b/promotion/provider contracts. Brian16a4494d now covers actual packaging/schema/tooling and prepare-script CI-only selection. Remaining cross-review asks concern selected config dependencies, complete/narrowed tracked-input coverage controls, case-sensitive extension precision, and separate rendered-evidence staleness. The applied-config preference/coupling fix and stage verification are implemented locally. See ASSET_BOUNDARY.md. The web-ci-only proposal supplies CI selection/commands without changing promotion; Nova reconciles its overlapping web-ci hunks with Brian's patch rather than stacking both. Steve1312c5f's authored preview suite is attached: fixture base6 pass/1 todo; product-module integration remains explicitly outstanding. A1 has local emulation evidence only until those dependencies are accepted; hosted preview/provider routing/IAM and exact real accepted-history rollback remain unverified, not inferred from local tests. Independent R1/R2 producer repairs are deliberately outside site acceptance.
