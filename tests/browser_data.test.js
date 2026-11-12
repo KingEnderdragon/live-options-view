@@ -10,6 +10,28 @@ const KEYS = [
   'squeeze-scanner/v1/scheduled/latest.json',
   'squeeze-scanner/v1/scheduled/latest-attempt.json',
   'squeeze-scanner/v1/scheduled/latest-schedule.json',
+  // MediaFlow news views (M4b): the index and fixed mode/stream/date/page keys.
+  'news/v1/views/index.json',
+  'news/v1/views/collector/all/2026-11-09/page-0001.json',
+  'news/v1/views/archive/oil/2026-11-09/page-0002.json',
+  'news/v1/views/publication/ai_buildout/2024-02-29/page-0020.json',
+];
+// The panel applies the same key rule before every request (both bases); the two must agree.
+const newsPanel = require('../site/js/news-panel.js');
+const NEWS_REJECTED = [
+  'news/v1/views/collector/oil/2026-02-30/page-0001.json', 'news/v1/views/collector/oil/2025-02-29/page-0001.json',
+  'news/v1/views/collector/oil/2026-13-01/page-0001.json', 'news/v1/views/collector/oil/2026-11-00/page-0001.json',
+  'news/v1/views/collector/oil/2026-11-09/page-0000.json', 'news/v1/views/collector/oil/2026-11-09/page-0021.json',
+  'news/v1/views/collector/oil/2026-11-09/page-001.json', 'news/v1/views/collector/oil/2026-11-09/page-00001.json',
+  'news/v1/views/hindsight/oil/2026-11-09/page-0001.json', 'news/v1/views/collector/gold/2026-11-09/page-0001.json',
+  'news/v1/views/Collector/oil/2026-11-09/page-0001.json', 'news/v1/views/collector/oil/20261109/page-0001.json',
+  'news/v1/views/collector/oil/2026-11-09/page-0001.json/', 'news/v1/views/collector/oil/2026-11-09/page-0001.json.bak',
+  'news/v1/views/collector/oil/2026-11-09/', 'news/v1/views/collector/oil/2026-11-09/index.json',
+  'news/v1/views/', 'news/v1/views/index.json/', 'news/v1/views//index.json', 'news/v1/views/%69ndex.json',
+  'news/v1/views/index.json%00', 'news/v1/views/collector/oil/2026-11-09/..%2f..%2f..%2findex.json',
+  'news/v1/views/collector/%6fil/2026-11-09/page-0001.json', 'news%2fv1%2fviews%2findex.json',
+  'news/v1/index.json', 'news/oil/v1/latest.json', 'news/v1/raw/observations.jsonl', 'news/', 'news',
+  'news/v2/views/index.json', 'NEWS/v1/views/index.json',
 ];
 const ORIGIN = 'https://pub-4d5c916b8cb74ffb8c0abd7dfadb02cf.r2.dev';
 const APP = 'https://live-options-view.otmooper12.workers.dev';
@@ -87,6 +109,7 @@ const APP = 'https://live-options-view.otmooper12.workers.dev';
       'raw/spy_chain_20261027.csv', 'raw/qqq_chain_20261027.csv/secret',
       'raw/qqq_chain_20261027.csv.bak', 'prices/spy_intraday_20261027.csv',
       'raw/opex/other/qqq_chain_20261027.csv', 'raw/%71qq_chain_20261027.csv',
+      ...NEWS_REJECTED,
     ]) {
       assert.equal((await request('/browser-data/' + key)).status, 404, key);
     }
@@ -116,6 +139,23 @@ const APP = 'https://live-options-view.otmooper12.workers.dev';
         assert.deepEqual(new Uint8Array(await res.arrayBuffer()), [204, 304].includes(status) ? new Uint8Array() : body);
       }
     }
+    // The proxy and the panel's own check agree on every news key, accepted or refused.
+    status = 200;
+    const dates = ['2026-11-09', '2024-02-29', '2026-02-30', '2026-13-01'];
+    const pages = [0, 1, 2, 19, 20, 21].map(n => 'page-' + String(n).padStart(4, '0') + '.json');
+    const keys = [...NEWS_REJECTED, 'news/v1/views/index.json'];
+    for (const mode of [...newsPanel.MODES, 'other']) {
+      for (const stream of [...newsPanel.STREAMS, 'other']) {
+        for (const date of dates) for (const page of pages) keys.push(`news/v1/views/${mode}/${stream}/${date}/${page}`);
+      }
+    }
+    let accepted = 0;
+    for (const key of keys) {
+      const res = await request('/browser-data/' + key + '?_=1762686900000');
+      assert.equal(res.status === 200, newsPanel.isNewsViewKey(key), 'proxy and panel disagree on ' + key);
+      if (res.status === 200) accepted++;
+    }
+    assert.equal(accepted, 1 + 3 * 3 * 2 * 4, 'index + modes x streams x real dates x pages 1, 2, 19, 20');
     fail = true;
     const failure = await request('/browser-data/' + KEYS[0]);
     assert.equal(failure.status, 502);
@@ -138,6 +178,7 @@ const APP = 'https://live-options-view.otmooper12.workers.dev';
   assert.ok(frontend.includes('fetch(`${BROWSER_DATA}/raw/opex/qqq_chain_'));
   assert.ok(frontend.includes('fetch(`${BROWSER_DATA}/manifest.json'));
   assert.ok(frontend.includes('fetch(`${BROWSER_DATA}/prices/qqq_intraday_'));
+  assert.ok(frontend.includes('NewsPanel.makeFetcher(BROWSER_DATA, '));
   assert.ok(!frontend.includes('/r2-proxy/'));
   const routing = frontend.slice(frontend.indexOf('const R2 ='), frontend.indexOf('const REFRESH'));
   assert.ok(routing.includes('location.origin'));
@@ -149,5 +190,5 @@ const APP = 'https://live-options-view.otmooper12.workers.dev';
       assert.equal(base + '/' + key, (origin === APP ? '/browser-data' : ORIGIN) + '/' + key);
     }
   }
-  console.log('browser data: live keys and bounded QQQ archives, strict paths/queries/methods, no bindings/credentials/redirects, byte/status preservation and frontend scope passed');
+  console.log('browser data: live keys and bounded QQQ archives, strict paths/queries/methods, no bindings/credentials/redirects, byte/status preservation and frontend scope passed (including news views)');
 })().catch(error => { console.error(error); process.exitCode = 1; });

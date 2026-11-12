@@ -32,17 +32,31 @@ export function isPublicArchiveKey(key) {
   const parsed = new Date(`${date}T00:00:00Z`);
   return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === date;
 }
+// MediaFlow news view pages read by the News panel (accepted MediaFlow M4b-M6,
+// 8639c6d): exactly the index, or one fixed mode / stream, a real calendar
+// date and page 0001-0020 (views.py's MODES, STREAM_KEYS and pages_per_view).
+// site/js/news-panel.js applies the same check before every request, and
+// frontend/preview-policy.mjs mirrors it. Exact keys only: this replaces the
+// prospective news/v1/views/** prefix grant removed 2026-11-11, which stays
+// removed (news/v1/views/today.json and any other shape remain 404).
+const NEWS_VIEW_INDEX_KEY = 'news/v1/views/index.json';
+export function isPublicNewsViewKey(key) {
+  if (key === NEWS_VIEW_INDEX_KEY) return true;
+  const match = /^news\/v1\/views\/(?:collector|archive|publication)\/(?:all|ai_buildout|oil)\/([0-9]{4})-([0-9]{2})-([0-9]{2})\/page-([0-9]{4})\.json$/.exec(key);
+  if (!match) return false;
+  const page = Number(match[4]);
+  if (page < 1 || page > 20) return false;
+  const date = `${match[1]}-${match[2]}-${match[3]}`;
+  const parsed = new Date(`${date}T00:00:00Z`);
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === date;
+}
 // Traversal guard (was the %2e check inside the removed news prefix rule):
 // literal and percent-encoded dot traversal (%2e normalizes to a dot
 // segment in URL parsing, so the raw form must be refused here too),
 // backslash and NUL are refused for every key shape, before the allowlist.
-// The prospective news/v1/views/** grant was removed 2026-11-11: no
-// accepted MediaFlow source/key corpus exists (9063cd4 is not a git
-// identifier in this baseline); absence of the object does not justify
-// inventing future public access.
 export function isPublicBrowserDataKey(key) {
   if (key.includes('..') || /%2e/i.test(key) || key.includes('\\') || key.includes('\0')) return false;
-  return BROWSER_DATA_KEYS.has(key) || isPublicArchiveKey(key);
+  return BROWSER_DATA_KEYS.has(key) || isPublicArchiveKey(key) || isPublicNewsViewKey(key);
 }
 const MAX_LIVE_QUOTE_SYMBOLS = 100;
 export async function handleBrowserData(request, url) {

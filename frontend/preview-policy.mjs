@@ -19,10 +19,22 @@ export function publicReadAllowed(url) {
   // Traversal guard, mirroring backend/browser-data.js: literal and
   // percent-encoded dot traversal, backslash and NUL are refused for every
   // key shape before the allowlist. tests/r2_proxy_bounded.test.js pins
-  // backend/gateway agreement. (The prospective news/v1/views/** grant was
-  // removed 2026-11-11: no accepted MediaFlow source exists.)
+  // backend/gateway agreement. (The prospective news/v1/views/** prefix grant
+  // removed 2026-11-11 stays removed; only the exact News view keys below.)
   if (key.includes('..') || /%2e/i.test(key) || key.includes('\\') || key.includes('\0')) return false;
   if (PUBLIC_KEYS.has(key)) return true;
+  // MediaFlow News views: exactly the index, or one fixed mode / stream, a real
+  // calendar date and page 0001-0020. Mirrors isPublicNewsViewKey in
+  // backend/browser-data.js and the News panel's own key check.
+  if (key === 'news/v1/views/index.json') return true;
+  const n = /^news\/v1\/views\/(?:collector|archive|publication)\/(?:all|ai_buildout|oil)\/(\d{4})-(\d{2})-(\d{2})\/page-(\d{4})\.json$/.exec(key);
+  if (n) {
+    const page = Number(n[4]);
+    if (page < 1 || page > 20) return false;
+    const day = `${n[1]}-${n[2]}-${n[3]}`;
+    const at = new Date(`${day}T00:00:00Z`);
+    return Number.isFinite(+at) && at.toISOString().slice(0, 10) === day;
+  }
   const m = /^(?:raw\/(?:opex\/)?qqq_chain_|prices\/qqq_intraday_)(\d{4})(\d{2})(\d{2})\.csv$/.exec(key);
   if (!m) return false;
   const date = `${m[1]}-${m[2]}-${m[3]}`;
