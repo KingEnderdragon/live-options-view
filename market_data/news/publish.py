@@ -951,8 +951,8 @@ def _run(private, public: "PublicViewStore", gen: str, files: dict[str, bytes], 
                 state["blocked"] = {"at": iso(reading["producer"]), "why": "generation ledger: " + "; ".join(ledger_problems[:5])}
                 _write_state(private, state)
                 raise PublishBlocked(f"history is uncertain ({state['blocked']['why']}); nothing written or deleted")
-            fresh = lambda: _clock_reading(private, clock, state)   # noqa: E731
-            settled = _reconcile(private, public, state, records, reading, fresh)
+            reread = lambda: _clock_reading(private, clock, state)   # noqa: E731
+            settled = _reconcile(private, public, state, records, reading, reread)
             reading = settled["reading"]
             if settled["blocked"]:
                 state["blocked"] = {"at": iso(reading["producer"]), "why": settled["blocked"]}
@@ -1039,7 +1039,7 @@ def _run(private, public: "PublicViewStore", gen: str, files: dict[str, bytes], 
             records, _ = read_ledger(private)
             # The reading from the start of the run predates the upload: the displaced generation is
             # retired from a fresh reading taken inside _reconcile, after the full match succeeds.
-            settled = _reconcile(private, public, state, records, reading, fresh)
+            settled = _reconcile(private, public, state, records, reading, reread)
             reading = settled["reading"]
             if settled["live"] != gen:
                 state["uncertain"] = {"gen": gen, "since": iso(reading["producer"]),
