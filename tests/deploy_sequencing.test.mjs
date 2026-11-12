@@ -859,3 +859,215 @@ test('F1: no expression interpolation in any deploy run step; CLI accepts env', 
     assert.match(out.stdout, /"dryRun":\s*true/);
   } finally { cleanup(s); }
 });
+
+// Repair 6, defect 1 — The CI selector must require the NEWEST completed
+// Web CI run for the exact revision to be successful. The repair-5 selector
+// picked the newest *success* (`.workflow_runs[] | select(.conclusion ==
+// "success")`), so an older success overrode a newer failure. The selector
+// is extracted from each workflow and run against fixtures with jq.
+// (Repair 7: fixtures now carry status + updated_at, since the selector
+// requires the newest run/attempt to be completed/success.)
+test('Repair 6: CI selector refuses a stale success when a newer run failed', () => {
+  const read = name => readFileSync(join(ROOT, '.github/workflows', name), 'utf8');
+  const runJq = (filter, input) => {
+    const r = spawnSync('jq', ['-r', filter], { input, encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+    return r.stdout.trim();
+  };
+  // GitHub lists runs newest-first. Newer run failed, older run succeeded.
+  const stale = JSON.stringify({ workflow_runs: [
+    { id: 200, status: 'completed', conclusion: 'failure', created_at: '2026-11-12T09:00:00Z', updated_at: '2026-11-12T09:05:00Z' },
+    { id: 100, status: 'completed', conclusion: 'success', created_at: '2026-11-12T08:00:00Z', updated_at: '2026-11-12T08:05:00Z' },
+  ] });
+  const fresh = JSON.stringify({ workflow_runs: [
+    { id: 300, status: 'completed', conclusion: 'success', created_at: '2026-11-12T10:00:00Z', updated_at: '2026-11-12T10:05:00Z' },
+    { id: 200, status: 'completed', conclusion: 'failure', created_at: '2026-11-12T09:00:00Z', updated_at: '2026-11-12T09:05:00Z' },
+  ] });
+  const empty = JSON.stringify({ workflow_runs: [] });
+  for (const name of ['deploy.yml', 'deploy-staged.yml']) {
+    const filter = read(name).match(/--jq '([^']+)'/)[1];
+    assert.equal(runJq(filter, stale), '', `${name}: a newer failure must refuse, not fall back to an older success`);
+    assert.equal(runJq(filter, fresh), '300', `${name}: the newest success is accepted`);
+    assert.equal(runJq(filter, empty), '', `${name}: no runs must refuse`);
+  }
+});
+
+// Repair 7 — The selector must fetch ALL statuses (no status=completed
+// filter) and select the NEWEST run/attempt (by last update), then require
+// completed/success. A newer running or queued check must not be hidden
+// by an older success, and a re-run attempt on an older run is the current
+// attempt: while it runs the selector refuses, once it passes it is the
+// accepted evidence.
+test('Repair 7: CI selector refuses while a newer check runs or queues', () => {
+  const read = name => readFileSync(join(ROOT, '.github/workflows', name), 'utf8');
+  const runJq = (filter, input) => {
+    const r = spawnSync('jq', ['-r', filter], { input, encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+    return r.stdout.trim();
+  };
+  const success = { id: 100, status: 'completed', conclusion: 'success', created_at: '2026-11-12T08:00:00Z', updated_at: '2026-11-12T08:05:00Z' };
+  // Newer distinct run in progress; older success must not be selected.
+  const running = JSON.stringify({ workflow_runs: [
+    { id: 400, status: 'in_progress', conclusion: null, created_at: '2026-11-12T11:00:00Z', updated_at: '2026-11-12T11:00:00Z' },
+    success,
+  ] });
+  // Newer distinct run queued; older success must not be selected.
+  const queued = JSON.stringify({ workflow_runs: [
+    { id: 400, status: 'queued', conclusion: null, created_at: '2026-11-12T11:00:00Z', updated_at: '2026-11-12T11:00:00Z' },
+    success,
+  ] });
+  // Newest run completed success; accepted.
+  const fresh = JSON.stringify({ workflow_runs: [
+    { id: 300, status: 'completed', conclusion: 'success', created_at: '2026-11-12T10:00:00Z', updated_at: '2026-11-12T10:05:00Z' },
+    { id: 200, status: 'completed', conclusion: 'failure', created_at: '2026-11-12T09:00:00Z', updated_at: '2026-11-12T09:05:00Z' },
+  ] });
+  // Older run re-run: its attempt is the newest activity and is running.
+  const rerunRunning = JSON.stringify({ workflow_runs: [
+    { id: 200, status: 'completed', conclusion: 'success', created_at: '2026-11-12T09:00:00Z', updated_at: '2026-11-12T09:05:00Z' },
+    { id: 100, status: 'in_progress', conclusion: null, created_at: '2026-11-12T08:00:00Z', updated_at: '2026-11-12T11:00:00Z' },
+  ] });
+  // Same re-run, now passed: the re-run attempt is the accepted evidence.
+  const rerunPassed = JSON.stringify({ workflow_runs: [
+    { id: 200, status: 'completed', conclusion: 'success', created_at: '2026-11-12T09:00:00Z', updated_at: '2026-11-12T09:05:00Z' },
+    { id: 100, status: 'completed', conclusion: 'success', created_at: '2026-11-12T08:00:00Z', updated_at: '2026-11-12T11:00:00Z' },
+  ] });
+  for (const name of ['deploy.yml', 'deploy-staged.yml']) {
+    const text = read(name);
+    const filter = text.match(/--jq '([^']+)'/)[1];
+    // No status filter in the API query: all statuses must be fetched.
+    const query = text.match(/web-ci\.yml\/runs\?[^"']+/)[0];
+    assert.ok(!query.includes('status='), `${name}: CI query must fetch all statuses, got ${query}`);
+    assert.equal(runJq(filter, running), '', `${name}: a newer running check must refuse, not fall back to an older success`);
+    assert.equal(runJq(filter, queued), '', `${name}: a newer queued check must refuse, not fall back to an older success`);
+    assert.equal(runJq(filter, fresh), '300', `${name}: the newest completed success is accepted`);
+    assert.equal(runJq(filter, rerunRunning), '', `${name}: a re-run attempt in progress must refuse`);
+    assert.equal(runJq(filter, rerunPassed), '100', `${name}: a re-run attempt that passed is the accepted evidence`);
+  }
+});
+
+// Repair 6, defect 2 — The audit upload points at the hidden releases
+// directory (.deploy-releases). actions/upload-artifact@v4 excludes hidden
+// files unless include-hidden-files is true, so the repair-5 upload found
+// no evidence and merely warned. Both lanes must include hidden files.
+// (Repair 7: the path is now the resolved absolute path from the releases
+// step — it still points at the hidden releases directory, resolved by
+// realpath -m from ../.deploy-releases, because upload-artifact rejects
+// '..' segments in the path.)
+test('Repair 6: audit upload includes hidden .deploy-releases files', () => {
+  const read = name => readFileSync(join(ROOT, '.github/workflows', name), 'utf8');
+  for (const name of ['deploy.yml', 'deploy-staged.yml']) {
+    const text = read(name);
+    const block = text.match(/Upload authorization and receipts[\s\S]*?if-no-files-found: \w+/)[0];
+    assert.match(block, /path: \$\{\{ steps\.releases\.outputs\.abs \}\}/, `${name}: upload path must be the resolved absolute path`);
+    assert.match(block, /include-hidden-files:\s*true/, `${name}: upload must include hidden files`);
+    assert.ok(text.includes('realpath -m "$GITHUB_WORKSPACE/../.deploy-releases"'), `${name}: resolve step must target the hidden releases directory`);
+  }
+});
+
+// Repair 7, fix 2 — The audit upload path must be an absolute path with
+// no '..' segments: upload-artifact@v4 rejects the
+// `${{ github.workspace }}/../.deploy-releases/` form ("Relative pathing
+// '.' and '..' is not allowed"), which is what failed the 381addb API
+// dry-run at the final step. A resolve step (id releases, if always)
+// computes the absolute path with realpath -m, and the upload uses it.
+test('Repair 7: audit upload path is an absolute path with no .. segments', () => {
+  const read = name => readFileSync(join(ROOT, '.github/workflows', name), 'utf8');
+  for (const name of ['deploy.yml', 'deploy-staged.yml']) {
+    const text = read(name);
+    assert.ok(/Resolve the releases directory to an absolute path[\s\S]*?id: releases[\s\S]*?if: always\(\)[\s\S]*?realpath -m/.test(text),
+      `${name}: must resolve the releases directory (id releases, if always, realpath -m)`);
+    const upload = text.match(/Upload authorization and receipts[\s\S]*?if-no-files-found: \w+/)[0];
+    assert.match(upload, /path: \$\{\{ steps\.releases\.outputs\.abs \}\}/, `${name}: upload path must be the resolved absolute path`);
+    assert.ok(!upload.includes('..'), `${name}: upload path must not contain '..'`);
+  }
+});
+
+// Repair 7, fix 3 (workflow) — The asset lane's API-exists check runs
+// only in real mode. The service is created by the real API deploy,
+// which a dry-run never performs, so in dry-run mode the service is
+// expected to be absent. The verify + record steps are gated on
+// inputs.execute, and authorize + deploy receive the dry-run flag.
+test('Repair 7: asset lane skips the API-exists check in dry-run mode only', () => {
+  const read = name => readFileSync(join(ROOT, '.github/workflows', name), 'utf8');
+  const text = read('deploy-staged.yml');
+  assert.ok(/Verify the API service exists[\s\S]*?if: \$\{\{ inputs\.execute \}\}/.test(text),
+    'deploy-staged.yml: API-exists verify step must run only when execute=true');
+  assert.ok(/Record API readiness evidence[\s\S]*?if: \$\{\{ inputs\.execute \}\}/.test(text),
+    'deploy-staged.yml: API readiness record step must run only when execute=true');
+  assert.ok(/Authorize the asset candidate[\s\S]*?DEPLOY_DRY_RUN: \$\{\{ !inputs\.execute \}\}/.test(text),
+    'deploy-staged.yml: asset authorize must pass DEPLOY_DRY_RUN');
+  assert.ok(/Deploy staged payload through the gate[\s\S]*?DEPLOY_DRY_RUN: \$\{\{ !inputs\.execute \}\}/.test(text),
+    'deploy-staged.yml: asset deploy must pass DEPLOY_DRY_RUN');
+  // The API lane has no API-exists check and needs no dry-run flag.
+  assert.ok(!read('deploy.yml').includes('DEPLOY_DRY_RUN'), 'deploy.yml: API lane has no readiness check to skip');
+});
+
+// Repair 7, fix 3 (gate) — In dry-run mode the asset authorize/deploy
+// succeed without API readiness (the service is expected to be absent);
+// in real mode (default and explicit dryRun:false) they still refuse.
+// This is what failed the 381addb asset dry-run at the API-exists step.
+test('Repair 7: dry-run asset authorize/deploy succeed without API readiness; real mode still refuses', () => {
+  const fresh = mkdtempSync(join(tmpdir(), 'deploy-dryrun-'));
+  const prevReleases = process.env.DEPLOY_RELEASES_DIR;
+  process.env.DEPLOY_RELEASES_DIR = fresh;
+  const s = makeStage(HEAD);
+  try {
+    // Real mode (default and explicit) refuses without API evidence.
+    assert.throws(() => authorizeStage({ stage: s.stage, revision: HEAD, webCheck: WEB, apiCheck: API, authorizer: 'test' }),
+      /API service not ready/);
+    assert.throws(() => authorizeStage({ stage: s.stage, revision: HEAD, webCheck: WEB, apiCheck: API, authorizer: 'test', dryRun: false }),
+      /API service not ready/);
+    // Dry-run mode authorizes without API evidence.
+    authorizeStage({ stage: s.stage, revision: HEAD, webCheck: WEB, apiCheck: API, authorizer: 'test', dryRun: true });
+    // Dry-run deploy succeeds without API evidence.
+    const dry = deployStaged({ stage: s.stage, revision: HEAD, dryRun: true });
+    assert.equal(dry.dryRun, true);
+    // Real deploy (dryRun false, with and without execute) still refuses.
+    assert.throws(() => deployStaged({ stage: s.stage, revision: HEAD, dryRun: false }), /API service not ready/);
+    assert.throws(() => deployStaged({ stage: s.stage, revision: HEAD, execute: true, dryRun: false, executor: stubExecutor().fn }),
+      /API service not ready/);
+  } finally {
+    cleanup(s);
+    process.env.DEPLOY_RELEASES_DIR = prevReleases;
+    rmSync(fresh, { recursive: true, force: true });
+  }
+});
+
+// Repair 8 — Contradictory modes (execute:true + dryRun:true) must
+// refuse before any authorization or execution. dryRun skips the
+// readiness assertion and execute invokes the executor; the combination
+// executed a stub deploy with no API evidence (Brian's repair-7
+// verdict). The guard is in deploy(), the single choke point every
+// caller reaches (CLI, workflows, direct import), and it fires before
+// any state is read, so it holds on every target.
+test('Repair 8: execute:true with dryRun:true refuses; the executor never runs', () => {
+  const fresh = mkdtempSync(join(tmpdir(), 'deploy-modes-'));
+  const prevReleases = process.env.DEPLOY_RELEASES_DIR;
+  process.env.DEPLOY_RELEASES_DIR = fresh;
+  const s = makeStage(HEAD);
+  try {
+    // Dry-run authorize succeeds without API evidence (repair 7).
+    authorizeStage({ stage: s.stage, revision: HEAD, webCheck: WEB, apiCheck: API, authorizer: 'test', dryRun: true });
+    // The contradictory combination refuses and the executor never runs.
+    const exec = stubExecutor();
+    assert.throws(() => deployStaged({ stage: s.stage, revision: HEAD, execute: true, dryRun: true, executor: exec.fn }),
+      /Contradictory modes/);
+    assert.equal(exec.calls.length, 0, 'executor must never run for contradictory modes');
+    // The legitimate combinations still work: dry-run returns the
+    // dry-run command, and real mode still refuses without evidence.
+    const dry = deployStaged({ stage: s.stage, revision: HEAD, dryRun: true });
+    assert.equal(dry.dryRun, true);
+    assert.throws(() => deployStaged({ stage: s.stage, revision: HEAD, execute: true, dryRun: false, executor: stubExecutor().fn }),
+      /API service not ready/);
+    // The guard is target-agnostic: the API lane refuses the same way
+    // (it fires before any authorization is read).
+    const execApi = stubExecutor();
+    assert.throws(() => deployApi({ revision: HEAD, execute: true, dryRun: true, executor: execApi.fn }),
+      /Contradictory modes/);
+    assert.equal(execApi.calls.length, 0, 'API executor must never run for contradictory modes');
+  } finally {
+    cleanup(s);
+    process.env.DEPLOY_RELEASES_DIR = prevReleases;
+    rmSync(fresh, { recursive: true, force: true });
+  }
+});
