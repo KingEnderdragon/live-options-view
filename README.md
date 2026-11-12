@@ -4,6 +4,8 @@ Options View connects a live QQQ/SPY options chain, historical QQQ heatmaps, a s
 
 Open [the website](https://options.moopertonic.net), then use the [system map](ARCHITECTURE.md) to locate a component or follow the [walkthrough](docs/WALKTHROUGH.md) from a displayed value to its source. The [documentation index](docs/README.md) separates current navigation, specifications, operations and historical design records.
 
+Agents working in this repository must read [AGENTS.md](AGENTS.md) for release boundaries, documentation routes and the no-KV rule.
+
 ## The shortest route through the repository
 
 | Question | Start here | What it owns |
