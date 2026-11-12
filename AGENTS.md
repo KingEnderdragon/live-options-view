@@ -68,7 +68,7 @@ or on weekends; check the affected process's lifecycle, not only the clock.
 | Asset-only rollback to a compatible separated artifact | May use the normal asset rollback procedure | Preserve API/schema compatibility; never restore the combined Worker as an ordinary site rollback |
 | Gateway routing, API-call behavior, polling rate or shared contracts | Assess the affected behavior before shipping; use the appropriate separate lane | Asset packaging alone does not make changed request traffic or API behavior harmless |
 | Backend/API deployment | Does not itself restart Railway collectors, but can interfere with accounts, execution, quotes and settlement | Identify live clients and compatibility effects; use a bounded release/rollback plan when the change can interrupt them |
-| Producer code, shared Python dependencies or prose inside a producer watch scope | Prepare locally; merging/promotion may restart a running service | Defer disruptive promotion to that process's inactive window unless a bounded active-session intervention is already authorized |
+| Producer code, shared Python dependencies or prose inside a producer watch scope | Prepare locally; merging/promotion may restart a running service | Use responsible temporary separation, or wait until the affected process's session closes |
 | Restart/redeploy, env/secrets/binding changes, cron changes, fencing, migrations, recovery or artifact rewrites | Treat as potentially disruptive operational work, even without a source change | Establish the exact process, write, schedule and data effects before execution; use applicable operational authority and rollback |
 
 A change **genuinely interferes** when it can stop/restart a live process, create
@@ -79,12 +79,36 @@ includes a merge that triggers Railway automatically. Asset release isolation
 protects producers from republishing; it does not excuse incompatible frontend
 requests or changes to a bot's behavior.
 
-For a potentially disruptive action, name the affected service and expected
-interruption, choose an inactive window or the already-authorized bounded
-intervention, and retain the relevant rollback and continuity evidence. If the
-required intervention is outside existing authority, request that specific
-decision. Continue independent implementation and site work while it waits;
-do not make an unrelated producer release a gate for ordinary site changes.
+### New bots, instruments and collection processes
+
+**During an active session, additions that would disturb an existing process
+must either use responsible temporary separation or wait until close.** This
+applies to activating a new bot, expanding ticker/instrument coverage and
+starting a new collection process. Do not restart or reconfigure the shared
+runner/collector merely to fit an addition into today's session.
+
+Responsible temporary separation means:
+- A separately owned runner/process and bot account, with no second executor
+  operating an existing account and no competing capture owner.
+- Isolated state, logs and output prefixes; no overwriting shared artifacts or
+  claiming existing manifests, leases or schedules.
+- Provider-supported connection/token sharing and bounded subscription, rate,
+  compute and storage budgets. A second process is not isolated if it can
+  evict the existing feed, fight a lease or exhaust a shared quota. In particular,
+  do not create a second Tradier stream with the same token to add coverage.
+- An explicit owner, stop/cleanup condition and later integration plan. Record
+  the actual start time and partial-session coverage; do not imply full-day data.
+  Retain applicable release/credential authority and the no-KV rule below.
+
+If those conditions cannot be established, prepare and test the change locally
+and wait until close to integrate it. "Close" means the affected process's
+capture/execution session and finalization have ended, not automatically the
+equity closing bell; extended-hours, futures and crypto processes may continue.
+Keep unrelated site work moving while the addition waits.
+
+Already-supported ticker displays and bounded on-demand contract quotes may
+continue through their existing compatible paths; they do not require a new
+process merely because they are requested during trading hours.
 
 ## Avoid Cloudflare Workers KV operations
 
