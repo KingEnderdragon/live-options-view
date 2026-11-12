@@ -1,7 +1,10 @@
 # Website and paper-account backend
 
 [backend/index.js](index.js) is the stable Cloudflare entry point. It dispatches to
-these modules; [wrangler.toml](../wrangler.toml) defines assets, bindings and cron.
+these modules in the separate `live-options-api` service;
+[wrangler.api.toml](../wrangler.api.toml) defines operational bindings and cron.
+The public asset gateway uses [wrangler.assets.toml](../wrangler.assets.toml)
+through the [staged release procedure](../docs/SITE_RELEASES.md).
 The browser's implementation lives separately in [site/](../site).
 
 | Responsibility | Source |

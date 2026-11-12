@@ -1,5 +1,10 @@
 # Release boundaries
 
+Current release instructions: [SITE_RELEASES.md](SITE_RELEASES.md). Site/API
+separation deployed November 12 at `f759582`; both Cloudflare workflows are
+explicit dispatch only. Provider tables below remain a dated November 11
+baseline, not a fresh provider audit.
+
 Which changes can reach production, through which route, and who owns each
 route. This is the C1 deliverable for
 [#225](https://github.com/OwenTanzer/live-options-view/issues/225); the
@@ -21,7 +26,8 @@ until this document and the expectations are updated together.
 
 | Lane | Workflow | Promotes? | Trigger paths |
 |---|---|---|---|
-| `cloudflare_deploy` | `deploy.yml` | yes, straight to production | `site/**`, `backend/**`, `wrangler.toml`, `scripts/stamp-build.mjs`, `tests/build_stamp.test.mjs`, the workflow itself |
+| `cloudflare_deploy` | `deploy.yml` | API only, explicit protected dispatch | No push trigger |
+| `asset_deploy` | `deploy-staged.yml` | Assets only, explicit protected dispatch | No push trigger |
 | `web_ci` | `web-ci.yml` | no | `backend/**`, `site/**`, `tests/**`, `wrangler.toml`, both stamp/quote scripts, both workflows |
 | `collector_ci` | `collector-ci.yml` | no | `market_data/**`, `deployment/python/**`, named producer tests and research modules, the workflow itself |
 | `crassus_ci` | `crassus-ci.yml` | no | `crassus/**`, the workflow itself |
@@ -134,12 +140,10 @@ services' watch scopes, so editing them promotes. Encoded as current behaviour,
 not as intent. Narrowing it is a provider watch-pattern change, which belongs to
 Nova's integration surface; a repository edit cannot fix it.
 
-**The stale deployment contract is itself a deployment.** `site/DEPLOYMENTS.md`
-is dated 2026-09-03 and describes entry points and settings that no longer
-exist. It also sits inside `site/**`, so reconciling it triggers the very
-promotion it documents. This document is the reconciliation, placed outside
-every watch scope. Replacing the old file with a pointer should travel with
-Nova's next site change rather than being its own release.
+**Deployment documentation.** `site/DEPLOYMENTS.md` now points to the current
+site-release procedure. Markdown is excluded from asset payloads; editing it
+does not promote Cloudflare. Producer-directory prose may still match Railway
+watch scopes.
 
 **Ordering.** The subset invariant holds; the `concurrency` group now
 exists (`deploy-live-options-view`, shared by `deploy.yml` and
@@ -183,10 +187,9 @@ item makes that gap go away.
 Musef's G1/G2 tree (`bff49eed` on `origin/musef/225-assets-preview`) puts a static
 asset gateway in `frontend/` that forwards the reserved API paths to a
 separately bound API service, with every browser URL and relative `/api` call
-left alone. None of the topology is applied: production still runs the combined
-Worker, and the provider facts it needs — service binding, name split, trigger
-ownership, disposable resources, D1 readback — remain unverified under Nova's
-hold. What the tree does settle is which artifact a change belongs to, and the
+left alone. The topology was applied at the November 12 cutover; see the current
+procedure for its receipts. The design measurements below refer to the
+original local tree, not a fresh provider audit. What the tree does settle is which artifact a change belongs to, and the
 packager decides that, not a directory sweep.
 
 `scripts/build-assets.mjs` copies `site/` through a thirteen-extension allowlist
@@ -243,9 +246,8 @@ the file it named has changed since.
 plan and operation notes beside it are documents that live inside the asset
 tree. The design asks for that to be explicit rather than a side effect of a
 glob, so it is its own class: it cannot change the artifact's bytes and it is
-not an API change. Today it still fires the combined workflow, which is the
-coupling the split removes; after the split it rebuilds static bytes and cannot
-reach the API.
+not an API change. Neither Cloudflare workflow now runs on push, and Markdown is not
+asset payload. Explicit asset promotion does not republish the API.
 
 **A commit spanning both artifacts is a reviewed mixed change.** `backend/` and
 `site/` in one commit belongs to both artifacts and to neither workflow alone,

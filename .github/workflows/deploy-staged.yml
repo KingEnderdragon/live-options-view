@@ -1,7 +1,7 @@
 name: Deploy staged asset payload (G3b)
 
-# Repair 5 (2026-11-12, DRAFT — not approved, not merged). The Actions
-# gate is executable again. The old download-artifact step failed because
+# Current protected release lane; deployed at the November 12, 2026 cutover.
+# Same-runner authorization and staging are active. The old download-artifact step failed because
 # no workflow ever uploaded an authorization-<revision> artifact, and
 # the old `stage` input named a path that never exists on a fresh
 # runner: the record is now created ON the execution runner by the

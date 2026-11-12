@@ -1,5 +1,9 @@
 # G1: independent asset boundary (#225)
 
+Historical design return. The split was deployed November 12, 2026; use
+[SITE_RELEASES.md](SITE_RELEASES.md) for current operations. Pending/held statements
+below describe the original design checkpoint, not current deployment state.
+
 Design return, Musef, 2026-11-11 approximately 14:06 Pacific (initial heading said 14:08; Notion creation metadata records 22:06 UTC). Proposal ready for partner implementation; not acceptance, deployment or verified provider topology.
 
 ## Exact source and ownership

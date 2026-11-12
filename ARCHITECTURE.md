@@ -67,8 +67,12 @@ The normal Worker has no KV bindings or migration endpoint. Legacy namespaces re
 
 ## Release ownership and verification
 
-[deploy.yml](.github/workflows/deploy.yml) runs on matching `master` paths, verifies packaging, runs [stamp-build.mjs](scripts/stamp-build.mjs), then deploys Cloudflare. [web-ci.yml](.github/workflows/web-ci.yml) checks packaging, browser/Worker syntax and rendered Historical behavior before integration. The [MCP workflow](.github/workflows/market-mcp-ci.yml) also builds/runs the narrow non-root image; shared browser imports must be copied into it.
+[deploy-staged.yml](.github/workflows/deploy-staged.yml) publishes staged site assets;
+[deploy.yml](.github/workflows/deploy.yml) publishes the separate API. Both require
+explicit dispatch, exact-revision Web CI and protected production approval.
+Merging does not publish Cloudflare. Follow [SITE_RELEASES.md](docs/SITE_RELEASES.md).
+The [MCP workflow](.github/workflows/market-mcp-ci.yml) also builds/runs the narrow non-root image; shared browser imports must be copied into it.
 
-Railway deploys through service source/watch settings, not a repository deploy workflow. The served [Deployment Contract](site/DEPLOYMENTS.md) is dated September 3 and is not the latest service inventory; for example the October 4 [Crassus inspection](crassus/docs/2026-10-market-reading-contract.md#watch-scope-impact) already superseded its old QQQ/Crassus CI-gate claim. Service readback remains a separate operational record; this documentation pass does not establish every service's current gate or watch scope. A prose-only change under `crassus/**` or an unrestricted Railway watcher may still rebuild a service. Review merge effects explicitly.
+Railway deploys through service source/watch settings, not a repository deploy workflow. The [Deployment Contract](site/DEPLOYMENTS.md) points to the current site-release procedure. Service readback remains a separate operational record; this documentation pass does not establish every service's current gate or watch scope. A prose-only change under `crassus/**` or an unrestricted Railway watcher may still rebuild a service. Review merge effects explicitly.
 
-All served prose remains in [site](site) at unchanged public-relative paths. [The public-prose inventory](docs/PUBLIC_PROSE.md) distinguishes served references from internal specifications; it proposes no unpublishing. The [walkthrough](docs/WALKTHROUGH.md) is the bounded acceptance route: choose a feature, find the implementation, explain its inputs/outputs and identify the producer and consumer without treating an old receipt as current health.
+Markdown references remain in [site](site) in the repository, but are excluded from the separated asset artifact. [The public-prose inventory](docs/PUBLIC_PROSE.md) records the earlier combined-Worker paths. The [walkthrough](docs/WALKTHROUGH.md) is the bounded acceptance route: choose a feature, find the implementation, explain its inputs/outputs and identify the producer and consumer without treating an old receipt as current health.
