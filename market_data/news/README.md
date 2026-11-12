@@ -370,4 +370,4 @@ Published views are immutable generations: `news/v1/views/g/<gen>/...` pages beh
 keeps a lifecycle ledger, reconciles before every run, cleans up orphans and expired generations
 before admitting a new one, and never deletes a replaced generation before its reader grace on two
 clocks (refused entirely until the store-clock bound is verified). See `PUBLISHING.md`
-("Generations") for the contract, the defaults and the operator commands (`publish-fence`).
+("Generations") for the contract, the defaults and the operator commands.

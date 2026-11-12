@@ -63,18 +63,20 @@ The accepted G2 v2 design with Chej's corrections and Owen's approved defaults (
   page of another generation. The Worker gives News keys a 15 s upstream deadline (504) and serves the
   index with `Cache-Control: no-store` whatever upstream says.
 - **Ledger.** `news/v1/publish/generations/<gen>.json` records the digests, the page set and events:
-  `candidate`, `index_put_attempted`, `published`, `restored`, `ceased`, `fenced`, `pages_deleted`.
+  `candidate`, `index_put_attempted`, `published`, `restored`, `ceased`, `pages_deleted`.
   Protection follows the latest `published`/`restored`/`ceased` epoch.
 - **Reconciliation first.** Every run matches the live index against the ledger in full (index hash,
   gen, `pages_sha256`, every page hash). The match is current; every other generation recorded as
-  current is ceased now. An unmatched or unreadable live index, or an unreadable ledger, **blocks** the
+  current is ceased, stamped from a fresh paired clock reading taken **after** the match succeeds
+  (never the reading from the start of the run), for publication, restore and recovery alike. An unmatched or unreadable live index, or an unreadable ledger, **blocks** the
   run: nothing written or deleted, `publish-status` reports `publication_blocked`.
 - **Uncertain index writes.** If the index write fails or does not read back, the candidate is
   uncertain. A later run that sees the old index does not treat it as an orphan (the write may still
   land); it pauses publication instead. It is settled by a run that finds the live index matching
-  it in full, or fenced by an operator (`publish-stop`, confirm no writer is running,
-  `publish-fence --gen G --reason ...`); it is then deleted only after `fence_delay_s` (15 min) on
-  both clocks while the live index is another generation.
+  it in full (the write landed, or that same generation was republished, e.g. `publish-stop` then
+  `publish-restore --gen G`). Nothing else releases it: there is no timer and no operator override,
+  because neither can establish that the attempted write can no longer land. Until then its pages
+  are retained and every other publication stays paused.
 - **Cleanup before admission.** Each run first deletes orphan pages (written, never offered) and
   expired pages, then admits the new generation only if no index write is unsettled and present
   pages + its missing pages ≤ `page_cap` (6,300). Otherwise publication pauses (visible); cleanup
@@ -208,7 +210,7 @@ rewritten in place. Leftover pages of a never-offered candidate are deleted by t
 | Stop | `publish-stop --reason "..."` | Cycles no-op (exit 0). Views stay as last published and age visibly. |
 | Resume | `publish-resume` | The next tick collects and publishes normally. |
 | Roll back views | `publish-stop`, then `publish-restore --gen <gen_id>` | Republishes a retained snapshot byte-for-byte through the same safe order, counting its missing pages against the cap. The displaced generation's retirement starts now. It stays in place until resume. |
-| Settle an uncertain index write | `publish-stop`, confirm no writer or publisher process is running, then `publish-fence --gen <gen> --reason "..."` | Records the fence; the candidate is deleted by a later run once 15 min have passed on both clocks and the live index is another generation. |
+| Settle an uncertain index write | Wait for a run to find it live, or `publish-stop` then `publish-restore --gen <gen>` (republishes that same generation) | The candidate is settled only when the live index matches it in full. There is no time-based release; until then its pages are retained and other publication stays paused. |
 | Take views down | `publish-stop`, then `publish-withdraw` | Deletes `index.json` first, so the panel shows "No news views published yet", then every generation's pages at once (no grace). Copies already cached by browsers or intermediaries, and downloads, cannot be recalled. Snapshots and the raw archive are kept. |
 | Code rollback | redeploy the previous revision | The raw archive is append-only and versioned. Views are rebuilt on the next cycle. |
 

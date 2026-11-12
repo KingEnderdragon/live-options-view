@@ -46,7 +46,6 @@
   "clock_epsilon_s": 120,
   "clock_skew_s": 120,
   "page_cap": 6300,
-  "fence_delay_s": 900,
   "clock_bound_verified": false
  }
 }

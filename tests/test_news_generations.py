@@ -7,7 +7,7 @@ LastModified would be the store clock), so elapsed-time rules can be checked exa
 Covered: qualification (logical vs final digests, same-generation links), the published key grammar,
 the lifecycle ledger and latest retirement epoch, cleanup before admission (orphans, expiry), the clock
 rules (both clocks, agreement, backward clock, unverified bound refuses expiry visibly), uncertain index
-writes (old index never proves an orphan; settlement by a full live match; operator fence + delay),
+writes (old index never proves an orphan; settlement only by a full live match, never by elapsed time),
 blocked runs (unmatched live index, unreadable ledger), unknown public generations, the page cap
 (publication and restore count missing pages; never evict), and immediate withdrawal.
 """
@@ -243,26 +243,22 @@ class Uncertain(Gen):
         self.assertIsNone(pub.read_state(self.private)["uncertain"])
         self.assertEqual(self.public_files(), qualified(C_files))
 
-    def test_fence_then_delay_then_deletion(self):
+    def test_elapsed_time_never_releases_an_uncertain_candidate(self):
         B_files = self.build("2026-11-09T10:20:00Z")
         B = generation_name(B_files)
         self.raw_public.fail = ("put", lambda k: k == INDEX, 0)
         with self.assertRaises(pub.PublishIntegrityError):
             self.publish(B_files)
-        with self.assertRaises(pub.PublishError):
-            pub.fence(self.private, self.public, B, self.clock, reason="no stop marker")
-        pub.stop(self.private, self.clock, "settle B")
-        self.at("2026-11-09T10:40:00Z")
-        out = pub.fence(self.private, self.public, B, self.clock, reason="publisher host confirmed down")
-        self.assertEqual(out["fenced"], B)
-        pub.resume(self.private)
+        self.assertFalse(hasattr(pub, "fence"), "no timer-only or operator release exists")
         with self.assertRaises(pub.PublishPaused):
-            self.publish(self.build("2026-11-09T10:50:00Z"))              # 10 min < the 15 min fence delay
-        self.assertTrue(self.pages(B))
-        C_files = self.build("2026-11-09T10:56:00Z")                     # 16 min on both clocks
-        self.publish(C_files)
-        self.assertEqual(self.pages(B), [])
-        self.assertEqual(self.public_files(), qualified(C_files))
+            self.publish(self.build("2026-11-09T12:20:00Z"), VERIFIED)   # two hours later on both clocks
+        self.assertTrue(self.pages(B), "still retained")
+        self.assertEqual(self.live(), self.A)
+        pub.stop(self.private, self.clock, "settle B")
+        pub.restore(self.private, self.public, B, self.clock, policy=VERIFIED)   # the same generation, live in full
+        self.assertEqual(self.live(), B)
+        self.assertEqual(self.kinds(B)[-1], "restored")
+        self.assertIsNone(pub.read_state(self.private)["uncertain"])
 
 
 class Blocked(Gen):

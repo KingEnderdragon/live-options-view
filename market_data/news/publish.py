@@ -31,7 +31,7 @@ stay in that generation, and an index naming gen and pages_sha256. Each run:
      (present + missing pages > cap). Nothing protected is evicted;
   5. writes the generation's pages create-if-absent (immutable; different bytes at an existing key stop
      the run), then the index, then reconciles again. An index write that fails or does not read back
-     leaves the candidate uncertain until a later run sees it live in full or an operator fences it.
+     leaves the candidate uncertain until a later run sees it live in full. Elapsed time never releases it.
 
 Withdrawal deletes the index and every generation's pages at once; cached copies cannot be recalled.
 Nothing here contacts a network or a bucket unless a caller passes such a store.
@@ -670,7 +670,6 @@ class GenerationPolicy:
     clock_epsilon_s: int = config.GEN_CLOCK_EPSILON_S
     clock_skew_s: int = config.GEN_CLOCK_SKEW_S
     page_cap: int = config.GEN_PAGE_CAP
-    fence_delay_s: int = config.GEN_FENCE_DELAY_S
     clock_bound_verified: bool = False
 
     @property
@@ -714,8 +713,12 @@ def _write_ledger(private, rec: dict) -> None:
 
 
 def _at(reading: dict) -> dict:
-    return {"producer_at": iso(reading["producer"]),
-            "storage_at": iso(reading["storage"]) if reading["storage"] is not None else None}
+    """The times an event is stamped with: the high-water marks of the reading (never earlier than any
+    earlier reading), so a clock that stepped back cannot date a retirement early. No store time for
+    this reading means no store stamp, and an event without one is never old enough to delete."""
+    stamp = reading.get("stamp") or reading
+    return {"producer_at": iso(stamp["producer"]),
+            "storage_at": iso(stamp["storage"]) if stamp["storage"] is not None else None}
 
 
 def _event(private, rec: dict, kind: str, reading: dict, **extra) -> None:
@@ -745,7 +748,9 @@ def _new_record(gen: str, files: dict[str, bytes], logical_sha256: str | None) -
 
 
 def _clock_reading(private, clock, state: dict) -> dict:
-    """One heartbeat per run: the producer's time and the store's own time for a write made now.
+    """A paired reading: the producer's time and the store's own time for a heartbeat written now.
+    Taken at the start of a run and again after each successful reconciliation that records lifecycle
+    events, so a retirement is stamped after the replacement is confirmed live, never at run start.
 
     A clock that reads earlier than its recorded high-water mark, or a store that reports no
     modification time, is recorded as refused: no expiry deletion this run (retention only grows)."""
@@ -775,7 +780,8 @@ def _clock_reading(private, clock, state: dict) -> dict:
         "last_reading": {"producer": iso(producer), "storage": iso(storage) if storage is not None else None},
         "refused": refused,
     }
-    return {"producer": producer, "storage": storage, "refused": refused}
+    return {"producer": producer, "storage": storage, "refused": refused,
+            "stamp": {"producer": high_p, "storage": high_s if storage is not None else None}}
 
 
 def _elapsed(event: dict, reading: dict) -> tuple[float | None, float | None]:
@@ -833,18 +839,11 @@ def classify(records: dict[str, dict], live_gen: str | None, listed: dict[str, l
         if "index_put_attempted" not in kinds:
             out[gen] = {"class": "orphan", "why": "written, never offered to readers (no index write attempted)"}
             continue
-        last_attempt = max(i for i, k in enumerate(kinds) if k == "index_put_attempted")
-        fences = [e for e in rec["events"][last_attempt + 1:] if e["kind"] == "fenced"]
-        if fences:
-            ok, why = _time_passed(fences[-1], reading, policy.fence_delay_s, policy)
-            if ok and live_gen is not None:
-                out[gen] = {"class": "orphan", "why": "fenced, fence delay passed, live index is another generation"}
-                continue
-            out[gen] = {"class": "uncertain", "why": f"fenced; waiting for the fence delay ({why})"}
-            continue
+        # No timer and no operator note releases this: nothing here can establish that the attempted
+        # index write can no longer land. It is settled only by the live index matching it in full.
         out[gen] = {"class": "uncertain",
-                    "why": "an index write was attempted and never settled: the old index alone does not prove "
-                           "it was not published; settle by a matching live index or `publish-fence`"}
+                    "why": "an index write was attempted and never settled: neither the old index nor elapsed "
+                           "time proves it cannot still land; retained until the live index matches it in full"}
     return out
 
 
@@ -872,35 +871,40 @@ def _live_match(public: "PublicViewStore", records: dict[str, dict]) -> tuple[st
     return matches[0], None, live
 
 
-def _reconcile(private, public, state: dict, records: dict[str, dict], reading: dict) -> dict:
+def _reconcile(private, public, state: dict, records: dict[str, dict], reading: dict, fresh=None) -> dict:
     """Settle the ledger against the live index before anything is started or deleted.
 
     The generation the live index matches (in full) is current: it gets a published/restored event if
     its epoch was not already current, and every other generation recorded as current gets a ceased
-    event stamped now (never earlier than the truth). Anything that cannot be matched blocks the run."""
+    event. Those events are stamped from a reading taken by fresh() AFTER the full index/page match has
+    succeeded, so a displaced generation's retirement never starts before its replacement was seen
+    live (publication, restore and recovery alike). Anything that cannot be matched blocks the run.
+    Returns the reading in force afterwards ("reading")."""
     gen, problem, live = _live_match(public, records)
     if problem:
-        return {"live": None, "blocked": problem}
+        return {"live": None, "blocked": problem, "reading": reading}
     if live is None:
         if state.get("committed") is not None:
-            return {"live": None, "blocked": "the live index is missing although state records a committed generation"}
-        return {"live": None, "blocked": None}
+            return {"live": None, "blocked": "the live index is missing although state records a committed generation",
+                    "reading": reading}
+        return {"live": None, "blocked": None, "reading": reading}
     rec = records[gen]
     epoch = _epoch(rec)
-    if epoch is None or epoch["kind"] == "ceased":
+    becomes_current = epoch is None or epoch["kind"] == "ceased"
+    displaced = [o for o in records.values()
+                 if o["gen"] != gen and (_epoch(o) or {}).get("kind") in ("published", "restored")]
+    if fresh is not None and (becomes_current or displaced or (state.get("committed") or {}).get("gen_id") != gen):
+        reading = fresh()          # after the match: never earlier than the moment the index was seen live
+    if becomes_current:
         action = (state.get("in_progress") or {}).get("action")
         _event(private, rec, "restored" if (epoch is not None or action == "restore") else "published", reading)
-    for other in records.values():
-        if other["gen"] == gen:
-            continue
-        e = _epoch(other)
-        if e is not None and e["kind"] in ("published", "restored"):
-            _event(private, other, "ceased", reading)
+    for other in displaced:
+        _event(private, other, "ceased", reading)
     committed = state.get("committed") or {}
     if committed.get("gen_id") != gen:
         index = json.loads(live)
         state["committed"] = {"gen_id": gen, "action": (state.get("in_progress") or {}).get("action", "reconciled"),
-                              "build_as_of": index["build_as_of"], "published_at": iso(reading["producer"]),
+                              "build_as_of": index["build_as_of"], "published_at": _at(reading)["producer_at"],
                               "index_sha256": rec["index_sha256"], "generation_sha256": rec["generation_sha256"],
                               "pages": len(rec["page_set"]), "views_total": index["views_total"],
                               "complete": index["complete"], "previous_gen_id": committed.get("gen_id")}
@@ -908,7 +912,7 @@ def _reconcile(private, public, state: dict, records: dict[str, dict], reading: 
         state["uncertain"] = None
     if (state.get("in_progress") or {}).get("gen_id") == gen:
         state["in_progress"] = None
-    return {"live": gen, "blocked": None}
+    return {"live": gen, "blocked": None, "reading": reading}
 
 
 def _cleanup(private, public: "PublicViewStore", records: dict[str, dict], live_gen: str | None, reading: dict,
@@ -947,7 +951,9 @@ def _run(private, public: "PublicViewStore", gen: str, files: dict[str, bytes], 
                 state["blocked"] = {"at": iso(reading["producer"]), "why": "generation ledger: " + "; ".join(ledger_problems[:5])}
                 _write_state(private, state)
                 raise PublishBlocked(f"history is uncertain ({state['blocked']['why']}); nothing written or deleted")
-            settled = _reconcile(private, public, state, records, reading)
+            fresh = lambda: _clock_reading(private, clock, state)   # noqa: E731
+            settled = _reconcile(private, public, state, records, reading, fresh)
+            reading = settled["reading"]
             if settled["blocked"]:
                 state["blocked"] = {"at": iso(reading["producer"]), "why": settled["blocked"]}
                 _write_state(private, state)
@@ -961,8 +967,9 @@ def _run(private, public: "PublicViewStore", gen: str, files: dict[str, bytes], 
                 state["paused"] = {"at": iso(reading["producer"]), "why": f"uncertain index write for {uncertain}"}
                 _write_state(private, state)
                 raise PublishPaused(f"publication paused: generation(s) {uncertain} are uncertain (an index write was "
-                                    "never settled); a conflicting index write could reorder with it. Settle by "
-                                    "reconciliation or `publish-fence` after confirming no writer is running")
+                                    "never settled); a conflicting index write could reorder with it. It is "
+                                    "settled only when the live index matches it in full (the write landed, or "
+                                    "that same generation is republished); elapsed time does not release it")
             listed = public.pages_by_gen()
             report.public_pages = sum(len(v) for v in listed.values())
             if settled["live"] == gen:
@@ -1030,7 +1037,10 @@ def _run(private, public: "PublicViewStore", gen: str, files: dict[str, bytes], 
             report.written.append(PUBLIC_INDEX)
             stage = "settle"
             records, _ = read_ledger(private)
-            settled = _reconcile(private, public, state, records, reading)
+            # The reading from the start of the run predates the upload: the displaced generation is
+            # retired from a fresh reading taken inside _reconcile, after the full match succeeds.
+            settled = _reconcile(private, public, state, records, reading, fresh)
+            reading = settled["reading"]
             if settled["live"] != gen:
                 state["uncertain"] = {"gen": gen, "since": iso(reading["producer"]),
                                       "why": settled["blocked"] or "the live index does not match the candidate"}
@@ -1080,32 +1090,6 @@ def restore(private, public, gen_id: str, clock, *, policy: GenerationPolicy = D
     validate_qualified(gen_id, files)
     return _run(private, public, gen_id, files, clock, action="restore", policy=policy, keep_snapshots=0,
                 snapshot=False, logical_sha256=None, lease_holder=lease_holder, break_stale_lease=break_stale_lease)
-
-
-def fence(private, public, gen: str, clock, *, reason: str, policy: GenerationPolicy = DEFAULT_POLICY,
-          lease_holder=None, break_stale_lease=False) -> dict:
-    """Operator settlement of an uncertain candidate, after confirming no writer or publisher process that
-    could still deliver its index write is running. Requires the stop marker. The candidate becomes
-    deletable only after fence_delay_s on both clocks and only while the live index is another generation."""
-    public = public if isinstance(public, PublicViewStore) else PublicViewStore(public)
-    if stopped(private) is None:
-        raise PublishError("fence requires `stop` first")
-    with WriterLease(private, clock, lease_holder, break_stale=break_stale_lease, key=PUBLISH_LEASE_KEY):
-        state = read_state(private)
-        records, problems = read_ledger(private)
-        if problems:
-            raise PublishBlocked("generation ledger: " + "; ".join(problems[:5]))
-        rec = records.get(gen)
-        if rec is None or "index_put_attempted" not in _kinds(rec) or _epoch(rec) is not None:
-            raise PublishError(f"{gen} is not an unsettled candidate (no attempted, unpublished index write)")
-        reading = _clock_reading(private, clock, state)
-        _event(private, rec, "fenced", reading, reason=reason[:300])
-        if (state.get("uncertain") or {}).get("gen") == gen:
-            state["uncertain"] = dict(state["uncertain"], fenced_at=iso(reading["producer"]))
-        _write_state(private, state)
-        return {"fenced": gen, "at": _at(reading), "deletable_after_s": policy.fence_delay_s,
-                "note": "the candidate is deleted by a later run only once both clocks show the fence delay and "
-                        "the live index is another generation"}
 
 
 def withdraw(private, public, clock, *, lease_holder=None, break_stale_lease=False) -> dict:
@@ -1281,7 +1265,7 @@ def load_pilot_config(path) -> PilotConfig:
     if not isinstance(gens.get("reader_grace_s"), int) or gens["reader_grace_s"] < reader_floor:
         problems.append(f"generations.reader_grace_s must be an integer >= {reader_floor} "
                         "(index age + index lease + page request deadline)")
-    for name in ("clock_epsilon_s", "clock_skew_s", "fence_delay_s"):
+    for name in ("clock_epsilon_s", "clock_skew_s"):
         if not isinstance(gens.get(name), int) or gens[name] <= 0:
             problems.append(f"generations.{name} must be a positive integer")
     per_generation = 7 * len(STREAM_KEYS) * len(MODES) * LIMITS.pages_per_view
@@ -1297,7 +1281,7 @@ def load_pilot_config(path) -> PilotConfig:
 def policy_from(cfg: PilotConfig) -> GenerationPolicy:
     g = cfg["generations"]
     return GenerationPolicy(reader_grace_s=g["reader_grace_s"], clock_epsilon_s=g["clock_epsilon_s"],
-                            clock_skew_s=g["clock_skew_s"], page_cap=g["page_cap"], fence_delay_s=g["fence_delay_s"],
+                            clock_skew_s=g["clock_skew_s"], page_cap=g["page_cap"],
                             clock_bound_verified=g["clock_bound_verified"] is True)
 
 
@@ -1339,6 +1323,6 @@ def pilot_cycle(private, public, spool, fetch, clock, cfg: PilotConfig, *, commi
 
 __all__ = ["DEFAULT_POLICY", "GenerationPolicy", "MODES", "STREAM_KEYS", "PublicViewStore", "PublishBlocked",
            "PublishError", "PublishIntegrityError", "PublishPaused", "PublishStopped", "assert_separate", "classify",
-           "fence", "generation_of", "is_builder_view_key", "is_public_view_key", "load_pilot_config", "pilot_cycle",
+           "generation_of", "is_builder_view_key", "is_public_view_key", "load_pilot_config", "pilot_cycle",
            "policy_from", "publish", "read_ledger", "read_state", "restore", "resume", "status", "stop",
            "unavailable_prices", "validate_generation", "validate_qualified", "withdraw"]

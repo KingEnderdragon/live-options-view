@@ -52,7 +52,6 @@ GEN_PAGE_CAP = 6300               # public generation page objects (5 x 1,260 at
 GEN_INDEX_LEASE_S = 30 * 60       # how long the panel follows links from one index (from request start)
 GEN_READER_DEADLINE_S = 20        # panel per-request deadline (index and pages)
 GEN_PROXY_DEADLINE_S = 15         # Worker upstream deadline for News keys (below the panel's)
-GEN_FENCE_DELAY_S = 15 * 60       # after an operator fence, how long before an unsettled candidate may go
 
 
 @dataclass(frozen=True)
