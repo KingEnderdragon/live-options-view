@@ -52,6 +52,40 @@ into a fresh infrastructure audit.
   resumed state cannot reconstruct. Site rollback changes assets only; combined
   restoration, recovery and schema changes are separate deliberate operations.
 
+## Trading-hours work versus interference with running processes
+
+**Trading hours are not a blanket freeze.** Keep routine work moving while
+capture and automation run. Classify the effect of the actual action, not just
+its filename: local editing, merging, publishing assets and restarting a service
+are different operations. Capture can also run before/after regular market hours
+or on weekends; check the affected process's lifecycle, not only the clock.
+
+| Action | During an active session | Boundary to preserve |
+|---|---|---|
+| Local edits, review, offline analysis and fixture tests | Proceed within the assigned scope, including preparation of backend/producer changes | No production writers, credentials, duplicate streams or resource-heavy work on a live capture host |
+| Docs/tests-only merge outside producer watch scopes | Proceed after normal review/checks | Verify the complete diff does not match an active producer's deploy scope; a docs label is not evidence |
+| Layout, styling, images and browser-only display changes | May ship through the staged asset lane during trading hours | Keep API requests, polling load and data contracts compatible; leave API, storage, schedules and producer identities unchanged |
+| Asset-only rollback to a compatible separated artifact | May use the normal asset rollback procedure | Preserve API/schema compatibility; never restore the combined Worker as an ordinary site rollback |
+| Gateway routing, API-call behavior, polling rate or shared contracts | Assess the affected behavior before shipping; use the appropriate separate lane | Asset packaging alone does not make changed request traffic or API behavior harmless |
+| Backend/API deployment | Does not itself restart Railway collectors, but can interfere with accounts, execution, quotes and settlement | Identify live clients and compatibility effects; use a bounded release/rollback plan when the change can interrupt them |
+| Producer code, shared Python dependencies or prose inside a producer watch scope | Prepare locally; merging/promotion may restart a running service | Defer disruptive promotion to that process's inactive window unless a bounded active-session intervention is already authorized |
+| Restart/redeploy, env/secrets/binding changes, cron changes, fencing, migrations, recovery or artifact rewrites | Treat as potentially disruptive operational work, even without a source change | Establish the exact process, write, schedule and data effects before execution; use applicable operational authority and rollback |
+
+A change **genuinely interferes** when it can stop/restart a live process, create
+a collection gap or duplicate stream, pause/reject ongoing writes, alter a running
+strategy or capture universe, change a schedule/trigger, invalidate clients or
+sessions, overwrite evidence, or exhaust shared capacity/provider quotas. This
+includes a merge that triggers Railway automatically. Asset release isolation
+protects producers from republishing; it does not excuse incompatible frontend
+requests or changes to a bot's behavior.
+
+For a potentially disruptive action, name the affected service and expected
+interruption, choose an inactive window or the already-authorized bounded
+intervention, and retain the relevant rollback and continuity evidence. If the
+required intervention is outside existing authority, request that specific
+decision. Continue independent implementation and site work while it waits;
+do not make an unrelated producer release a gate for ordinary site changes.
+
 ## Avoid Cloudflare Workers KV operations
 
 **Use zero Workers KV operations whenever avoidable.** This applies to production
