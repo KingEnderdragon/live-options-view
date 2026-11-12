@@ -174,6 +174,13 @@ class Navigation(Small):
                 chains = navigate(self.raw_public)          # every reachable page exists and renders
                 self.assertEqual(self.raw_public.get(INDEX), qualified(old)[INDEX], "old index still live")
                 mixed_views += sum(1 for c in chains.values() if len({b for _, b in c}) > 1)
+                if crash_at == len(page_puts):
+                    # The index write is unresolved: no index write follows, not even a retry of this build.
+                    with self.assertRaises(pub.PublishPaused):
+                        pub.publish(self.private, self.public, new, self.clock)
+                    self.assertEqual(self.raw_public.get(INDEX), qualified(old)[INDEX])
+                    navigate(self.raw_public)
+                    continue
                 pub.publish(self.private, self.public, new, self.clock)      # the next cycle
                 final = navigate(self.raw_public)
                 build = json.loads(new[INDEX])["build_as_of"]

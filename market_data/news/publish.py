@@ -31,7 +31,8 @@ stay in that generation, and an index naming gen and pages_sha256. Each run:
      (present + missing pages > cap). Nothing protected is evicted;
   5. writes the generation's pages create-if-absent (immutable; different bytes at an existing key stop
      the run), then the index, then reconciles again. An index write that fails or does not read back
-     leaves the candidate uncertain until a later run sees it live in full. Elapsed time never releases it.
+     leaves the candidate uncertain until a later run sees it live in full. Neither elapsed time nor a
+     retry of the same generation releases it, and an older lifecycle record cannot settle it.
 
 Withdrawal deletes the index and every generation's pages at once; cached copies cannot be recalled.
 Nothing here contacts a network or a bucket unless a caller passes such a store.
@@ -739,6 +740,17 @@ def _epoch(rec: dict) -> dict | None:
     return None
 
 
+def _unsettled_attempt(rec: dict) -> bool:
+    """True while the latest index write attempted for this generation has no later published/restored
+    event. An older lifecycle event (a cease before a failed restore, say) cannot settle a newer attempt."""
+    for e in reversed(rec["events"]):
+        if e["kind"] in ("published", "restored"):
+            return False
+        if e["kind"] == "index_put_attempted":
+            return True
+    return False
+
+
 def _new_record(gen: str, files: dict[str, bytes], logical_sha256: str | None) -> dict:
     return {"schema_version": LEDGER_SCHEMA, "gen": gen, "logical_sha256": logical_sha256,
             "pages_sha256": pages_digest(files), "index_sha256": sha256_hex(files[PUBLIC_INDEX]),
@@ -821,6 +833,15 @@ def classify(records: dict[str, dict], live_gen: str | None, listed: dict[str, l
         if gen == live_gen:
             out[gen] = {"class": "current", "why": "named by the live index"}
             continue
+        if _unsettled_attempt(rec):
+            # Checked before anything else about this generation: an older ceased epoch, a missing page
+            # set, elapsed time or an operator note cannot settle a newer attempt. Nothing here can
+            # establish that the attempted index write can no longer land.
+            out[gen] = {"class": "uncertain",
+                        "why": "an index write was attempted and never settled: neither the old index, an older "
+                               "lifecycle record nor elapsed time proves it cannot still land; retained, and "
+                               "every index write is blocked, until the live index matches it in full"}
+            continue
         if gen not in listed:
             out[gen] = {"class": "gone", "why": "no public pages"}
             continue
@@ -835,15 +856,8 @@ def classify(records: dict[str, dict], live_gen: str | None, listed: dict[str, l
             # Recorded current but not the live index: reconciliation ceases these before classify runs.
             out[gen] = {"class": "uncertain", "why": f"ledger says {epoch['kind']} but the live index differs"}
             continue
-        kinds = _kinds(rec)
-        if "index_put_attempted" not in kinds:
-            out[gen] = {"class": "orphan", "why": "written, never offered to readers (no index write attempted)"}
-            continue
-        # No timer and no operator note releases this: nothing here can establish that the attempted
-        # index write can no longer land. It is settled only by the live index matching it in full.
-        out[gen] = {"class": "uncertain",
-                    "why": "an index write was attempted and never settled: neither the old index nor elapsed "
-                           "time proves it cannot still land; retained until the live index matches it in full"}
+        # No lifecycle epoch and no index write ever attempted (an attempt is handled above).
+        out[gen] = {"class": "orphan", "why": "written, never offered to readers (no index write attempted)"}
     return out
 
 
@@ -962,14 +976,16 @@ def _run(private, public: "PublicViewStore", gen: str, files: dict[str, bytes], 
             _write_state(private, state)
             stage = "cleanup"
             classes = _cleanup(private, public, records, settled["live"], reading, policy, report, keep={gen})
-            uncertain = sorted(g for g, c in classes.items() if c["class"] == "uncertain" and g != gen)
+            # No exception for the candidate's own generation: retrying it would be a second index write
+            # while the first is unresolved, and would not establish that the first has finished.
+            uncertain = sorted(g for g, c in classes.items() if c["class"] == "uncertain")
             if uncertain:
                 state["paused"] = {"at": iso(reading["producer"]), "why": f"uncertain index write for {uncertain}"}
                 _write_state(private, state)
                 raise PublishPaused(f"publication paused: generation(s) {uncertain} are uncertain (an index write was "
-                                    "never settled); a conflicting index write could reorder with it. It is "
-                                    "settled only when the live index matches it in full (the write landed, or "
-                                    "that same generation is republished); elapsed time does not release it")
+                                    "never settled); another index write, including a retry of the same "
+                                    "generation, could reorder with it. It is settled only when a run finds the "
+                                    "live index matching it in full; elapsed time and retries do not release it")
             listed = public.pages_by_gen()
             report.public_pages = sum(len(v) for v in listed.values())
             if settled["live"] == gen:

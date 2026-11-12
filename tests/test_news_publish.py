@@ -288,10 +288,11 @@ class Interruption(Base):
         state = pub.read_state(self.private)
         self.assertEqual(state["last_failure"]["stage"], "index")
         self.assertEqual(state["uncertain"]["gen"], generation_name(self.gen2))
-        # Retrying the same build is not a conflicting write: it settles the candidate.
-        pub.publish(self.private, self.public, self.gen2, self.clock)
-        self.assertEqual(self.public_files(), qualified(self.gen2))
-        self.assertIsNone(pub.read_state(self.private)["uncertain"])
+        # Retrying the same build is a second index write while the first is unresolved: refused too.
+        with self.assertRaises(pub.PublishPaused):
+            pub.publish(self.private, self.public, self.gen2, self.clock)
+        self.assertEqual(self.raw_public.get(INDEX), self.gen1_index)
+        self.assertEqual(pub.read_state(self.private)["uncertain"]["gen"], generation_name(self.gen2))
 
     def test_a_page_that_reads_back_wrong_stops_before_the_index(self):
         target = sorted(k for k in qualified(self.gen2) if k != INDEX)[0]

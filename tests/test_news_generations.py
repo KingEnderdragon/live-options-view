@@ -7,7 +7,8 @@ LastModified would be the store clock), so elapsed-time rules can be checked exa
 Covered: qualification (logical vs final digests, same-generation links), the published key grammar,
 the lifecycle ledger and latest retirement epoch, cleanup before admission (orphans, expiry), the clock
 rules (both clocks, agreement, backward clock, unverified bound refuses expiry visibly), uncertain index
-writes (old index never proves an orphan; settlement only by a full live match, never by elapsed time),
+writes (old index never proves an orphan; settlement only by a full live match, never by elapsed time, a retry of the same generation
+or an older lifecycle record),
 blocked runs (unmatched live index, unreadable ledger), unknown public generations, the page cap
 (publication and restore count missing pages; never evict), and immediate withdrawal.
 """
@@ -243,22 +244,43 @@ class Uncertain(Gen):
         self.assertIsNone(pub.read_state(self.private)["uncertain"])
         self.assertEqual(self.public_files(), qualified(C_files))
 
-    def test_elapsed_time_never_releases_an_uncertain_candidate(self):
+    def test_neither_elapsed_time_nor_a_retry_releases_an_uncertain_candidate(self):
         B_files = self.build("2026-11-09T10:20:00Z")
         B = generation_name(B_files)
         self.raw_public.fail = ("put", lambda k: k == INDEX, 0)
         with self.assertRaises(pub.PublishIntegrityError):
             self.publish(B_files)
         self.assertFalse(hasattr(pub, "fence"), "no timer-only or operator release exists")
+        self.log.clear()
         with self.assertRaises(pub.PublishPaused):
             self.publish(self.build("2026-11-09T12:20:00Z"), VERIFIED)   # two hours later on both clocks
+        with self.assertRaises(pub.PublishPaused):
+            self.publish(B_files, VERIFIED)                              # a retry of the same generation
+        pub.stop(self.private, self.clock, "try a restore")
+        with self.assertRaises(pub.PublishPaused):
+            pub.restore(self.private, self.public, B, self.clock, policy=VERIFIED)
+        self.assertEqual([op for op, k in self.log if k == INDEX], [], "no second index write")
         self.assertTrue(self.pages(B), "still retained")
         self.assertEqual(self.live(), self.A)
-        pub.stop(self.private, self.clock, "settle B")
-        pub.restore(self.private, self.public, B, self.clock, policy=VERIFIED)   # the same generation, live in full
+        self.assertEqual(pub.read_state(self.private)["uncertain"]["gen"], B)
+
+    def test_a_failed_restore_of_a_published_generation_is_uncertain_not_expired(self):
+        self.publish(self.build("2026-11-09T10:20:00Z"), VERIFIED)        # A ceased 10:20
+        B = self.live()
+        pub.stop(self.private, self.clock, "rollback")
+        self.at("2026-11-09T10:30:00Z")
+        self.raw_public.fail = ("put", lambda k: k == INDEX, 0)
+        with self.assertRaises(pub.PublishIntegrityError):
+            pub.restore(self.private, self.public, self.A, self.clock, policy=VERIFIED)
+        self.assertEqual(self.kinds(self.A)[-1], "index_put_attempted")
+        pub.resume(self.private)
+        with self.assertRaises(pub.PublishPaused):                        # 80 min after the older cease
+            self.publish(self.build("2026-11-09T11:40:00Z"), VERIFIED)
+        self.assertTrue(self.pages(self.A), "the older ceased epoch does not expire it")
         self.assertEqual(self.live(), B)
-        self.assertEqual(self.kinds(B)[-1], "restored")
-        self.assertIsNone(pub.read_state(self.private)["uncertain"])
+        st = pub.status(self.private, self.public, self.clock, policy=VERIFIED)
+        self.assertEqual(st["generations"][self.A]["class"], "uncertain")
+        self.assertIn("publication_paused", st["problems"])
 
 
 class Blocked(Gen):

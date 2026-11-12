@@ -73,10 +73,12 @@ The accepted G2 v2 design with Chej's corrections and Owen's approved defaults (
 - **Uncertain index writes.** If the index write fails or does not read back, the candidate is
   uncertain. A later run that sees the old index does not treat it as an orphan (the write may still
   land); it pauses publication instead. It is settled by a run that finds the live index matching
-  it in full (the write landed, or that same generation was republished, e.g. `publish-stop` then
-  `publish-restore --gen G`). Nothing else releases it: there is no timer and no operator override,
-  because neither can establish that the attempted write can no longer land. Until then its pages
-  are retained and every other publication stays paused.
+  it in full (the attempted write landed). Nothing else releases it: there is no timer, no
+  operator override and no retry, because none of them can establish that the attempted write can
+  no longer land. Until then its pages are retained and **every** index write stays paused,
+  including a republication or restore of that same generation. An unresolved attempt also takes
+  precedence over an older lifecycle record: a failed restore of a previously published generation
+  is uncertain, not protected or expired.
 - **Cleanup before admission.** Each run first deletes orphan pages (written, never offered) and
   expired pages, then admits the new generation only if no index write is unsettled and present
   pages + its missing pages ≤ `page_cap` (6,300). Otherwise publication pauses (visible); cleanup
@@ -210,7 +212,7 @@ rewritten in place. Leftover pages of a never-offered candidate are deleted by t
 | Stop | `publish-stop --reason "..."` | Cycles no-op (exit 0). Views stay as last published and age visibly. |
 | Resume | `publish-resume` | The next tick collects and publishes normally. |
 | Roll back views | `publish-stop`, then `publish-restore --gen <gen_id>` | Republishes a retained snapshot byte-for-byte through the same safe order, counting its missing pages against the cap. The displaced generation's retirement starts now. It stays in place until resume. |
-| Settle an uncertain index write | Wait for a run to find it live, or `publish-stop` then `publish-restore --gen <gen>` (republishes that same generation) | The candidate is settled only when the live index matches it in full. There is no time-based release; until then its pages are retained and other publication stays paused. |
+| Uncertain index write | None. `publish-status` shows `uncertain_index_write` and `publication_paused` | The candidate is settled only when a run finds the live index matching it in full. There is no time-based release, no override and no retry (not even of the same generation); until then its pages are retained and all publication and restore stays paused. |
 | Take views down | `publish-stop`, then `publish-withdraw` | Deletes `index.json` first, so the panel shows "No news views published yet", then every generation's pages at once (no grace). Copies already cached by browsers or intermediaries, and downloads, cannot be recalled. Snapshots and the raw archive are kept. |
 | Code rollback | redeploy the previous revision | The raw archive is append-only and versioned. Views are rebuilt on the next cycle. |
 
