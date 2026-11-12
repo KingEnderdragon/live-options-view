@@ -10,15 +10,20 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { buildAssets } from '../scripts/build-assets.mjs';
 import { prepareRelease, verifyStage } from '../scripts/prepare-asset-release.mjs';
-import { authorizeStage, authorizeApi, authorizeRollback, deployStaged, deployApi, deployRollback, recordApiServiceVerified, acquireReleaseLock, releaseLockPath, recheckBeforeExecute } from '../scripts/deploy-staged-payload.mjs';
+import { authorizeStage, authorizeApi, authorizeRollback, deployStaged, deployApi, deployRollback, recordApiServiceVerified, apiServiceReady, verifyCurrentSourceFreshness, acquireReleaseLock, releaseLockPath, recheckBeforeExecute } from '../scripts/deploy-staged-payload.mjs';
 
 // F3: fileURLToPath, not URL.pathname — the pathname form breaks on
 // Windows ("/C:/..." is not a usable path there).
 const ROOT = resolve(fileURLToPath(new URL('../', import.meta.url)));
 const HEAD = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: ROOT, encoding: 'utf8' }).trim();
 const OLD = 'bff49eedddbc816df5633bb5f492867caa8036ce';
+// Recorded combined build (merge PR #223) and its wrangler.toml hash —
+// the restoration revision for the local rollback procedure (repair 2).
+const ROLLBACK_REV = '6c1051a7b4fcbc115551562b2eb531c13a440e2e';
+const ROLLBACK_CONFIG_SHA = '213c2e56a9f75cd0cdbce4e967022d12581cd711701f091cc6289214648eea72';
 const PROPOSED = readFileSync(join(ROOT, 'patches/musef-225/wrangler.assets.toml.proposed'), 'utf8');
 const WEB = 'web-100:success';
 const API = 'api-200:success';
@@ -79,6 +84,15 @@ function cleanClone() {
   const wt = mkdtempSync(join(tmpdir(), 'deploy-b1-clone-'));
   rmSync(wt, { recursive: true, force: true });
   execFileSync('git', ['clone', '-q', ROOT, wt]);
+  return wt;
+}
+// A checkout at an arbitrary revision (the recorded combined build).
+// Used by the rollback-restoration test: the gate script comes from the
+// candidate checkout, while DEPLOY_REPO_ROOT points at this restoration
+// checkout — the two checkouts are different revisions by design.
+function cloneAt(revision) {
+  const wt = cleanClone();
+  execFileSync('git', ['checkout', '-q', '--detach', revision], { cwd: wt });
   return wt;
 }
 
@@ -451,6 +465,118 @@ test('Order: operator-recorded API-service verification satisfies readiness', ()
   }
 });
 
+// Repair 2, blocker 1 — Readiness is evidence, not a filename. A junk
+// file named *.api.deploy-receipt.json must not satisfy the ordering
+// guard (Brian's witness), nor must a well-formed receipt for the wrong
+// target, the wrong command, or the wrong service, or an operator
+// verification with no verifier.
+test('Readiness: malformed/wrong-target/wrong-service evidence does not satisfy readiness', () => {
+  const fresh = mkdtempSync(join(tmpdir(), 'deploy-readiness-neg-'));
+  const prevReleases = process.env.DEPLOY_RELEASES_DIR;
+  process.env.DEPLOY_RELEASES_DIR = fresh;
+  try {
+    // Brian's witness, verbatim shape: junk JSON in a receipt-named file.
+    writeFileSync(join(fresh, 'junk.api.deploy-receipt.json'), 'not JSON, no provider or deployment');
+    assert.equal(apiServiceReady(HEAD), false);
+    // Well-formed JSON, wrong target (an asset receipt wearing an api name).
+    writeFileSync(join(fresh, 'asset.api.deploy-receipt.json'), JSON.stringify({
+      revision: HEAD, target: 'asset', command: 'wrangler deploy --config wrangler.assets.toml',
+      executed_at: new Date().toISOString(),
+    }));
+    assert.equal(apiServiceReady(HEAD), false);
+    // Well-formed JSON, right target, wrong command (not the API deploy).
+    writeFileSync(join(fresh, 'wrongcmd.api.deploy-receipt.json'), JSON.stringify({
+      revision: HEAD, target: 'api', command: 'wrangler deploy --config wrangler.toml',
+      executed_at: new Date().toISOString(),
+    }));
+    assert.equal(apiServiceReady(HEAD), false);
+    // Operator verification for the wrong service.
+    writeFileSync(join(fresh, 'wrong.api-service-verified.json'), JSON.stringify({
+      revision: HEAD, service: 'live-options-view', verified_at: new Date().toISOString(),
+      verifier: 'test', verification_kind: 'operator-readback',
+    }));
+    assert.equal(apiServiceReady(HEAD), false);
+    // Operator verification with no verifier.
+    writeFileSync(join(fresh, 'noverifier.api-service-verified.json'), JSON.stringify({
+      revision: HEAD, service: 'live-options-api', verified_at: new Date().toISOString(),
+      verifier: '', verification_kind: 'operator-readback',
+    }));
+    assert.equal(apiServiceReady(HEAD), false);
+    // A genuinely valid operator verification satisfies readiness.
+    recordApiServiceVerified({ revision: HEAD, verifier: 'test' });
+    assert.equal(apiServiceReady(HEAD), true);
+  } finally {
+    process.env.DEPLOY_RELEASES_DIR = prevReleases;
+    rmSync(fresh, { recursive: true, force: true });
+  }
+});
+
+// Repair 2, blocker 1 — Cross-revision reuse is preserved: valid API
+// evidence for ANY revision proves the named service exists, so a new
+// asset candidate is not refused while the API service from an earlier
+// candidate still exists.
+test('Readiness: valid API evidence for another revision satisfies readiness for this revision', () => {
+  const fresh = mkdtempSync(join(tmpdir(), 'deploy-readiness-xrev-'));
+  const prevReleases = process.env.DEPLOY_RELEASES_DIR;
+  process.env.DEPLOY_RELEASES_DIR = fresh;
+  const s = makeStage(HEAD);
+  try {
+    // A completed API deploy receipt for an EARLIER revision (written by
+    // that candidate's gate run) proves the named service exists.
+    writeFileSync(join(fresh, `${OLD}.api.deploy-receipt.json`), JSON.stringify({
+      revision: OLD, target: 'api', service: 'live-options-api',
+      command: 'wrangler deploy --config wrangler.api.toml',
+      executed_at: new Date().toISOString(),
+      web_check_run_id: 'web-100', api_check_run_id: 'api-200',
+    }) + '\n');
+    assert.equal(apiServiceReady(HEAD), true);
+    authorizeStage({ stage: s.stage, revision: HEAD, webCheck: WEB, apiCheck: API, authorizer: 'test' });
+    const dry = deployStaged({ stage: s.stage, revision: HEAD });
+    assert.equal(dry.dryRun, true);
+  } finally {
+    cleanup(s);
+    process.env.DEPLOY_RELEASES_DIR = prevReleases;
+    rmSync(fresh, { recursive: true, force: true });
+  }
+});
+
+// Repair 2, blocker 2 — Freshness is enforced in the promotion path.
+// Brian's witness: stage and authorize from a valid applied configRoot,
+// then replace that configRoot's wrangler.assets.toml with invalid text;
+// deployStaged(execute:true) with a stub executor must NOT call the
+// executor and must refuse.
+test('Freshness: invalid current source config after authorize stops deploy before execution', () => {
+  const s = makeStage(HEAD);
+  try {
+    authorizeStage({ stage: s.stage, revision: HEAD, webCheck: WEB, apiCheck: API, authorizer: 'test' });
+    writeFileSync(join(s.base, 'config', 'wrangler.assets.toml'), 'invalid current config');
+    const exec = stubExecutor();
+    assert.throws(() => deployStaged({ stage: s.stage, revision: HEAD, execute: true, executor: exec.fn }),
+      /Unsupported asset config/);
+    assert.equal(exec.calls.length, 0, 'executor must never run for an invalid current source');
+  } finally { cleanup(s); }
+});
+
+test('Freshness: drifted (valid but changed) current source config after authorize stops deploy', () => {
+  const s = makeStage(HEAD);
+  try {
+    authorizeStage({ stage: s.stage, revision: HEAD, webCheck: WEB, apiCheck: API, authorizer: 'test' });
+    writeFileSync(join(s.base, 'config', 'wrangler.assets.toml'), PROPOSED.replace('2026-06-23', '2026-06-24'));
+    const exec = stubExecutor();
+    assert.throws(() => deployStaged({ stage: s.stage, revision: HEAD, execute: true, executor: exec.fn }), /drifted/);
+    assert.equal(exec.calls.length, 0, 'executor must never run for a drifted current source');
+  } finally { cleanup(s); }
+});
+
+test('Freshness: authorize refuses when the current source config is already invalid', () => {
+  const s = makeStage(HEAD);
+  try {
+    writeFileSync(join(s.base, 'config', 'wrangler.assets.toml'), 'invalid current config');
+    assert.throws(() => authorizeStage({ stage: s.stage, revision: HEAD, webCheck: WEB, apiCheck: API, authorizer: 'test' }),
+      /Unsupported asset config/);
+  } finally { cleanup(s); }
+});
+
 // C2 repair — Receipts are per-target: the asset receipt must not
 // overwrite the API receipt that proves the API service was deployed.
 test('Order: per-target receipts do not overwrite each other', () => {
@@ -531,16 +657,57 @@ test('Rollback: deploy refuses if wrangler.toml drifted after authorization', ()
   }
 });
 
-// C2 repair — The rollback workflow is dispatch-only, gate-only, and
-// shares the release concurrency group.
-test('Rollback: workflow is dispatch-only, gate-only, shares the concurrency group', () => {
-  const rb = readFileSync(join(ROOT, '.github/workflows/deploy-rollback.yml'), 'utf8');
-  assert.ok(!/^\s*push:/m.test(rb), 'deploy-rollback.yml must not auto-deploy on push');
-  assert.ok(!rb.includes('wrangler-action'), 'deploy-rollback.yml must not deploy outside the gate');
-  assert.match(rb, /group: deploy-live-options-view/, 'deploy-rollback.yml must share the release concurrency group');
-  assert.ok(rb.includes('scripts/deploy-staged-payload.mjs'), 'deploy-rollback.yml must call the gate');
-  assert.ok(rb.includes('--target rollback'), 'deploy-rollback.yml must use the rollback target');
-  assert.ok(rb.includes('rollback-reason'), 'deploy-rollback.yml must require a rollback reason');
+// Repair 2, blocker 3 — The rollback workflow is gone: deploy-rollback.yml
+// could not transport its authorization artifact and its checkout
+// followed the dispatch ref, not the restoration revision, so it was not
+// an executable restoration path. It is removed from the claimed path;
+// the rollback path is the bounded local candidate-script plus
+// DEPLOY_REPO_ROOT restoration procedure (proved by the next test).
+test('Rollback: no rollback workflow is claimed as an executable path', () => {
+  assert.ok(!existsSync(join(ROOT, '.github/workflows/deploy-rollback.yml')),
+    'deploy-rollback.yml must not exist: it could not transport its authorization artifact or check out the restoration revision');
+});
+
+// Repair 2, blocker 3 — The bounded local restoration procedure, proved:
+// the gate script comes from the candidate checkout, while
+// DEPLOY_REPO_ROOT points at a checkout of the recorded combined build
+// (6c1051a). Authorize + dry-run + stub execute through the gate restore
+// that revision's wrangler.toml (hash pinned to the recorded build).
+test('Rollback: local candidate-script + DEPLOY_REPO_ROOT restores the recorded combined build', () => {
+  const wt = cloneAt(ROLLBACK_REV);
+  const rel = mkdtempSync(join(tmpdir(), 'deploy-rollback-restore-'));
+  const prevReleases = process.env.DEPLOY_RELEASES_DIR;
+  const prevRoot = process.env.DEPLOY_REPO_ROOT;
+  process.env.DEPLOY_RELEASES_DIR = rel;
+  process.env.DEPLOY_REPO_ROOT = wt;
+  try {
+    // The restoration checkout is the recorded combined build, not the candidate.
+    assert.equal(execFileSync('git', ['rev-parse', 'HEAD'], { cwd: wt, encoding: 'utf8' }).trim(), ROLLBACK_REV);
+    const cfgSha = createHash('sha256').update(readFileSync(join(wt, 'wrangler.toml'))).digest('hex');
+    assert.equal(cfgSha, ROLLBACK_CONFIG_SHA, 'the restoration checkout must be the recorded combined build');
+    const record = authorizeRollback({ revision: ROLLBACK_REV, authorizer: 'test', rollbackReason: 'local restoration proof' });
+    assert.equal(record.target, 'rollback');
+    assert.equal(record.config_sha256, ROLLBACK_CONFIG_SHA);
+    assert.equal(record.config_source, 'wrangler.toml');
+    const dry = deployRollback({ revision: ROLLBACK_REV });
+    assert.equal(dry.dryRun, true);
+    assert.equal(dry.command, 'wrangler deploy --config wrangler.toml');
+    const exec = stubExecutor();
+    const result = deployRollback({ revision: ROLLBACK_REV, execute: true, executor: exec.fn });
+    assert.equal(result.deployed, true);
+    assert.equal(exec.calls.length, 1);
+    assert.equal(exec.calls[0].target, 'rollback');
+    // The executor restores the config from the restoration checkout,
+    // not from the candidate checkout.
+    assert.equal(exec.calls[0].configPath, join(wt, 'wrangler.toml'));
+    assert.ok(existsSync(join(rel, `${ROLLBACK_REV}.rollback.deploy-receipt.json`)));
+  } finally {
+    process.env.DEPLOY_RELEASES_DIR = prevReleases;
+    if (prevRoot === undefined) delete process.env.DEPLOY_REPO_ROOT;
+    else process.env.DEPLOY_REPO_ROOT = prevRoot;
+    rmSync(rel, { recursive: true, force: true });
+    rmSync(wt, { recursive: true, force: true });
+  }
 });
 
 // B3 — The lock is shared for the whole release target. Two acquires
@@ -601,7 +768,11 @@ test('B3: supersession cannot interleave with execution; stale A never executes 
 // env fallbacks (verified by invoking the CLI with env only, no flags).
 test('F1: no expression interpolation in any deploy run step; CLI accepts env', () => {
   const read = name => readFileSync(join(ROOT, '.github/workflows', name), 'utf8');
-  for (const name of ['deploy.yml', 'deploy-staged.yml', 'deploy-rollback.yml']) {
+  // Repair 2: deploy-rollback.yml was removed (it was not an executable
+  // restoration path); the remaining two workflows are the claimed
+  // gate-only paths, and the rollback path is the bounded local
+  // candidate-script plus DEPLOY_REPO_ROOT procedure.
+  for (const name of ['deploy.yml', 'deploy-staged.yml']) {
     const lines = read(name).split('\n');
     // A run: block starts at a line matching `run:` and continues while
     // following lines are more indented (or blank). No ${{ }} may appear

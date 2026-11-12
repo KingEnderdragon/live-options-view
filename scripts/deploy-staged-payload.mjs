@@ -33,14 +33,31 @@
 // C2 repair (2026-11-11) — deployment order and rollback. The asset
 // service's API binding points at the live-options-api service, so the API
 // service must exist before any asset authorize or deploy; the gate
-// refuses an asset step until an API deploy receipt or an operator-recorded
-// API-service verification exists for the revision. The combined public
-// worker is REPLACED by the asset service (same name live-options-view);
-// it is not kept alongside. Rollback is a separate lane (--target
-// rollback) that deploys only wrangler.toml to restore the combined
-// worker, and only under a rollback authorization with a recorded reason.
-// Receipts are per-target so an asset receipt cannot overwrite the API
-// receipt that proves the API service was deployed.
+// refuses an asset step until VALIDATED API-deployment or
+// operator-readback evidence exists for the revision (repair 2: a
+// filename alone never satisfies readiness — the evidence is parsed and
+// checked for the intended service and deployment context). The combined
+// public worker is REPLACED by the asset service (same name
+// live-options-view); it is not kept alongside. Rollback is a separate
+// lane (--target rollback) that deploys only wrangler.toml to restore the
+// combined worker, and only under a rollback authorization with a recorded
+// reason. Receipts are per-target so an asset receipt cannot overwrite the
+// API receipt that proves the API service was deployed. Repair 2 removed
+// the nonfunctional deploy-rollback.yml workflow from the claimed
+// executable path (it could not transport its authorization artifact and
+// its checkout followed the dispatch ref, not the restoration revision);
+// the rollback path is the bounded local candidate-script plus
+// DEPLOY_REPO_ROOT restoration procedure (see docs/SITE_RELEASES.md and
+// the C2 packet §5), proved by the rollback test in
+// tests/deploy_sequencing.test.mjs.
+//
+// Repair 2 (2026-11-11) — freshness is now enforced in the gate, not
+// only documented. verifyCurrentSourceFreshness() re-reads the current
+// source config from the config root recorded in the plan, validates it,
+// and compares its hash to the authorized record; it runs at authorize
+// time and again in recheckBeforeExecute(), inside the shared lock,
+// immediately before the executor. A missing, invalid, or drifted source
+// refuses promotion (the operator re-stages and re-authorizes).
 //
 // B3 — One shared release lock for the whole release target, held in the
 // external releases dir — not one lock per stage. authorize, supersede and
@@ -56,7 +73,7 @@ import { createHash } from 'node:crypto';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ROOT, verifyArtifact } from './build-assets.mjs';
-import { transitionPlanState, verifyStage } from './prepare-asset-release.mjs';
+import { transitionPlanState, validateAssetConfig, verifyStage } from './prepare-asset-release.mjs';
 
 // External to the candidate tree by default. DEPLOY_RELEASES_DIR (tests/CI)
 // wins; otherwise a sibling directory next to the checkout. Never inside
@@ -92,25 +109,57 @@ const authorizationPath = revision => resolve(releasesDir(), `${revision}.author
 // API-readiness evidence the asset order check needs).
 const receiptPath = (revision, target) => resolve(releasesDir(), `${revision}.${target}.deploy-receipt.json`);
 const apiServiceVerifiedPath = revision => resolve(releasesDir(), `${revision}.api-service-verified.json`);
-// Deployment order (C2 repair): the asset service's API binding points at
-// the live-options-api service, so the API service must exist before any
-// asset authorize or deploy. Existence is recorded one of two ways: an API
-// deploy receipt for the same revision (the api lane ran through this
-// gate), or an operator-recorded verification (the operator read back the
-// live service list and recorded it). There is no provider call here —
-// the gate cannot test the provider locally, so the operator's readback
-// is the evidence and it is recorded, not assumed.
+// Repair 2 (2026-11-11) — API readiness is evidence, not a filename.
+// apiServiceReady() used to return true for any directory entry ending
+// .api.deploy-receipt.json or .api-service-verified.json, without reading
+// it — a junk file satisfied the ordering guard (Brian's witness:
+// junk.api.deploy-receipt.json containing "not JSON, no provider or
+// deployment" returned true). Now each candidate file is parsed and
+// validated: an API deploy receipt must be a completed deployment of the
+// intended service (target 'api', the API deploy command, a full revision,
+// a valid execution time, and service live-options-api when named); an
+// operator verification must name the intended service, the
+// operator-readback kind, a verifier, and a valid verification time.
+// Malformed, wrong-target, or wrong-service files are skipped, never
+// counted. Cross-revision reuse is preserved: valid evidence for ANY
+// revision proves the named service exists (the binding references the
+// service name, not a code revision). If the service was deleted after
+// being created, the evidence is stale — the operator re-records a fresh
+// verification in that case.
+function isValidIsoDate(value) {
+  return typeof value === 'string' && !Number.isNaN(Date.parse(value));
+}
+function isApiDeployReceipt(data) {
+  return data && typeof data === 'object'
+    && data.target === 'api'
+    && data.command === 'wrangler deploy --config wrangler.api.toml'
+    && /^[a-f0-9]{40}$/.test(data.revision || '')
+    && isValidIsoDate(data.executed_at)
+    && (data.service === undefined || data.service === 'live-options-api');
+}
+function isApiServiceVerification(data) {
+  return data && typeof data === 'object'
+    && data.service === 'live-options-api'
+    && data.verification_kind === 'operator-readback'
+    && typeof data.verifier === 'string' && data.verifier.length > 0
+    && /^[a-f0-9]{40}$/.test(data.revision || '')
+    && isValidIsoDate(data.verified_at);
+}
 export function apiServiceReady(revision) {
   // Existence is a property of the NAMED service, not of the revision:
-  // an API deploy receipt or operator verification for ANY revision proves
-  // the service was created. A per-revision check would wrongly refuse a
-  // new asset candidate while the API service from an earlier candidate
-  // still exists (the binding references the service name, not a code
-  // revision). If the service was deleted after being created, the receipt
-  // is stale — the operator re-records a fresh verification in that case.
+  // a validated API deploy receipt or operator verification for ANY
+  // revision proves the service was created. A per-revision check would
+  // wrongly refuse a new asset candidate while the API service from an
+  // earlier candidate still exists (the binding references the service
+  // name, not a code revision).
   if (!existsSync(releasesDir())) return false;
   for (const name of readdirSync(releasesDir())) {
-    if (name.endsWith('.api.deploy-receipt.json') || name.endsWith('.api-service-verified.json')) return true;
+    const path = resolve(releasesDir(), name);
+    try {
+      const data = JSON.parse(readFileSync(path, 'utf8'));
+      if (name.endsWith('.api.deploy-receipt.json') && isApiDeployReceipt(data)) return true;
+      if (name.endsWith('.api-service-verified.json') && isApiServiceVerification(data)) return true;
+    } catch { /* malformed evidence never satisfies readiness */ }
   }
   return false;
 }
@@ -269,6 +318,10 @@ export function authorize({ target = 'asset', stage, revision, webCheck, apiChec
     if (plan.config_state !== 'applied-source') {
       throw new Error('Proposal-only stages can never deploy; an applied root config is required');
     }
+    // Freshness (repair 2): the source config must be currently valid
+    // and match the stage at authorization time, not just at staging
+    // time — an authorization for a stale source must never be created.
+    verifyCurrentSourceFreshness(stage, plan.config_sha256);
   } else if (target === 'api') {
     // The api lane is bound to wrangler.api.toml at authorize time; the
     // hash is re-checked at deploy so a changed config cannot deploy.
@@ -346,6 +399,41 @@ export function supersedeStage(args) {
   return supersede(args);
 }
 
+// Freshness (repair 2, blocker 2) — the retained stage's config is
+// integrity-only: verifyStage checks the stage's own bytes, so an
+// unchanged stage still verifies after its named source config changes
+// or becomes invalid. Before promotion, re-read the CURRENT source
+// config from the config root recorded in the plan, validate it, and
+// compare its hash to the authorized record. If the source is missing,
+// invalid, or drifted since authorization, promotion refuses — the
+// operator must re-stage and re-authorize a new candidate. This is the
+// current accepted source/config snapshot check the freshness contract
+// (docs/SITE_RELEASES.md) promises; it runs inside the shared lock,
+// immediately before the executor, so a source change that lands after
+// the first checks is still caught. It does not re-stage: a refusal is
+// the signal to re-stage fresh and authorize a new candidate.
+export function verifyCurrentSourceFreshness(stage, expectedSha256) {
+  const plan = JSON.parse(readFileSync(resolve(stage, 'plan.json'), 'utf8'));
+  if (plan.config_state !== 'applied-source') {
+    throw new Error('Freshness check requires applied-source config');
+  }
+  if (!plan.config_root || typeof plan.config_root !== 'string') {
+    throw new Error('Stage plan lacks config_root; re-stage with the current gate before promotion');
+  }
+  const sourcePath = resolve(plan.config_root, plan.config_source);
+  if (!existsSync(sourcePath)) {
+    throw new Error('Current source config missing; re-stage and re-authorize before promotion');
+  }
+  const source = readFileSync(sourcePath, 'utf8');
+  const manifest = verifyArtifact(resolve(stage, 'payload'));
+  validateAssetConfig(source, manifest);
+  const sha256 = createHash('sha256').update(source).digest('hex');
+  if (sha256 !== expectedSha256 || sha256 !== plan.config_sha256) {
+    throw new Error('Current source config drifted since authorization; re-stage and re-authorize before promotion');
+  }
+  return { sourcePath, sha256 };
+}
+
 // Final guard, called immediately before the executor runs, inside the
 // shared lock (B3). Re-reads the authorization record, the plan (asset
 // only) and HEAD from scratch, so a supersession that landed after the
@@ -362,6 +450,9 @@ export function recheckBeforeExecute({ stage, revision, record, webCheck = null,
     if (freshPlan.config_sha256 !== fresh.config_sha256 || freshPlan.config_state !== 'applied-source') {
       throw new Error('Stage config drifted while waiting for the lock');
     }
+    // Freshness (repair 2): the CURRENT source config must still be
+    // valid and match the authorized hash, or the executor never runs.
+    verifyCurrentSourceFreshness(stage, fresh.config_sha256);
     return freshPlan;
   }
   if (fresh.target === 'rollback') {
@@ -440,6 +531,9 @@ export function deploy({ target = 'asset', stage, revision, execute = false, web
     if (target === 'asset') transitionPlanState(stage, ['authorized'], 'deployed');
     const receipt = {
       revision, target, command, executed_at: new Date().toISOString(),
+      // The API receipt names the intended service explicitly, so
+      // readiness validation can check it (repair 2, blocker 1).
+      ...(target === 'api' ? { service: 'live-options-api' } : {}),
       web_check_run_id: record.web_check_run_id, api_check_run_id: record.api_check_run_id,
     };
     mkdirSync(releasesDir(), { recursive: true });

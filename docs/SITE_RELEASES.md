@@ -45,6 +45,8 @@ Staging prefers the actual applied root wrangler.assets.toml; only while that fi
 
 Immediately before any separately authorized promotion, Nova's serialized exact-revision gate must establish the approved source/config snapshot and successful required checks. Reselect configuration from that snapshot (applied root wins; invalid present root refuses), require applied-source, and compare selected path/state AND SHA256 against the accepted config receipt and retained plan. Re-stage into a NEW directory from the same approved artifact and current accepted config, then verify it; compare revision, schema, targets and empty operational actions as well as selected config provenance. A change requires renewed affected review/tests and a new accepted plan, never an edited old hash or silent fallback. A stale branch checkout cannot establish freshness merely because its own hash matches. Record source SHA/config hash/check conclusion and hold the same promotion lock/snapshot through deployment; changed source/config, failed or missing checks, superseding candidate or lost lock stops promotion. This is Nova's G3b responsibility, not a new deploy command here. Brian's config_evidence_stale and acceptance_evidence_stale identify which evidence to refresh; neither is provider authority.
 
+Repair 2 (2026-11-11) — this freshness check is now enforced by the gate itself, not only documented here: `verifyCurrentSourceFreshness()` in scripts/deploy-staged-payload.mjs re-reads the current source config from the config root recorded in the stage plan (`config_root`), validates it, and compares its SHA256 to the authorized record. It runs at authorize time and again in recheckBeforeExecute(), inside the shared lock, immediately before the executor. A missing, invalid, or drifted source refuses promotion; the operator re-stages and re-authorizes a new candidate. An integrity-only --verify-stage pass never substitutes for this gate check.
+
 ## One-time transition and provider gates (Nova C2)
 
 Read docs/ASSET_BOUNDARY.md and Brian's docs/RELEASE_BOUNDARIES.md at his accepted candidate. Verify provider facts rather than treating repository comments as readback. In particular identify all promotion paths including native Builds, check enforcement/order for exact reviewed SHA, routes/custom domains, API secrets and binding targets, settlement trigger ownership, and disposable preview resource IDs. Hosted preview must bind only separately provisioned preview D1/operational storage/API/quote fixtures; it cannot reuse the API production config, production credentials, production sessions or write bucket. Gateway identity strings are checks, not IAM proof. Nova owns the production public-read adapter and generic proxy restriction; local PUBLIC_DATA is fixture-only.
@@ -80,6 +82,23 @@ node --test tests/asset_rollback.test.mjs
 Execute no deployment automatically: Nova reviews the generated old-revision asset-only plan under existing authority. The local executable rollback swaps both packaged gateway/policy and site payload while keeping the same API binding object, D1 instance/accounts/sessions, schema and producer targets. It refuses modified/missing/extra payload, mismatched schemas or API targets, producer actions, a changed floor, recovery serving or legacy KV serving. Its two release IDs are explicitly synthetic same-source protocol fixtures, not a historical production rollback receipt; the exact candidate artifact is separately built and rendered. A real prior accepted separated artifact becomes the ordinary rollback target after the first transition; do not claim it already exists.
 
 The serving API floor is D1-reading revision 90cdc56c207ad0c733bb2f1b1bb15d995472bf47 or a reviewed compatible descendant, with exact migration 0001_accounts_sessions.sql and 0002_cutover_support.sql hashes in release.json. This lane performs no schema migration. Additive/future schema changes need a reviewed compatibility contract; a mismatch refuses rollback rather than guessing. Never use an old KV-serving revision or restore stale archived KV into ordinary serving as a code rollback.
+
+### Combined Worker restoration (local procedure)
+
+The combined Worker (wrangler.toml) is the transition rollback target, not an ordinary asset rollback. There is no rollback workflow: deploy-rollback.yml was removed in repair 2 (2026-11-11) because it could not transport its authorization artifact and its checkout followed the dispatch ref, not the restoration revision. Restoration is a bounded local procedure through the candidate gate script, with DEPLOY_REPO_ROOT pointing at a checkout of the recorded combined build (6c1051a7b4fcbc115551562b2eb531c13a440e2e, wrangler.toml SHA256 213c2e56a9f75cd0cdbce4e967022d12581cd711701f091cc6289214648eea72):
+
+```
+# 1. From the candidate checkout, run the reviewed gate script. Point
+#    DEPLOY_REPO_ROOT at a checkout of the recorded combined build.
+git worktree add /tmp/lov-rollback-restore 6c1051a7b4fcbc115551562b2eb531c13a440e2e
+DEPLOY_REPO_ROOT=/tmp/lov-rollback-restore \
+  node scripts/deploy-staged-payload.mjs --authorize --target rollback --revision 6c1051a7b4fcbc115551562b2eb531c13a440e2e --authorizer <name> --rollback-reason <reason>
+# 2. Dry-run, then execute only under the same authorization:
+DEPLOY_REPO_ROOT=/tmp/lov-rollback-restore \
+  node scripts/deploy-staged-payload.mjs --deploy --target rollback --revision 6c1051a7b4fcbc115551562b2eb531c13a440e2e
+```
+
+The gate verifies the restoration checkout is the recorded combined build (its wrangler.toml hash must match the recorded SHA256), re-reads wrangler.toml before execution, and refuses on drift. It deploys ONLY wrangler.toml; it never re-deploys the candidate's asset or API config. The authorization record lives in the shared .deploy-releases directory (default sibling .deploy-releases), not in any workflow artifact — there is no artifact transport to supply. Proved by tests/deploy_sequencing.test.mjs ('Rollback: local candidate-script + DEPLOY_REPO_ROOT restores the recorded combined build').
 
 ## Recovery, classification and bypasses
 

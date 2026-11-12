@@ -104,6 +104,12 @@ export function prepareRelease({artifact,out,current=null,configRoot=ROOT}) {
     recovery_actions:[],requires:'Nova C2 topology/trigger/resource review and existing production authority',
     config_state:configPath===applied?'applied-source':'proposal-only',
     config_source:relative(resolve(configRoot),configPath).split(sep).join('/'),
+    // Repair 2: record the config root the stage was selected from, so
+    // the promotion gate can re-read the CURRENT source config and prove
+    // freshness (verifyCurrentSourceFreshness). Without it, only the
+    // retained stage bytes are checked and a changed/invalid source is
+    // invisible to the gate.
+    config_root:resolve(configRoot),
     config_sha256:configHash(config),
     proposed_command:deploymentCommand(staging,manifest.revision)};
   writeFileSync(resolve(staging,'plan.json'),JSON.stringify(plan,null,2)+'\n');
