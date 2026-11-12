@@ -32,10 +32,10 @@ test.after(() => {
 
 // Build a stage for `revision`. applied=true stages from an applied root
 // config (a temp configRoot carrying wrangler.assets.toml); applied=false
-// stages from the proposal-only template. The applied config here is a
-// TEST FIXTURE standing in for the real applied-source config, which is a
-// C2 precondition and does not yet exist at the repo root — no test here
-// pretends the real config exists.
+// stages from the proposal-only template in an isolated temp configRoot.
+// The real applied-source config now exists at the repo root
+// (wrangler.assets.toml, C2 decision packet); the temp fixture is retained
+// so the proposal-only path stays testable in isolation.
 function makeStage(revision, applied = true) {
   const base = mkdtempSync(join(tmpdir(), 'deploy-seq-'));
   const artifact = join(base, 'artifact');
@@ -43,8 +43,12 @@ function makeStage(revision, applied = true) {
   const configRoot = join(base, 'config');
   mkdirSync(configRoot, { recursive: true });
   if (applied) writeFileSync(join(configRoot, 'wrangler.assets.toml'), PROPOSED);
+  else {
+    mkdirSync(join(configRoot, 'patches', 'musef-225'), { recursive: true });
+    writeFileSync(join(configRoot, 'patches', 'musef-225', 'wrangler.assets.toml.proposed'), PROPOSED);
+  }
   const stage = join(base, 'stage');
-  prepareRelease({ artifact, out: stage, configRoot: applied ? configRoot : ROOT });
+  prepareRelease({ artifact, out: stage, configRoot });
   return { base, stage };
 }
 function cleanup({ base }) {
@@ -297,22 +301,71 @@ test('B2: one authoritative release lane, no automatic deploy bypass', () => {
   assert.ok(!/group: deploy-live-options-view/.test(oldDeploy), 'witness: old deploy.yml had no concurrency group');
 });
 
+// B1 — The releases dir may not exist yet (first authorize in a fresh
+// dir). The lock mkdir used to fail ENOENT there (Brian slice 8 residual);
+// authorize must create the dir.
+test('B1: authorize creates the releases dir when absent', () => {
+  const fresh = join(mkdtempSync(join(tmpdir(), 'deploy-rel-missing-')), 'releases');
+  const prevReleases = process.env.DEPLOY_RELEASES_DIR;
+  process.env.DEPLOY_RELEASES_DIR = fresh;
+  try {
+    assert.ok(!existsSync(fresh));
+    const record = authorizeApi({ revision: HEAD, webCheck: WEB, apiCheck: API, authorizer: 'test' });
+    assert.equal(record.target, 'api');
+    assert.ok(existsSync(join(fresh, `${HEAD}.authorization.json`)));
+  } finally {
+    process.env.DEPLOY_RELEASES_DIR = prevReleases;
+    rmSync(fresh, { recursive: true, force: true });
+  }
+});
+
 // B2 — The API lane is separately explicit and gated: its own authorization
-// record, its own dispatch, wrangler.toml only, no producer effects.
+// record, its own dispatch, wrangler.api.toml only (never the combined
+// wrangler.toml), no producer effects.
 test('B2: API lane is separately explicit and gated (target api)', () => {
   const record = authorizeApi({ revision: HEAD, webCheck: WEB, apiCheck: API, authorizer: 'test' });
   assert.equal(record.target, 'api');
   assert.equal(record.stage_path, null);
+  assert.equal(record.config_source, 'wrangler.api.toml');
   const dry = deployApi({ revision: HEAD });
   assert.equal(dry.dryRun, true);
-  assert.equal(dry.command, 'wrangler deploy --config wrangler.toml');
+  assert.equal(dry.command, 'wrangler deploy --config wrangler.api.toml');
   const exec = stubExecutor();
   const result = deployApi({ revision: HEAD, execute: true, executor: exec.fn });
   assert.equal(result.deployed, true);
   assert.equal(exec.calls.length, 1);
   assert.equal(exec.calls[0].target, 'api');
-  assert.ok(exec.calls[0].configPath.endsWith('wrangler.toml'));
+  assert.ok(exec.calls[0].configPath.endsWith('wrangler.api.toml'));
+  assert.equal(exec.calls[0].configPath, resolve(ROOT, 'wrangler.api.toml'),
+    'the api lane must target wrangler.api.toml, never the combined wrangler.toml');
   assert.ok(existsSync(join(releases, `${HEAD}.deploy-receipt.json`)));
+});
+
+// B2 — The api lane refuses to authorize without wrangler.api.toml, and
+// refuses to deploy if the config drifted after authorization. The temp
+// repo root stands in for a checkout lacking the applied API config.
+test('B2: API lane refuses without wrangler.api.toml and on config drift', () => {
+  const wt = cleanClone();
+  const prevReleases = process.env.DEPLOY_RELEASES_DIR;
+  const prevRoot = process.env.DEPLOY_REPO_ROOT;
+  process.env.DEPLOY_RELEASES_DIR = mkdtempSync(join(tmpdir(), 'deploy-api-rel-'));
+  process.env.DEPLOY_REPO_ROOT = wt;
+  try {
+    rmSync(join(wt, 'wrangler.api.toml'));
+    assert.throws(() => authorizeApi({ revision: HEAD, webCheck: WEB, apiCheck: API, authorizer: 'test' }),
+      /API config missing/);
+    execFileSync('git', ['-C', wt, 'checkout', '--', 'wrangler.api.toml']);
+    authorizeApi({ revision: HEAD, webCheck: WEB, apiCheck: API, authorizer: 'test' });
+    writeFileSync(join(wt, 'wrangler.api.toml'), readFileSync(join(wt, 'wrangler.api.toml'), 'utf8') + '# drift\n');
+    assert.throws(() => deployApi({ revision: HEAD }), /API config drifted/);
+  } finally {
+    const rel = process.env.DEPLOY_RELEASES_DIR;
+    process.env.DEPLOY_RELEASES_DIR = prevReleases;
+    if (prevRoot === undefined) delete process.env.DEPLOY_REPO_ROOT;
+    else process.env.DEPLOY_REPO_ROOT = prevRoot;
+    rmSync(rel, { recursive: true, force: true });
+    rmSync(wt, { recursive: true, force: true });
+  }
 });
 
 // B3 — The lock is shared for the whole release target. Two acquires

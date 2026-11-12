@@ -25,7 +25,10 @@
 // workflow_dispatch-only, share the deploy-live-options-view concurrency
 // group, and call only this script. The API lane is a separate explicit
 // dispatch (--target api) with its own authorization record; it deploys
-// only the Worker (wrangler.toml) and has no producer effects.
+// only the API service (wrangler.api.toml) and has no producer effects.
+// It must never deploy the combined public worker (wrangler.toml): the
+// api target is bound to wrangler.api.toml by configPath, command and
+// recorded hash, and a deploy against any other config is refused.
 //
 // B3 — One shared release lock for the whole release target, held in the
 // external releases dir — not one lock per stage. authorize, supersede and
@@ -37,6 +40,7 @@
 // candidate A never executes after B supersedes it.
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ROOT, verifyArtifact } from './build-assets.mjs';
@@ -48,6 +52,15 @@ import { transitionPlanState, verifyStage } from './prepare-asset-release.mjs';
 const releasesDir = () => process.env.DEPLOY_RELEASES_DIR || resolve(ROOT, '..', '.deploy-releases');
 // Which checkout the gate verifies. Tests point it at an isolated clone.
 const repoRoot = () => process.env.DEPLOY_REPO_ROOT || ROOT;
+// The API lane deploys ONLY wrangler.api.toml (the separate API service).
+// The combined public worker (wrangler.toml) is never an api target: the
+// config is read and hashed here, and every later check re-reads it.
+export const API_CONFIG_FILE = 'wrangler.api.toml';
+export function apiConfig() {
+  const path = resolve(repoRoot(), API_CONFIG_FILE);
+  if (!existsSync(path)) throw new Error(`API config missing: ${API_CONFIG_FILE} must exist at the repo root (C2 precondition)`);
+  return { path, sha256: createHash('sha256').update(readFileSync(path)).digest('hex') };
+}
 const authorizationPath = revision => resolve(releasesDir(), `${revision}.authorization.json`);
 const receiptPath = revision => resolve(releasesDir(), `${revision}.deploy-receipt.json`);
 const STALE_LOCK_MS = 10 * 60 * 1000;
@@ -106,6 +119,9 @@ export function releaseLockPath() {
 export function acquireReleaseLock() {
   const lockPath = releaseLockPath();
   const tryOnce = () => {
+    // The releases dir may not exist yet (first authorize in a fresh dir);
+    // without this the lock mkdir fails ENOENT (Brian slice 8 residual).
+    mkdirSync(releasesDir(), { recursive: true });
     mkdirSync(lockPath);
     writeFileSync(resolve(lockPath, 'owner.json'), JSON.stringify({ pid: process.pid, startedAt: Date.now() }) + '\n');
     return { lockPath, release() { rmSync(lockPath, { recursive: true, force: true }); } };
@@ -128,7 +144,7 @@ export function acquireReleaseLock() {
 
 // Authorize one candidate. target 'asset' requires an applied-source stage;
 // target 'api' is the separately explicit API lane (no asset stage, deploys
-// wrangler.toml only, no producer effects). The record is written to the
+// wrangler.api.toml only, no producer effects). The record is written to the
 // EXTERNAL releases dir (B1); authorizing never touches the candidate tree.
 // A newer authorization supersedes every older one, so at most one
 // candidate is deployable at a time. All record mutations run under the
@@ -143,6 +159,7 @@ export function authorize({ target = 'asset', stage, revision, webCheck, apiChec
   }
   if (!authorizer) throw new Error('Authorization requires --authorizer');
   let plan = null;
+  let apiCfg = null;
   if (target === 'asset') {
     if (!stage) throw new Error('Asset authorization requires --stage');
     plan = verifyStage(stage);
@@ -150,6 +167,10 @@ export function authorize({ target = 'asset', stage, revision, webCheck, apiChec
     if (plan.config_state !== 'applied-source') {
       throw new Error('Proposal-only stages can never deploy; an applied root config is required');
     }
+  } else {
+    // The api lane is bound to wrangler.api.toml at authorize time; the
+    // hash is re-checked at deploy so a changed config cannot deploy.
+    apiCfg = apiConfig();
   }
   const lock = acquireReleaseLock();
   try {
@@ -171,8 +192,8 @@ export function authorize({ target = 'asset', stage, revision, webCheck, apiChec
     const record = {
       revision, head_tree: headTree(), target,
       stage_path: target === 'asset' ? resolve(stage) : null,
-      config_source: plan ? plan.config_source : 'wrangler.toml',
-      config_sha256: plan ? plan.config_sha256 : null,
+      config_source: plan ? plan.config_source : API_CONFIG_FILE,
+      config_sha256: plan ? plan.config_sha256 : apiCfg.sha256,
       web_check_run_id: web.runId, web_check_status: web.status,
       api_check_run_id: api.runId, api_check_status: api.status,
       authorizer, authorized_at: new Date().toISOString(), superseded_by: null,
@@ -231,6 +252,12 @@ export function recheckBeforeExecute({ stage, revision, record, webCheck = null,
     }
     return freshPlan;
   }
+  // The api lane re-reads wrangler.api.toml and compares its hash, so a
+  // config changed after authorization cannot deploy.
+  const cfg = apiConfig();
+  if (cfg.sha256 !== fresh.config_sha256 || fresh.config_source !== API_CONFIG_FILE) {
+    throw new Error('API config drifted while waiting for the lock');
+  }
   return null;
 }
 
@@ -278,10 +305,10 @@ export function deploy({ target = 'asset', stage, revision, execute = false, web
     if (!execute) {
       return target === 'asset'
         ? { dryRun: true, command: freshPlan.proposed_command, revision }
-        : { dryRun: true, command: 'wrangler deploy --config wrangler.toml', revision };
+        : { dryRun: true, command: 'wrangler deploy --config wrangler.api.toml', revision };
     }
-    const configPath = target === 'asset' ? resolve(stage, 'wrangler.assets.toml') : resolve(repoRoot(), 'wrangler.toml');
-    const command = target === 'asset' ? freshPlan.proposed_command : 'wrangler deploy --config wrangler.toml';
+    const configPath = target === 'asset' ? resolve(stage, 'wrangler.assets.toml') : resolve(repoRoot(), API_CONFIG_FILE);
+    const command = target === 'asset' ? freshPlan.proposed_command : 'wrangler deploy --config wrangler.api.toml';
     executor(command, { configPath, revision, target });
     if (target === 'asset') transitionPlanState(stage, ['authorized'], 'deployed');
     const receipt = {

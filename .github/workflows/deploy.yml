@@ -6,8 +6,9 @@ name: Deploy API Worker (explicit, gated)
 # separately explicit API lane: workflow_dispatch only, same
 # deploy-live-options-view concurrency group as deploy-staged.yml, and the
 # only deploy mechanism is scripts/deploy-staged-payload.mjs with
-# --target api (own authorization record, own dispatch). It deploys only
-# the Worker (wrangler.toml); it never touches a producer/collector.
+# --target api (own authorization record, own dispatch, own config
+# wrangler.api.toml — the separate API service). It never deploys the
+# combined public worker (wrangler.toml); it never touches a producer/collector.
 # B1 — The authorization record is EXTERNAL to the candidate tree (see
 # deploy-staged.yml): the authorize step uploads it as a workflow artifact
 # named authorization-<revision>; this job downloads it.
