@@ -182,6 +182,22 @@ test('asset cutover requires explicit empty cron clearing and rejects all active
     proposedConfig.replace('crons = []','crons = []\ncrons = []'),
   ]) assert.throws(()=>validateAssetConfig(config,manifest),/Asset config|asset config/);
 });
+test('stage config integrity does not attest current source selection or freshness',()=>{
+  const {old}=artifacts(),{root,out}=configFixture();
+  const original=prepareRelease({artifact:old,out,configRoot:root});
+  const applied=proposedConfig.replace('2026-06-23','2026-06-24');
+  writeFileSync(resolve(root,'wrangler.assets.toml'),applied);
+  // Unchanged stage still verifies: this is deliberately not live-source attestation.
+  assert.deepEqual(verifyStage(out),original);
+  const refreshed=prepareRelease({artifact:old,out:out+'-fresh',configRoot:root});
+  assert.equal(refreshed.config_state,'applied-source');
+  assert.notEqual(refreshed.config_source,original.config_source);
+  assert.notEqual(refreshed.config_sha256,original.config_sha256);
+  writeFileSync(resolve(root,'wrangler.assets.toml'),'invalid current config');
+  assert.deepEqual(verifyStage(out+'-fresh'),refreshed);
+  assert.throws(()=>prepareRelease({artifact:old,out:out+'-invalid',configRoot:root}),/Unsupported asset config/);
+  assert.equal(existsSync(out+'-invalid'),false);
+});
 test('unsupported configuration diagnostics do not print raw secrets',()=>{
   const secret='not-a-real-secret-should-not-be-logged';
   assert.throws(()=>validateAssetConfig('unsupported '+secret,{}),error=>{

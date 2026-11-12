@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { buildAssets } from '../scripts/build-assets.mjs';
 import { prepareRelease, verifyStage } from '../scripts/prepare-asset-release.mjs';
-import { authorizeStage, authorizeApi, deployStaged, deployApi, acquireReleaseLock, releaseLockPath, recheckBeforeExecute } from '../scripts/deploy-staged-payload.mjs';
+import { authorizeStage, authorizeApi, authorizeRollback, deployStaged, deployApi, deployRollback, recordApiServiceVerified, acquireReleaseLock, releaseLockPath, recheckBeforeExecute } from '../scripts/deploy-staged-payload.mjs';
 
 // F3: fileURLToPath, not URL.pathname — the pathname form breaks on
 // Windows ("/C:/..." is not a usable path there).
@@ -64,6 +64,14 @@ const stubExecutor = () => {
     fn: (command, opts) => { calls.push({ command, ...(opts || {}) }); },
   };
 };
+// Deployment order (C2 repair): the asset service's API binding points at
+// the live-options-api service, so the API service must exist before any
+// asset authorize or deploy. Establish API readiness once for this file's
+// shared releases dir (api authorize + stub deploy writes the receipt), so
+// the asset tests below exercise gate ordering rather than the setup.
+// Tests that use a separate releases dir establish their own readiness.
+authorizeApi({ revision: HEAD, webCheck: WEB, apiCheck: API, authorizer: 'test' });
+deployApi({ revision: HEAD, execute: true, executor: stubExecutor().fn });
 // A clean clone of the candidate checkout (an isolated copy of the exact
 // committed tree). Used by the B1 tests so the authorization mechanism is
 // exercised against a real checkout, not the working tree.
@@ -146,7 +154,7 @@ test('deploy refuses superseded candidate A after B authorized, and succeeds for
     assert.equal(result.deployed, true);
     assert.equal(exec.calls.length, 1);
     assert.equal(planState(b.stage), 'deployed');
-    assert.ok(existsSync(join(releases, `${HEAD}.deploy-receipt.json`)));
+    assert.ok(existsSync(join(releases, `${HEAD}.asset.deploy-receipt.json`)));
   } finally { cleanup(a); cleanup(b); }
 });
 
@@ -195,15 +203,15 @@ test('dry-run prints the command and deploys nothing', () => {
   try {
     authorizeStage({ stage: s.stage, revision: HEAD, webCheck: WEB, apiCheck: API, authorizer: 'test' });
     const exec = stubExecutor();
-    // The A/B test above wrote a HEAD receipt in the shared temp releases
-    // dir; clear it so this test can prove a dry-run writes none.
-    rmSync(join(releases, `${HEAD}.deploy-receipt.json`), { force: true });
+    // The A/B test above wrote a HEAD asset receipt in the shared temp
+    // releases dir; clear it so this test can prove a dry-run writes none.
+    rmSync(join(releases, `${HEAD}.asset.deploy-receipt.json`), { force: true });
     const result = deployStaged({ stage: s.stage, revision: HEAD, executor: exec.fn });
     assert.equal(result.dryRun, true);
     assert.match(result.command, /wrangler deploy --config/);
     assert.equal(exec.calls.length, 0);
     assert.equal(planState(s.stage), 'authorized');
-    assert.equal(existsSync(join(releases, `${HEAD}.deploy-receipt.json`)), false);
+    assert.equal(existsSync(join(releases, `${HEAD}.asset.deploy-receipt.json`)), false);
   } finally { cleanup(s); }
 });
 
@@ -222,6 +230,10 @@ test('B1: clean checkout authorizes with an external record; HEAD never moves', 
   const s = makeStage(HEAD);
   try {
     assert.equal(execFileSync('git', ['status', '--porcelain'], { cwd: wt, encoding: 'utf8' }).trim(), '');
+    // Deployment order: this fresh releases dir has no API readiness, so
+    // establish it (api authorize + stub deploy) before authorizing the asset.
+    authorizeApi({ revision: HEAD, webCheck: WEB, apiCheck: API, authorizer: 'test' });
+    deployApi({ revision: HEAD, execute: true, executor: stubExecutor().fn });
     authorizeStage({ stage: s.stage, revision: HEAD, webCheck: WEB, apiCheck: API, authorizer: 'test' });
     // The record is outside the checkout: the tree is still clean and HEAD
     // is the same commit it was before authorizing.
@@ -257,6 +269,10 @@ test('B1: in-tree authorization record is a paradox (old behavior)', () => {
   process.env.DEPLOY_REPO_ROOT = wt;
   const s = makeStage(HEAD);
   try {
+    // Deployment order: this in-tree releases dir has no API readiness, so
+    // establish it (api authorize + stub deploy) before authorizing the asset.
+    authorizeApi({ revision: HEAD, webCheck: WEB, apiCheck: API, authorizer: 'test' });
+    deployApi({ revision: HEAD, execute: true, executor: stubExecutor().fn });
     authorizeStage({ stage: s.stage, revision: HEAD, webCheck: WEB, apiCheck: API, authorizer: 'test' });
     execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', '-C', wt, 'add', 'docs/releases']);
     execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', '-C', wt, 'commit', '-q', '-m', 'authorize']);
@@ -338,7 +354,7 @@ test('B2: API lane is separately explicit and gated (target api)', () => {
   assert.ok(exec.calls[0].configPath.endsWith('wrangler.api.toml'));
   assert.equal(exec.calls[0].configPath, resolve(ROOT, 'wrangler.api.toml'),
     'the api lane must target wrangler.api.toml, never the combined wrangler.toml');
-  assert.ok(existsSync(join(releases, `${HEAD}.deploy-receipt.json`)));
+  assert.ok(existsSync(join(releases, `${HEAD}.api.deploy-receipt.json`)));
 });
 
 // B2 — The api lane refuses to authorize without wrangler.api.toml, and
@@ -366,6 +382,165 @@ test('B2: API lane refuses without wrangler.api.toml and on config drift', () =>
     rmSync(rel, { recursive: true, force: true });
     rmSync(wt, { recursive: true, force: true });
   }
+});
+
+// C2 repair — Deployment order: the asset service's API binding points at
+// the live-options-api service, so the API service must exist before any
+// asset authorize or deploy. A fresh releases dir has no API evidence, so
+// the asset authorize must refuse there.
+test('Order: asset authorize refuses without API readiness (fresh releases dir)', () => {
+  const fresh = mkdtempSync(join(tmpdir(), 'deploy-order-fresh-'));
+  const prevReleases = process.env.DEPLOY_RELEASES_DIR;
+  process.env.DEPLOY_RELEASES_DIR = fresh;
+  const s = makeStage(HEAD);
+  try {
+    assert.throws(() => authorizeStage({ stage: s.stage, revision: HEAD, webCheck: WEB, apiCheck: API, authorizer: 'test' }),
+      /API service not ready/);
+  } finally {
+    cleanup(s);
+    process.env.DEPLOY_RELEASES_DIR = prevReleases;
+    rmSync(fresh, { recursive: true, force: true });
+  }
+});
+
+// C2 repair — The API deploy enables the asset authorize; removing the API
+// readiness evidence afterwards makes the asset deploy refuse, and an
+// operator-recorded verification restores it.
+test('Order: API deploy enables asset authorize; deploy refuses if readiness is removed', () => {
+  const fresh = mkdtempSync(join(tmpdir(), 'deploy-order-flow-'));
+  const prevReleases = process.env.DEPLOY_RELEASES_DIR;
+  process.env.DEPLOY_RELEASES_DIR = fresh;
+  const s = makeStage(HEAD);
+  try {
+    authorizeApi({ revision: HEAD, webCheck: WEB, apiCheck: API, authorizer: 'test' });
+    const apiResult = deployApi({ revision: HEAD, execute: true, executor: stubExecutor().fn });
+    assert.equal(apiResult.deployed, true);
+    assert.ok(existsSync(join(fresh, `${HEAD}.api.deploy-receipt.json`)));
+    authorizeStage({ stage: s.stage, revision: HEAD, webCheck: WEB, apiCheck: API, authorizer: 'test' });
+    rmSync(join(fresh, `${HEAD}.api.deploy-receipt.json`), { force: true });
+    assert.throws(() => deployStaged({ stage: s.stage, revision: HEAD }), /API service not ready/);
+    recordApiServiceVerified({ revision: HEAD, verifier: 'test' });
+    const dry = deployStaged({ stage: s.stage, revision: HEAD });
+    assert.equal(dry.dryRun, true);
+  } finally {
+    cleanup(s);
+    process.env.DEPLOY_RELEASES_DIR = prevReleases;
+    rmSync(fresh, { recursive: true, force: true });
+  }
+});
+
+// C2 repair — An operator who read back the live service list can record
+// that verification; it satisfies readiness without an API deploy receipt.
+test('Order: operator-recorded API-service verification satisfies readiness', () => {
+  const fresh = mkdtempSync(join(tmpdir(), 'deploy-order-verify-'));
+  const prevReleases = process.env.DEPLOY_RELEASES_DIR;
+  process.env.DEPLOY_RELEASES_DIR = fresh;
+  const s = makeStage(HEAD);
+  try {
+    assert.throws(() => recordApiServiceVerified({ revision: HEAD, verifier: '' }), /requires --authorizer/);
+    const rec = recordApiServiceVerified({ revision: HEAD, verifier: 'test' });
+    assert.equal(rec.service, 'live-options-api');
+    assert.equal(rec.verification_kind, 'operator-readback');
+    authorizeStage({ stage: s.stage, revision: HEAD, webCheck: WEB, apiCheck: API, authorizer: 'test' });
+    const dry = deployStaged({ stage: s.stage, revision: HEAD });
+    assert.equal(dry.dryRun, true);
+  } finally {
+    cleanup(s);
+    process.env.DEPLOY_RELEASES_DIR = prevReleases;
+    rmSync(fresh, { recursive: true, force: true });
+  }
+});
+
+// C2 repair — Receipts are per-target: the asset receipt must not
+// overwrite the API receipt that proves the API service was deployed.
+test('Order: per-target receipts do not overwrite each other', () => {
+  const fresh = mkdtempSync(join(tmpdir(), 'deploy-order-receipts-'));
+  const prevReleases = process.env.DEPLOY_RELEASES_DIR;
+  process.env.DEPLOY_RELEASES_DIR = fresh;
+  const s = makeStage(HEAD);
+  try {
+    authorizeApi({ revision: HEAD, webCheck: WEB, apiCheck: API, authorizer: 'test' });
+    deployApi({ revision: HEAD, execute: true, executor: stubExecutor().fn });
+    authorizeStage({ stage: s.stage, revision: HEAD, webCheck: WEB, apiCheck: API, authorizer: 'test' });
+    const exec = stubExecutor();
+    const result = deployStaged({ stage: s.stage, revision: HEAD, execute: true, executor: exec.fn });
+    assert.equal(result.deployed, true);
+    const apiReceipt = JSON.parse(readFileSync(join(fresh, `${HEAD}.api.deploy-receipt.json`), 'utf8'));
+    const assetReceipt = JSON.parse(readFileSync(join(fresh, `${HEAD}.asset.deploy-receipt.json`), 'utf8'));
+    assert.equal(apiReceipt.target, 'api');
+    assert.equal(assetReceipt.target, 'asset');
+    assert.equal(apiReceipt.revision, HEAD);
+    assert.equal(assetReceipt.revision, HEAD);
+  } finally {
+    cleanup(s);
+    process.env.DEPLOY_RELEASES_DIR = prevReleases;
+    rmSync(fresh, { recursive: true, force: true });
+  }
+});
+
+// C2 repair — Rollback is a separate lane that deploys only wrangler.toml
+// (the combined public worker). It requires a recorded reason; its
+// web/API checks are optional and, if omitted, are recorded as waived.
+test('Rollback: authorize refuses without reason; dry-run deploys wrangler.toml only', () => {
+  const fresh = mkdtempSync(join(tmpdir(), 'deploy-rollback-'));
+  const prevReleases = process.env.DEPLOY_RELEASES_DIR;
+  process.env.DEPLOY_RELEASES_DIR = fresh;
+  try {
+    assert.throws(() => authorizeRollback({ revision: HEAD, authorizer: 'test' }), /Rollback authorization requires --rollback-reason/);
+    const record = authorizeRollback({ revision: HEAD, authorizer: 'test', rollbackReason: 'asset cutover failed verification' });
+    assert.equal(record.target, 'rollback');
+    assert.equal(record.config_source, 'wrangler.toml');
+    assert.equal(record.authorization_kind, 'rollback-restoration');
+    assert.equal(record.web_check_status, 'waived-rollback');
+    assert.equal(record.rollback_reason, 'asset cutover failed verification');
+    const dry = deployRollback({ revision: HEAD });
+    assert.equal(dry.dryRun, true);
+    assert.equal(dry.command, 'wrangler deploy --config wrangler.toml');
+    const exec = stubExecutor();
+    const result = deployRollback({ revision: HEAD, execute: true, executor: exec.fn });
+    assert.equal(result.deployed, true);
+    assert.equal(exec.calls.length, 1);
+    assert.equal(exec.calls[0].target, 'rollback');
+    assert.ok(exec.calls[0].configPath.endsWith('wrangler.toml'));
+    assert.ok(!exec.calls[0].configPath.endsWith('wrangler.api.toml'));
+    assert.ok(existsSync(join(fresh, `${HEAD}.rollback.deploy-receipt.json`)));
+  } finally {
+    process.env.DEPLOY_RELEASES_DIR = prevReleases;
+    rmSync(fresh, { recursive: true, force: true });
+  }
+});
+
+// C2 repair — The rollback lane re-reads wrangler.toml and refuses on drift.
+test('Rollback: deploy refuses if wrangler.toml drifted after authorization', () => {
+  const wt = cleanClone();
+  const prevReleases = process.env.DEPLOY_RELEASES_DIR;
+  const prevRoot = process.env.DEPLOY_REPO_ROOT;
+  process.env.DEPLOY_RELEASES_DIR = mkdtempSync(join(tmpdir(), 'deploy-rollback-rel-'));
+  process.env.DEPLOY_REPO_ROOT = wt;
+  try {
+    authorizeRollback({ revision: HEAD, authorizer: 'test', rollbackReason: 'drift test' });
+    writeFileSync(join(wt, 'wrangler.toml'), readFileSync(join(wt, 'wrangler.toml'), 'utf8') + '# drift\n');
+    assert.throws(() => deployRollback({ revision: HEAD }), /Rollback config drifted/);
+  } finally {
+    const rel = process.env.DEPLOY_RELEASES_DIR;
+    process.env.DEPLOY_RELEASES_DIR = prevReleases;
+    if (prevRoot === undefined) delete process.env.DEPLOY_REPO_ROOT;
+    else process.env.DEPLOY_REPO_ROOT = prevRoot;
+    rmSync(rel, { recursive: true, force: true });
+    rmSync(wt, { recursive: true, force: true });
+  }
+});
+
+// C2 repair — The rollback workflow is dispatch-only, gate-only, and
+// shares the release concurrency group.
+test('Rollback: workflow is dispatch-only, gate-only, shares the concurrency group', () => {
+  const rb = readFileSync(join(ROOT, '.github/workflows/deploy-rollback.yml'), 'utf8');
+  assert.ok(!/^\s*push:/m.test(rb), 'deploy-rollback.yml must not auto-deploy on push');
+  assert.ok(!rb.includes('wrangler-action'), 'deploy-rollback.yml must not deploy outside the gate');
+  assert.match(rb, /group: deploy-live-options-view/, 'deploy-rollback.yml must share the release concurrency group');
+  assert.ok(rb.includes('scripts/deploy-staged-payload.mjs'), 'deploy-rollback.yml must call the gate');
+  assert.ok(rb.includes('--target rollback'), 'deploy-rollback.yml must use the rollback target');
+  assert.ok(rb.includes('rollback-reason'), 'deploy-rollback.yml must require a rollback reason');
 });
 
 // B3 — The lock is shared for the whole release target. Two acquires
@@ -426,7 +601,7 @@ test('B3: supersession cannot interleave with execution; stale A never executes 
 // env fallbacks (verified by invoking the CLI with env only, no flags).
 test('F1: no expression interpolation in any deploy run step; CLI accepts env', () => {
   const read = name => readFileSync(join(ROOT, '.github/workflows', name), 'utf8');
-  for (const name of ['deploy.yml', 'deploy-staged.yml']) {
+  for (const name of ['deploy.yml', 'deploy-staged.yml', 'deploy-rollback.yml']) {
     const lines = read(name).split('\n');
     // A run: block starts at a line matching `run:` and continues while
     // following lines are more indented (or blank). No ${{ }} may appear
