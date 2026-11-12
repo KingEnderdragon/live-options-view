@@ -28,6 +28,9 @@ const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.json': 'applic
     execFileSync(process.env.PYTHON || 'python', ['-m', 'market_data.news', 'pilot-cycle', ...args, '--clock', clock],
       { cwd: REPO, stdio: ['ignore', 'pipe', 'inherit'] });
   }
+  // G3 (NOT RUN when written): the pilot publishes immutable generations; the live index names one.
+  const gen = JSON.parse(fs.readFileSync(path.join(pub, 'news/v1/views/index.json'), 'utf8')).gen;
+  const published = key => key.replace('news/v1/views/', `news/v1/views/g/${gen}/`);
   const browser = await pw.chromium.launch({ headless: true });
   const foreign = [];
   try {
@@ -52,7 +55,8 @@ const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.json': 'applic
       });
       await page.goto(`${ORIGIN}/tests/news_panel/harness.html?root=/published/`);
       await page.evaluate(() => window.newsPanelReady);
-      const pick = async key => {
+      const pick = async unqualified => {
+        const key = published(unqualified);
         await page.selectOption('select[aria-label^="View"]', key);
         await page.waitForFunction(k => document.querySelector('#news-panel').getAttribute('data-page') === k, key);
       };

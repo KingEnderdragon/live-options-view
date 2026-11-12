@@ -36,8 +36,11 @@ const R2 = 'https://pub-4d5c916b8cb74ffb8c0abd7dfadb02cf.r2.dev';
 const EVIDENCE = process.env.NEWS_SITE_EVIDENCE || null;
 const VIEWPORTS = { desktop: { width: 1280, height: 900 }, narrow: { width: 390, height: 844 } };
 const INDEX_KEY = 'news/v1/views/index.json';
-const FIRST = 'news/v1/views/collector/all/2026-11-09/page-0001.json';  // index.views[0]
-const OIL = 'news/v1/views/collector/oil/2026-11-09/page-0001.json';
+// G3 (NOT RUN when written): the bucket holds the published form of the fixture (the fixed index plus
+// one immutable generation), produced by the tests-only views.qualify_generation mirror.
+const Q = require('./news_panel/qualify.js').loadQualified(VIEWS);
+const FIRST = Q.q('news/v1/views/collector/all/2026-11-09/page-0001.json');  // index.views[0]
+const OIL = Q.q('news/v1/views/collector/oil/2026-11-09/page-0001.json');
 const BAD_FIRST = 'news/v1/views/collector/all/2026-02-30/page-0001.json';
 const BAD_PICK = 'news/v1/views/collector/oil/2026-11-09/page-0021.json';
 const BAD_NEXT = '../../../../auth/remember_token.json';
@@ -49,14 +52,13 @@ const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/cs
 let scenario = {};
 function upstream(key) {
   if (key in scenario) return scenario[key]();
-  if (!key.startsWith('news/v1/views/')) return { status: 404, body: 'not found' };
-  const file = path.join(VIEWS, key);
-  if (!file.startsWith(VIEWS + path.sep) || !fs.existsSync(file)) return { status: 404, body: 'not found' };
-  return { status: 200, body: fs.readFileSync(file, 'utf8'), type: 'application/json' };
+  const text = Q.text(key);
+  if (text === null) return { status: 404, body: 'not found' };
+  return { status: 200, body: text, type: 'application/json' };
 }
 const json = o => () => ({ status: 200, body: JSON.stringify(o), type: 'application/json' });
 const status = n => () => ({ status: n, body: 'upstream ' + n });
-const fixture = key => JSON.parse(fs.readFileSync(path.join(VIEWS, key), 'utf8'));
+const fixture = key => JSON.parse(Q.text(key));
 
 (async () => {
   const { default: worker } = await import('../backend/index.js');
@@ -182,35 +184,33 @@ const fixture = key => JSON.parse(fs.readFileSync(path.join(VIEWS, key), 'utf8')
         assert.equal(news.length, 3, `${label}: reopening the tab does not mount again`);
         checkNewsRequests();
 
-        // 2. Rejected keys from the index, the picker and prev/next are never requested.
-        const idx = fixture(INDEX_KEY);
-        idx.views[0].first_page = BAD_FIRST;
-        scenario = { [INDEX_KEY]: json(idx) };
-        await openNews();
-        await waitState('failed', 'tampered first_page');
-        t = await text();
-        assert.ok(t.includes(`Could not load "${BAD_FIRST}": refused`) && t.includes('was not requested'), `${label}: ${t.slice(0, 200)}`);
-        assert.deepEqual(newsKeys(), [INDEX_KEY]);
+        // 2. Rejected keys from the index, the picker and prev/next are never requested. G3: an index
+        // whose first_page (picker option) is outside its generation is refused whole at mount; a next
+        // link that leaves the generation asks for a refresh instead of being followed.
+        for (const [what, bad] of [['first_page', BAD_FIRST], ['picker option', BAD_PICK]]) {
+          const idx = fixture(INDEX_KEY);
+          idx.views[what === 'first_page' ? 0 : 1].first_page = bad;
+          scenario = { [INDEX_KEY]: json(idx) };
+          await openNews();
+          await waitState('failed', 'tampered ' + what);
+          t = await text();
+          assert.ok(t.includes('Could not load news views: ') && t.includes('is not in generation ' + Q.gen),
+            `${label} ${what}: ${t.slice(0, 200)}`);
+          assert.deepEqual(newsKeys(), [INDEX_KEY]);
+        }
         await noHorizontalScroll('refused-first-page');
         await shot('3-refused-first-page');
 
-        const idx2 = fixture(INDEX_KEY);
-        idx2.views[1].first_page = BAD_PICK;
         const tamperedPage = fixture(FIRST);
         tamperedPage.next_page = BAD_NEXT;
-        scenario = { [INDEX_KEY]: json(idx2), [FIRST]: json(tamperedPage) };
+        scenario = { [FIRST]: json(tamperedPage) };
         await openNews();
-        await waitState('ready', 'tampered picker/next');
-        await page.selectOption('#news-panel select[aria-label^="View"]', BAD_PICK);
-        await waitState('failed', 'picker');
-        assert.ok((await text()).includes(`"${BAD_PICK}": refused`), `${label}: picker refusal shown`);
-        await page.selectOption('#news-panel select[aria-label^="View"]', FIRST);
-        await waitState('ready', 'back to first');
+        await waitState('ready', 'tampered next');
         await page.click('#news-panel button:has-text("older →")');
-        await waitState('failed', 'next');
+        await waitState('refresh-required', 'next');
         t = await text();
-        assert.ok(t.includes(`"${BAD_NEXT}": refused`), `${label}: next refusal shown`);
-        assert.deepEqual(newsKeys(), [INDEX_KEY, FIRST, FIRST], `${label}: refused keys were not requested`);
+        assert.ok(t.includes('left generation ' + Q.gen) && t.includes('Reload'), `${label}: next refused with a refresh`);
+        assert.deepEqual(newsKeys(), [INDEX_KEY, FIRST], `${label}: refused keys were not requested`);
         await noHorizontalScroll('refused-next');
         await shot('4-refused-next');
         checkNewsRequests();
@@ -272,9 +272,9 @@ const fixture = key => JSON.parse(fs.readFileSync(path.join(VIEWS, key), 'utf8')
 
         scenario = { [FIRST]: status(404) };
         await openNews();
-        await waitState('failed', 'missing page');
+        await waitState('refresh-required', 'missing page');   // G3: a retired generation's page
         t = await text();
-        assert.ok(t.includes(`Could not load "${FIRST}"`) && t.includes('HTTP 404'), `${label} missing page: ${t}`);
+        assert.ok(t.includes('HTTP 404') && t.includes('Reload'), `${label} missing page: ${t}`);
         assert.ok(!t.includes('No news views published yet'));
         await noHorizontalScroll('missing-page');
         await shot('7-missing-page');

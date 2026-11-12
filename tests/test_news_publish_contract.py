@@ -12,7 +12,7 @@ import shutil
 import subprocess
 import unittest
 
-from test_news_publish import INDEX, ROOT
+from test_news_publish import INDEX, ROOT, qualified
 from test_news_publish_repairs import P1, P2, Small, navigate
 from market_data.news import publish as pub
 from market_data.news.views import build_views, encode, limits_from
@@ -99,7 +99,7 @@ class ChejCases(Small):
         self.assertIn(field, str(cm.exception))
         self.assertEqual([e for e in self.log if e[0] in ("put", "delete")], [], "no public writes")
         self.assertEqual(self.private_files(), before, "no state, snapshot, receipt or lease writes")
-        self.assertEqual(self.public_files(), self.old, "old publication byte-identical")
+        self.assertEqual(self.public_files(), qualified(self.old), "old publication byte-identical")
         self.assertEqual(pub.status(self.private, self.public, self.clock)["problems"], [], "still healthy")
 
     def test_index_without_complete_or_views_total_is_refused(self):
@@ -108,11 +108,14 @@ class ChejCases(Small):
                 files, index = self.index_case(field)
                 self.assert_refused_without_writes(files, f"index.{field} is missing")
                 # The unchanged panel shows the broken index as an incomplete one with "undefined" counts.
-                index["complete"] = index.get("complete", False)
-                pages = {k: json.loads(b) for k, b in files.items() if k != INDEX}
-                good = probe([{"kind": "mount", "index": json.loads(self.good[INDEX]), "pages": pages}])[0]
+                # The panel reads published (generation-qualified) files, so the probe uses those (G3).
+                qgood = qualified(self.good)
+                qindex = json.loads(qgood[INDEX])
+                pages = {k: json.loads(b) for k, b in qgood.items() if k != INDEX}
+                good = probe([{"kind": "mount", "index": qindex, "pages": pages}])[0]
                 if field == "views_total":
-                    bad = probe([{"kind": "mount", "index": dict(index, complete=False), "pages": pages}])[0]
+                    broken = {k: v for k, v in qindex.items() if k != "views_total"}
+                    bad = probe([{"kind": "mount", "index": dict(broken, complete=False), "pages": pages}])[0]
                     self.assertIn("undefined views omitted", bad["text"])
                 self.assertIsNone(render_failed(good, good["text"], mount=True))
 
@@ -155,7 +158,7 @@ class ChejCases(Small):
                 pub.publish(self.private, self.public, files, self.clock)
         report = pub.publish(self.private, self.public, self.good, self.clock)
         self.assertIn(INDEX, report.written)
-        self.assertEqual(self.public_files(), self.good)
+        self.assertEqual(self.public_files(), qualified(self.good))
         navigate(self.raw_public)
         st = pub.status(self.private, self.public, self.clock)
         self.assertEqual(st["problems"], [])
@@ -216,8 +219,13 @@ class RendererSweep(Small):
         self.assertEqual(missed, [], "renderer failures the validator accepted")
 
     def test_every_index_failure_is_refused(self):
-        index = json.loads(self.good[INDEX])
-        pages = {k: json.loads(b) for k, b in self.good.items() if k != INDEX}
+        # G3: the panel mounts published indexes (gen, pages_sha256, qualified keys); refusals are checked
+        # with validate_qualified, which also applies every validate_generation check.
+        from market_data.news.views import generation_name
+        qgood = qualified(self.good)
+        gen = generation_name(self.good)
+        index = json.loads(qgood[INDEX])
+        pages = {k: json.loads(b) for k, b in qgood.items() if k != INDEX}
         self.assertEqual(pub.index_contract_problems(index), [])
         mutations = [(path, new, set_path(index, path, new))
                      for path in generic_paths(index) if path for new in REPLACEMENTS]
@@ -230,9 +238,9 @@ class RendererSweep(Small):
             why = render_failed(result, clean["text"], mount=True)
             if why:
                 broken += 1
-                files = dict(self.good, **{INDEX: encode(mutated)})
+                files = dict(qgood, **{INDEX: encode(mutated)})
                 try:
-                    pub.validate_generation(files)
+                    pub.validate_qualified(gen, files)
                 except pub.PublishError:
                     continue
                 missed.append((".".join(map(str, path)), new, why))
@@ -250,7 +258,7 @@ class RendererSweep(Small):
         index = pub.validate_generation(files)
         self.assertTrue(any(not v["complete"] for v in index["views"]))
         self.assertTrue(any(not json.loads(b)["complete"] for k, b in files.items() if k != INDEX))
-        parsed = {k: json.loads(b) for k, b in files.items()}
+        parsed = {k: json.loads(b) for k, b in qualified(files).items()}
         results = probe([{"kind": "page", "page": p} for k, p in parsed.items() if k != INDEX] +
                         [{"kind": "mount", "index": parsed[INDEX], "pages": parsed}])
         for r in results[:-1]:
@@ -258,7 +266,7 @@ class RendererSweep(Small):
         self.assertEqual(results[-1]["state"], "ready")
         self.assertIn("INCOMPLETE", results[-1]["text"])
         pub.publish(self.private, self.public, files, self.clock)
-        self.assertEqual(self.public_files(), files)
+        self.assertEqual(self.public_files(), qualified(files))
 
 
 if __name__ == "__main__":

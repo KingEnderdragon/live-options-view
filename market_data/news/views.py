@@ -317,7 +317,119 @@ def _trim_coverage_to_budget(cov: dict, omitted: dict, measure, budget: int) -> 
 # --- views ----------------------------------------------------------------------
 
 def page_key(mode: str, stream: str, date: str, n: int) -> str:
+    """The builder's unqualified page key. Generations publish under generation_page_key (G3)."""
     return f"{ROOT}/{mode}/{stream}/{date}/page-{n:04d}.json"
+
+
+# --- generations (G3: generation-qualified, immutable page keys) ----------------------------------
+#
+# The builder emits an unqualified generation (fixed keys, as before). qualify_generation turns it into
+# the published form:
+#   gen        <build_as_of as YYYYMMDDTHHMMSSZ>-<first 16 hex of logical_digest(unqualified files)>,
+#              fixed before any key is qualified, so no key ever contains a digest of itself;
+#   pages      news/v1/views/g/<gen>/<mode>/<stream>/<date>/page-NNNN.json, each with "gen" and with
+#              prev_page/next_page rewritten to keys of the same generation;
+#   index      the fixed news/v1/views/index.json (still the only commit point) with "gen",
+#              views[].first_page rewritten, and "pages_sha256" (final integrity of the qualified
+#              pages; pages never contain the index's digest, so this is not circular).
+
+INDEX_KEY = f"{ROOT}/index.json"
+GENERATION_ROOT = f"{ROOT}/g"
+GEN_PATTERN = r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{16}"
+_GEN_RE = re.compile(rf"^{GEN_PATTERN}$")
+_UNQUALIFIED_RE = re.compile(r"^news/v1/views/(collector|archive|publication)/(all|ai_buildout|oil)/"
+                             r"([0-9]{4}-[0-9]{2}-[0-9]{2})/page-([0-9]{4})\.json$")
+# Headroom the pilot build reserves so that qualified pages and the index stay within their caps:
+# each link gains "g/<gen>/" (26 bytes) and pages/index gain a few fields.
+QUALIFY_SEGMENT = len("g/") + 23 + 1
+QUALIFY_PAGE_RESERVE = 512
+QUALIFY_INDEX_RESERVE = 512
+
+
+def is_gen(value) -> bool:
+    """The generation grammar, with a real UTC instant."""
+    if not isinstance(value, str) or not _GEN_RE.match(value):
+        return False
+    try:
+        return datetime.strptime(value[:16], "%Y%m%dT%H%M%SZ").strftime("%Y%m%dT%H%M%SZ") == value[:16]
+    except ValueError:
+        return False
+
+
+def generation_page_key(gen: str, mode: str, stream: str, date: str, n: int) -> str:
+    return f"{GENERATION_ROOT}/{gen}/{mode}/{stream}/{date}/page-{n:04d}.json"
+
+
+def files_digest(files: dict[str, bytes]) -> str:
+    """SHA-256 over every key and its bytes (length-prefixed, sorted by key)."""
+    import hashlib
+
+    h = hashlib.sha256()
+    for key in sorted(files):
+        body = files[key]
+        h.update(f"{len(key)}:{key}:{len(body)}:".encode("utf-8"))
+        h.update(body)
+    return h.hexdigest()
+
+
+def pages_digest(files: dict[str, bytes]) -> str:
+    """Final integrity of a generation's pages: files_digest over every key except the index."""
+    return files_digest({k: v for k, v in files.items() if k != INDEX_KEY})
+
+
+def generation_name(files: dict[str, bytes]) -> str:
+    """The logical generation id of an unqualified build (deterministic: same build, same gen)."""
+    index = json.loads(files[INDEX_KEY])
+    built = parse_iso(index["build_as_of"])
+    return f"{built.strftime('%Y%m%dT%H%M%SZ')}-{files_digest(files)[:16]}"
+
+
+def qualify_generation(files: dict[str, bytes]) -> tuple[str, dict[str, bytes]]:
+    """(gen, published files) for an unqualified build that already passed validation.
+
+    Pure and deterministic. Every page key becomes generation_page_key(gen, ...); every link that names a
+    page must name one of this build's pages (BuildError otherwise: no link may leave the generation).
+    """
+    gen = generation_name(files)
+    mapping = {}
+    for key in files:
+        if key == INDEX_KEY:
+            continue
+        m = _UNQUALIFIED_RE.match(key)
+        if not m:
+            raise BuildError(f"{key} is not an unqualified view page key")
+        mapping[key] = generation_page_key(gen, m.group(1), m.group(2), m.group(3), int(m.group(4)))
+
+    def relink(value, where):
+        if value is None:
+            return None
+        if value not in mapping:
+            raise BuildError(f"{where} links outside the generation: {value!r}")
+        return mapping[value]
+
+    out = {}
+    for key, body in files.items():
+        if key == INDEX_KEY:
+            continue
+        page = json.loads(body)
+        page["gen"] = gen
+        for field in ("prev_page", "next_page"):
+            if field in page:
+                page[field] = relink(page[field], f"{key} {field}")
+        out[mapping[key]] = encode(page)
+    index = json.loads(files[INDEX_KEY])
+    index["views"] = [dict(v, first_page=relink(v["first_page"], "index first_page")) for v in index["views"]]
+    index["gen"] = gen
+    index["pages_sha256"] = pages_digest(out)
+    out[INDEX_KEY] = encode(index)
+    return gen, out
+
+
+def qualified_limits(limits: "Limits" = None) -> "Limits":
+    """Limits for a build that will be qualified: room for the longer keys and the generation fields."""
+    limits = limits or LIMITS
+    return replace(limits, page_bytes=limits.page_bytes - QUALIFY_PAGE_RESERVE,
+                   index_bytes=limits.index_bytes - QUALIFY_INDEX_RESERVE - QUALIFY_SEGMENT * limits.index_views)
 
 
 def date_window(date: str, as_of: datetime) -> tuple[datetime, datetime] | None:

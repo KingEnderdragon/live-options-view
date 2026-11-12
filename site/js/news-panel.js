@@ -13,7 +13,12 @@
 // fetching, on both the /browser-data proxy and the direct public-R2 path, so
 // a key taken from a page (first_page, the picker, prev/next) that fails is
 // shown as a failure and never requested. "No news views published yet" is
-// shown only for a 404 on index.json; every other problem is a failure.
+// shown only for a 404 on index.json. G3: pages live in immutable generations
+// (news/v1/views/g/<gen>/...); a reader follows only links of the generation
+// its index names, for at most LEASE_MS from the index request; a page 404, a
+// request past its deadline, a generation mismatch or an ended lease shows
+// "refresh required" (reload the fixed index), never another generation's
+// pages. Every other problem is a failure.
 (function (root) {
   'use strict';
 
@@ -24,7 +29,16 @@
   var MODES = ['collector', 'archive', 'publication'];
   var STREAMS = ['all', 'ai_buildout', 'oil'];
   var MAX_PAGES = 20;
-  var VIEW_KEY = /^news\/v1\/views\/(collector|archive|publication)\/(all|ai_buildout|oil)\/([0-9]{4})-([0-9]{2})-([0-9]{2})\/page-([0-9]{4})\.json$/;
+  // G3: pages are immutable and generation-qualified (news/v1/views/g/<gen>/...); index.json is the fixed
+  // commit point. <gen> = YYYYMMDDTHHMMSSZ-<16 hex>. Same rule as publish.py, backend/browser-data.js and
+  // frontend/preview-policy.mjs.
+  var GEN = /^([0-9]{4})([0-9]{2})([0-9]{2})T([0-9]{2})([0-9]{2})([0-9]{2})Z-[0-9a-f]{16}$/;
+  var VIEW_KEY = /^news\/v1\/views\/g\/([0-9]{8}T[0-9]{6}Z-[0-9a-f]{16})\/(collector|archive|publication)\/(all|ai_buildout|oil)\/([0-9]{4})-([0-9]{2})-([0-9]{2})\/page-([0-9]{4})\.json$/;
+  // Owner-approved defaults (config.GEN_*): a reader follows one index for at most LEASE_MS from the
+  // moment its request started; every request has a DEADLINE_MS deadline.
+  var LEASE_MS = 30 * 60 * 1000;
+  var DEADLINE_MS = 20 * 1000;
+  var CLOCK_AGREE_MS = 2 * 60 * 1000;
   var URL_MAX = 2048;
   // Whitespace, C0/C1 controls and invisible format characters (bidi, zero-width).
   var BAD_URL_CHARS = /[\s\u0000-\u001f\u007f-\u009f­​-‏‪-‮⁠-⁤﻿]/;
@@ -51,22 +65,38 @@
     return u.href;
   }
 
-  // The index, or one fixed mode / stream, a real calendar date and page 0001-0020. Nothing else.
-  function isNewsViewKey(key) {
-    if (key === INDEX_KEY) return true;
-    if (typeof key !== 'string') return false;
+  function realDate(y, mo, d) {
+    var date = y + '-' + mo + '-' + d;
+    var t = new Date(date + 'T00:00:00Z');
+    return isFinite(t.getTime()) && t.toISOString().slice(0, 10) === date;
+  }
+
+  // A generation id with a real UTC instant.
+  function isGen(value) {
+    if (typeof value !== 'string') return false;
+    var m = GEN.exec(value);
+    if (!m || !realDate(m[1], m[2], m[3])) return false;
+    return Number(m[4]) < 24 && Number(m[5]) < 60 && Number(m[6]) < 60;
+  }
+
+  // The generation a published page key belongs to, or null.
+  function genOf(key) {
+    if (typeof key !== 'string') return null;
     var m = VIEW_KEY.exec(key);
-    if (!m) return false;
-    var n = Number(m[6]);
-    if (n < 1 || n > MAX_PAGES) return false;
-    var date = m[3] + '-' + m[4] + '-' + m[5];
-    var d = new Date(date + 'T00:00:00Z');
-    return isFinite(d.getTime()) && d.toISOString().slice(0, 10) === date;
+    if (!m || !isGen(m[1])) return null;
+    var n = Number(m[7]);
+    if (n < 1 || n > MAX_PAGES || !realDate(m[4], m[5], m[6])) return null;
+    return m[1];
+  }
+
+  // The index, or one generation / mode / stream, a real calendar date and page 0001-0020. Nothing else.
+  function isNewsViewKey(key) {
+    return key === INDEX_KEY || genOf(key) !== null;
   }
 
   function newsError(kind, message) {
     var e = new Error(message);
-    e.newsKind = kind;  // refused | absent | http | network | json | invalid | render
+    e.newsKind = kind;  // refused | absent | gone | deadline | http | network | json | invalid | render
     return e;
   }
 
@@ -76,18 +106,34 @@
   }
 
   // base: BROWSER_DATA ('/browser-data' on the production origin, the public R2 origin otherwise).
-  // Returns fetchJson(key) -> Promise<object>. The key check runs before any request is made.
-  function makeFetcher(base, fetchImpl, now) {
+  // Returns fetchJson(key) -> Promise<object>. The key check runs before any request is made. Every
+  // request (headers and body) must finish within deadlineMs (default DEADLINE_MS) or it fails with
+  // kind 'deadline' and its late body is discarded; it is aborted when AbortController exists. Requests
+  // ask for no cached copy (cache: 'no-store'); the existing ?_= query stays.
+  function makeFetcher(base, fetchImpl, now, deadlineMs, timers) {
     var root = String(base).replace(/\/+$/, '');
+    var limit = deadlineMs || DEADLINE_MS;
+    var T = timers || { set: function (f, ms) { return setTimeout(f, ms); }, clear: function (h) { clearTimeout(h); } };
     return function fetchJson(key) {
       if (!isNewsViewKey(key)) {
         return Promise.reject(newsError('refused', 'refused: not a published news view key, so it was not requested'));
       }
       var url = root + '/' + key + '?_=' + Math.floor(now());
-      return Promise.resolve().then(function () {
-        return fetchImpl(url, { credentials: 'omit' });
+      var ctrl = typeof AbortController === 'function' ? new AbortController() : null;
+      var timer = null;
+      var expired = new Promise(function (_, reject) {
+        timer = T.set(function () {
+          if (ctrl) { try { ctrl.abort(); } catch (e) { /* already settled */ } }
+          reject(newsError('deadline', key + ': no complete response within ' + Math.round(limit / 1000) + ' s'));
+        }, limit);
+      });
+      var work = Promise.resolve().then(function () {
+        var init = { credentials: 'omit', cache: 'no-store' };
+        if (ctrl) init.signal = ctrl.signal;
+        return fetchImpl(url, init);
       }).then(function (r) {
         if (r.status === 404 && key === INDEX_KEY) throw newsError('absent', 'No news views published yet');
+        if (r.status === 404) throw newsError('gone', key + ': no longer published (HTTP 404)');
         if (!r.ok) throw newsError('http', key + ': HTTP ' + r.status);
         return r.text().then(function (body) {
           try { return JSON.parse(body); } catch (e) { throw newsError('json', key + ': response is not valid JSON'); }
@@ -95,6 +141,8 @@
       }, function (e) {
         throw newsError('network', key + ': request failed (' + (e && e.message ? e.message : e) + ')');
       });
+      return Promise.race([work, expired]).then(function (v) { T.clear(timer); return v; },
+        function (e) { T.clear(timer); throw e; });
     };
   }
 
@@ -139,6 +187,15 @@
     var problems = [];
     if (!index || index.schema_version !== INDEX_SCHEMA) problems.push('schema_version is not ' + INDEX_SCHEMA);
     if (!index || !Array.isArray(index.views)) problems.push('views is not a list');
+    if (!index || !isGen(index.gen)) problems.push('gen is not a generation id');
+    if (!index || typeof index.pages_sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(index.pages_sha256)) {
+      problems.push('pages_sha256 is not a SHA-256');
+    }
+    if (index && Array.isArray(index.views) && isGen(index.gen)) {
+      index.views.forEach(function (v, i) {
+        if (!isObj(v) || genOf(v.first_page) !== index.gen) problems.push('views[' + i + '].first_page is not in generation ' + index.gen);
+      });
+    }
     return problems;
   }
 
@@ -414,17 +471,72 @@
     return box;
   }
 
+  // The reader's lease on one index (G3). Both clocks start when the index request starts; the lease
+  // holds only while the monotonic and wall clocks both show less than leaseMs, the wall clock has not
+  // gone backwards, and the two agree within CLOCK_AGREE_MS. Sleep (monotonic paused, wall advanced) and
+  // clock changes therefore end it. clocks: { mono: () => ms, wall: () => ms }.
+  function startLease(clocks, leaseMs) {
+    var m0 = clocks.mono(), w0 = clocks.wall();
+    return function valid() {
+      var m = clocks.mono() - m0, w = clocks.wall() - w0;
+      return m >= 0 && m < leaseMs && w >= 0 && w < leaseMs && Math.abs(m - w) < CLOCK_AGREE_MS;
+    };
+  }
+
+  function defaultClocks() {
+    var perf = typeof performance !== 'undefined' && performance && typeof performance.now === 'function' ? performance : null;
+    return { mono: perf ? function () { return perf.now(); } : function () { return Date.now(); },
+      wall: function () { return Date.now(); } };
+  }
+
   // fetchJson(key) -> Promise<object>; keys are paths under the views root.
-  function mount(doc, container, fetchJson, indexKey) {
+  // opts (all optional): clocks {mono, wall}, leaseMs, events (an object with addEventListener, e.g.
+  // window: the lease is rechecked on visibilitychange, pageshow and online).
+  function mount(doc, container, fetchJson, indexKey, opts) {
+    opts = opts || {};
+    var clocks = opts.clocks || defaultClocks();
+    var leaseMs = opts.leaseMs || LEASE_MS;
     var pickerSlot = el(doc, 'div');
     var pageSlot = el(doc, 'div');
     add(container, pickerSlot, pageSlot);
     container.setAttribute('data-state', 'loading');
+    var leaseValid = startLease(clocks, leaseMs);   // from the moment the index request starts
+    var dead = false;                               // set once this mount has asked for a refresh
+
+    // Never mixes generations and never falls back: the reader reloads the fixed index instead.
+    function refresh(reason) {
+      if (dead) return;
+      dead = true;
+      clear(pickerSlot);
+      clear(pageSlot);
+      container.removeAttribute('data-pending');
+      container.removeAttribute('data-page');
+      var box = el(doc, 'div', 'np-incomplete np-refresh');
+      box.setAttribute('role', 'alert');
+      add(box, el(doc, 'strong', null, 'This view was replaced or has expired. '),
+        el(doc, 'span', null, 'Reload to see the current publication (' + reason + ').'));
+      var button = el(doc, 'button', 'np-btn', 'Reload');
+      button.addEventListener('click', function () {
+        clear(container);
+        mount(doc, container, fetchJson, indexKey, opts);
+      });
+      add(box, button);
+      add(pageSlot, box);
+      container.setAttribute('data-state', 'refresh-required');
+    }
+
     return fetchJson(indexKey).then(function (index) {
       var problems = validateIndex(index);
       if (problems.length) throw new Error(problems.join('; '));
       var latest = 0;
+      if (opts.events && typeof opts.events.addEventListener === 'function') {
+        var recheck = function () { if (!dead && !leaseValid()) refresh('the index lease ended'); };
+        ['visibilitychange', 'pageshow', 'online'].forEach(function (type) { opts.events.addEventListener(type, recheck); });
+      }
       function show(key) {
+        if (dead) return Promise.resolve();
+        if (!leaseValid()) { refresh('the index lease ended'); return Promise.resolve(); }
+        if (genOf(key) !== index.gen) { refresh('a link left generation ' + index.gen); return Promise.resolve(); }
         var ticket = ++latest;
         container.setAttribute('data-pending', key);
         // One failure path for fetch errors, invalid pages and render errors: the panel shows the
@@ -438,7 +550,9 @@
           container.setAttribute('data-state', 'failed');
         }
         return fetchJson(key).then(function (page) {
-          if (ticket !== latest) return;  // a newer choice was made while this one loaded
+          if (dead || ticket !== latest) return;  // refreshed, or a newer choice was made while this one loaded
+          if (!leaseValid()) { refresh('the index lease ended while the page loaded'); return; }
+          if (!isObj(page) || page.gen !== index.gen) { refresh('the page is not from generation ' + index.gen); return; }
           try {
             var problems = validatePage(page);
             if (problems.length) throw newsError('invalid', 'not a valid news view page (' + problems.join('; ') + ')');
@@ -453,7 +567,8 @@
           container.setAttribute('data-page', key);
           container.setAttribute('data-state', 'ready');
         }, function (e) {
-          if (ticket !== latest) return;  // a stale failure must not replace the newer choice either
+          if (dead || ticket !== latest) return;  // a stale failure must not replace the newer choice either
+          if (e && (e.newsKind === 'gone' || e.newsKind === 'deadline')) { refresh(e.message); return; }
           fail(e);
         });
       }
@@ -481,7 +596,9 @@
 
   var api = { safeUrl: safeUrl, validatePage: validatePage, validateIndex: validateIndex, renderPage: renderPage,
     mount: mount, segmentText: segmentText, isNewsViewKey: isNewsViewKey, makeFetcher: makeFetcher,
-    VIEW_SCHEMA: VIEW_SCHEMA, INDEX_KEY: INDEX_KEY, MODES: MODES, STREAMS: STREAMS, MAX_PAGES: MAX_PAGES };
+    isGen: isGen, genOf: genOf, startLease: startLease,
+    VIEW_SCHEMA: VIEW_SCHEMA, INDEX_KEY: INDEX_KEY, MODES: MODES, STREAMS: STREAMS, MAX_PAGES: MAX_PAGES,
+    LEASE_MS: LEASE_MS, DEADLINE_MS: DEADLINE_MS, CLOCK_AGREE_MS: CLOCK_AGREE_MS };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.NewsPanel = api;
 })(typeof window !== 'undefined' ? window : this);
@@ -492,5 +609,5 @@
 function loadNewsPanel() {
   return NewsPanel.mount(document, document.getElementById('news-panel'),
     NewsPanel.makeFetcher(BROWSER_DATA, function (url, opts) { return fetch(url, opts); }, Date.now),
-    NewsPanel.INDEX_KEY);
+    NewsPanel.INDEX_KEY, { events: typeof window !== 'undefined' ? window : null });
 }

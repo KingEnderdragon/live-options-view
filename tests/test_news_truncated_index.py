@@ -11,7 +11,7 @@ and temporary stores.
 import json
 import unittest
 
-from test_news_publish import INDEX, Base
+from test_news_publish import INDEX, Base, qualified
 from test_news_publish_contract import probe, render_failed
 from test_news_publish_repairs import DATE, Small, navigate
 from market_data.news import publish as pub
@@ -86,13 +86,13 @@ class Cases:
     def assert_publishes_navigates_and_renders(self, files):
         self.assertEqual(pub.validate_generation(files)["views_total"], self.views)
         pub.publish(self.private, self.public, files, self.clock)
-        self.assertEqual(self.public_files(), files, "the public views are exactly this generation")
+        self.assertEqual(self.public_files(), qualified(files), "the live generation is exactly this build")
         chains = navigate(self.raw_public)
         index = json.loads(files[INDEX])
         self.assertEqual(list(chains), [view_id(v) for v in index["views"]])
         for v in index["views"]:
             self.assertEqual(len(chains[view_id(v)]), v["page_count"])
-        parsed = {k: json.loads(b) for k, b in files.items()}
+        parsed = {k: json.loads(b) for k, b in qualified(files).items()}
         results = probe([{"kind": "page", "page": p} for k, p in parsed.items() if k != INDEX] +
                         [{"kind": "mount", "index": parsed[INDEX], "pages": parsed}])
         for r in results[:-1]:
@@ -165,7 +165,7 @@ class Cases:
         with self.assertRaisesRegex(pub.PublishError, f"lists no views although {self.views} were built"):
             pub.publish(self.private, self.public, empty_cut, self.clock)
         self.assertEqual([e for e in self.log if e[0] in ("put", "delete")], [], "no public writes")
-        self.assertEqual(self.public_files(), good, "the previous good generation is byte-identical")
+        self.assertEqual(self.public_files(), qualified(good), "the previous good generation is byte-identical")
         self.assertEqual({k: self.private.get(k) for k in self.private.list("")}, before_private,
                          "no state, snapshot, lease or receipt writes")
         self.assertEqual(pub.status(self.private, self.public, self.clock)["problems"], [])
@@ -198,10 +198,10 @@ class Cases:
         pub.publish(self.private, self.public, self.full, self.clock)
         cut = self.build(index_views=3)
         pub.publish(self.private, self.public, cut, self.clock)
-        self.assertEqual(self.public_files(), cut, "the omitted views' old pages are removed")
+        self.assertEqual(self.public_files(), qualified(cut), "the live generation names only the cut's views")
         navigate(self.raw_public)
         pub.publish(self.private, self.public, self.full, self.clock)
-        self.assertEqual(self.public_files(), self.full)
+        self.assertEqual(self.public_files(), qualified(self.full))
         navigate(self.raw_public)
 
     def test_invalid_input_leaves_the_previous_good_generation_untouched(self):
@@ -231,7 +231,7 @@ class Cases:
                 with self.assertRaises(pub.PublishError):
                     pub.publish(self.private, self.public, files, self.clock)
                 self.assertEqual([e for e in self.log if e[0] in ("put", "delete")], [], "no public writes")
-                self.assertEqual(self.public_files(), good, "previous good generation byte-identical")
+                self.assertEqual(self.public_files(), qualified(good), "previous good generation byte-identical")
                 self.assertEqual({k: self.private.get(k) for k in self.private.list("")}, before_private)
                 self.assertEqual(pub.status(self.private, self.public, self.clock)["problems"], [])
         navigate(self.raw_public)

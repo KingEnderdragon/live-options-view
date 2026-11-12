@@ -38,6 +38,15 @@
   "raw_archive": "keep (immutable history); review at the end of the pilot",
   "snapshots": 3,
   "receipts": "keep for the pilot",
-  "public_views": "the last views.days UTC dates; older pages are deleted after each new index is committed"
+  "public_views": "the last views.days UTC dates, as immutable generations under news/v1/views/g/<gen>/; a generation's pages are deleted only once it has been out of the index for the reader grace (see generations)"
+ },
+ "generations": {
+  "note": "Owner-approved defaults (2026-11-12, G2 v2). A replaced generation stays public for at least reader_grace_s; deletion needs both the producer clock and the store clock to show reader_grace_s + clock_epsilon_s + clock_skew_s (49 min), agreeing within clock_skew_s. clock_epsilon_s is an ASSUMED store-clock bound that has not been verified for any provider, so clock_bound_verified stays false and expiry deletion is refused (reported by publish-status) until a deployment verifies it.",
+  "reader_grace_s": 2700,
+  "clock_epsilon_s": 120,
+  "clock_skew_s": 120,
+  "page_cap": 6300,
+  "fence_delay_s": 900,
+  "clock_bound_verified": false
  }
 }

@@ -33,22 +33,32 @@ export function isPublicArchiveKey(key) {
   return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === date;
 }
 // MediaFlow news view pages read by the News panel (accepted MediaFlow M4b-M6,
-// 8639c6d): exactly the index, or one fixed mode / stream, a real calendar
-// date and page 0001-0020 (views.py's MODES, STREAM_KEYS and pages_per_view).
-// site/js/news-panel.js applies the same check before every request, and
-// frontend/preview-policy.mjs mirrors it. Exact keys only: this replaces the
-// prospective news/v1/views/** prefix grant removed 2026-11-11, which stays
-// removed (news/v1/views/today.json and any other shape remain 404).
-const NEWS_VIEW_INDEX_KEY = 'news/v1/views/index.json';
-export function isPublicNewsViewKey(key) {
-  if (key === NEWS_VIEW_INDEX_KEY) return true;
-  const match = /^news\/v1\/views\/(?:collector|archive|publication)\/(?:all|ai_buildout|oil)\/([0-9]{4})-([0-9]{2})-([0-9]{2})\/page-([0-9]{4})\.json$/.exec(key);
-  if (!match) return false;
-  const page = Number(match[4]);
-  if (page < 1 || page > 20) return false;
-  const date = `${match[1]}-${match[2]}-${match[3]}`;
+// 8639c6d; G3 generations): exactly the fixed index, or one immutable
+// generation g/<YYYYMMDDTHHMMSSZ-16hex> (a real UTC instant) / mode / stream /
+// real calendar date / page 0001-0020 (views.py's MODES, STREAM_KEYS and
+// pages_per_view). site/js/news-panel.js applies the same check before every
+// request, and frontend/preview-policy.mjs mirrors it. Exact keys only: the
+// prospective news/v1/views/** prefix grant removed 2026-11-11 stays removed
+// (news/v1/views/today.json and unqualified pages remain 404).
+export const NEWS_VIEW_INDEX_KEY = 'news/v1/views/index.json';
+// Upstream deadline for News keys only (G3; below the panel's 20 s request
+// deadline). It bounds the wait for the upstream response; the panel's own
+// deadline also covers the body.
+export const NEWS_PROXY_DEADLINE_MS = 15000;
+function realDate(y, mo, d) {
+  const date = `${y}-${mo}-${d}`;
   const parsed = new Date(`${date}T00:00:00Z`);
   return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === date;
+}
+export function isPublicNewsViewKey(key) {
+  if (key === NEWS_VIEW_INDEX_KEY) return true;
+  const match = /^news\/v1\/views\/g\/([0-9]{4})([0-9]{2})([0-9]{2})T([0-9]{2})([0-9]{2})([0-9]{2})Z-[0-9a-f]{16}\/(?:collector|archive|publication)\/(?:all|ai_buildout|oil)\/([0-9]{4})-([0-9]{2})-([0-9]{2})\/page-([0-9]{4})\.json$/.exec(key);
+  if (!match) return false;
+  if (!realDate(match[1], match[2], match[3]) || Number(match[4]) > 23 || Number(match[5]) > 59 ||
+      Number(match[6]) > 59) return false;
+  const page = Number(match[10]);
+  if (page < 1 || page > 20) return false;
+  return realDate(match[7], match[8], match[9]);
 }
 // Traversal guard (was the %2e check inside the removed news prefix rule):
 // literal and percent-encoded dot traversal (%2e normalizes to a dot
@@ -74,6 +84,11 @@ export async function handleBrowserData(request, url) {
   if (url.search && !/^\?_=[0-9]{1,20}$/.test(url.search)) {
     return new Response('Invalid query', { status: 400 });
   }
+  // News keys (G3) get a finite upstream deadline and, for the index, no-store.
+  // Every other key keeps its existing behaviour.
+  const news = isPublicNewsViewKey(key);
+  const ctrl = news && typeof AbortController === 'function' ? new AbortController() : null;
+  const timer = ctrl ? setTimeout(() => ctrl.abort(), NEWS_PROXY_DEADLINE_MS) : null;
   try {
     const upstream = await fetch(`${R2_ORIGIN}/${key}${url.search}`, {
       method: 'GET',
@@ -81,6 +96,7 @@ export async function handleBrowserData(request, url) {
       credentials: 'omit',
       redirect: 'manual',
       cf: { cacheTtl: 0, cacheEverything: false },
+      ...(ctrl ? { signal: ctrl.signal } : {}),
     });
     // Preserve status and stream bytes without parsing. Limit response headers
     // so upstream cookies/auth cannot affect this origin, and Location cannot
@@ -91,11 +107,16 @@ export async function handleBrowserData(request, url) {
       const value = upstream.headers.get(name);
       if (value !== null) headers.set(name, value);
     }
+    // The index is the only mutable News object: never cacheable, whatever upstream says.
+    if (key === NEWS_VIEW_INDEX_KEY) headers.set('Cache-Control', 'no-store');
     return new Response(upstream.body, {
       status: upstream.status, statusText: upstream.statusText, headers,
     });
   } catch {
+    if (ctrl && ctrl.signal.aborted) return new Response('News upstream deadline exceeded', { status: 504 });
     return new Response('Public data upstream unavailable', { status: 502 });
+  } finally {
+    if (timer !== null) clearTimeout(timer);
   }
 }
 export const LEGACY_R2_PROXY_PREFIX = '/r2-proxy/';

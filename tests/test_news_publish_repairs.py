@@ -1,5 +1,8 @@
 """M5.1: Chej's four publisher repairs (validation, navigation, generation identity, abandoned leases).
 
+G3: the old publication is established by a real publish (generation + ledger), and navigation now
+cannot mix builds (immutable generation keys). The G3 edits were NOT RUN (static review only).
+
 Local only: fixture feeds, temporary directory stores, subprocesses that exit abruptly on purpose.
 """
 import json
@@ -10,15 +13,21 @@ import sys
 import textwrap
 from datetime import timedelta
 
-from test_news_publish import INDEX, PANEL, ROOT, Base, RecordingStore
+from test_news_publish import INDEX, PANEL, ROOT, Base, RecordingStore, qualified
 from market_data.news import publish as pub
 from market_data.news.archive import WriterBusy
 from market_data.news.reader import load_archive
-from market_data.news.views import build_views, encode, limits_from
+from market_data.news.views import build_views, encode, generation_name, generation_page_key, limits_from
 
 DATE = "2026-11-09"
 P1 = f"news/v1/views/collector/oil/{DATE}/page-0001.json"
 P2 = f"news/v1/views/collector/oil/{DATE}/page-0002.json"
+
+
+def qkey(files, key):
+    """The published key of builder page `key` in the generation `files` becomes."""
+    _, _, _, mode, stream, date, name = key.split("/")
+    return generation_page_key(generation_name(files), mode, stream, date, int(name[5:9]))
 
 
 def navigate(store) -> dict:
@@ -63,10 +72,14 @@ class Small(Base):
                            limits=limits_from(rows_per_page=rows_per_page))
 
     def reset_public(self, files):
+        """Make `files` (builder output) the only, properly published generation: empty public store, fresh
+        publisher state and ledger (the raw archive is kept), then a real publish."""
         for key in self.raw_public.list(""):
             self.raw_public.delete(key)
-        for key, body in files.items():
-            self.raw_public.put(key, body)
+        for key in self.private.list(pub.PUBLISH_PREFIX):
+            self.private.delete(key)
+        self.raw_public.fail = None
+        pub.publish(self.private, self.public, files, self.clock)
         self.log.clear()
 
 
@@ -107,7 +120,7 @@ class Validation(Small):
                 with self.assertRaises(pub.PublishError):
                     pub.publish(self.private, self.public, self.mutated(key, change), self.clock)
                 self.assertEqual([op for op, _ in self.log if op in ("put", "delete")], [], name)
-                self.assertEqual(self.public_files(), self.old, f"{name}: old publication untouched")
+                self.assertEqual(self.public_files(), qualified(self.old), f"{name}: old publication untouched")
 
     def test_index_and_orphan_problems_are_rejected(self):
         index = json.loads(self.good[INDEX])
@@ -120,7 +133,7 @@ class Validation(Small):
             with self.subTest(name):
                 with self.assertRaises(pub.PublishError):
                     pub.publish(self.private, self.public, files, self.clock)
-                self.assertEqual(self.public_files(), self.old)
+                self.assertEqual(self.public_files(), qualified(self.old))
 
     def test_render_checks_match_the_panel(self):
         node = shutil.which("node")
@@ -147,24 +160,25 @@ class Navigation(Small):
     """Growth, shrinkage and interruption, checked by following links from the live index."""
 
     def crash_at_every_write(self, old, new):
-        page_puts = [k for k in pub.page_write_order(new)]
+        page_puts = [k for k in pub.page_write_order(qualified(new))]
         mixed_views = 0
         for crash_at in range(len(page_puts) + 1):     # the last value crashes on the index write
             with self.subTest(crash_at=crash_at):
                 self.reset_public(old)
                 self.private.delete(pub.PUBLISH_LEASE_KEY)
                 self.raw_public.fail = ("put", lambda k: True, crash_at)
-                with self.assertRaises(RuntimeError):
+                # A crash on a page is raised as is; on the index it leaves the candidate uncertain.
+                with self.assertRaises((RuntimeError, pub.PublishError)):
                     pub.publish(self.private, self.public, new, self.clock)
                 self.raw_public.fail = None
                 chains = navigate(self.raw_public)          # every reachable page exists and renders
-                self.assertEqual(self.raw_public.get(INDEX), old[INDEX], "old index still live")
+                self.assertEqual(self.raw_public.get(INDEX), qualified(old)[INDEX], "old index still live")
                 mixed_views += sum(1 for c in chains.values() if len({b for _, b in c}) > 1)
                 pub.publish(self.private, self.public, new, self.clock)      # the next cycle
                 final = navigate(self.raw_public)
                 build = json.loads(new[INDEX])["build_as_of"]
                 self.assertTrue(all(b == build for c in final.values() for _, b in c))
-                self.assertEqual(self.public_files(), new)
+                self.assertEqual(self.public_files(), qualified(new))
         return mixed_views
 
     def test_growth_one_page_to_two_with_page_two_failing(self):
@@ -172,10 +186,13 @@ class Navigation(Small):
         self.assertEqual(json.loads(old[P1])["page_count"], 1)
         self.assertGreaterEqual(json.loads(new[P1])["page_count"], 2)
         self.reset_public(old)
-        self.raw_public.fail = ("put", lambda k: k == P2, 0)        # Chej's case
+        new_p2 = qkey(new, P2)
+        self.raw_public.fail = ("put", lambda k: k == new_p2, 0)        # Chej's case
         with self.assertRaises(RuntimeError):
             pub.publish(self.private, self.public, new, self.clock)
-        self.assertEqual(self.raw_public.get(P1), old[P1], "page 1 is not rewritten before page 2 exists")
+        old_p1 = qkey(old, P1)
+        self.assertEqual(self.raw_public.get(old_p1), qualified(old)[old_p1], "the old generation's pages are immutable")
+        self.assertEqual(self.raw_public.get(INDEX), qualified(old)[INDEX])
         navigate(self.raw_public)
 
     def test_growth_crash_anywhere_leaves_navigation_working(self):
@@ -185,10 +202,11 @@ class Navigation(Small):
         mixed = self.crash_at_every_write(self.gen("2026-11-09T10:10:00Z", 2), self.gen("2026-11-09T10:20:00Z", 50))
         self.assertEqual(mixed, 0, "a one-page result replaces each view in one write")
 
-    def test_same_count_replacement_may_mix_builds_but_never_breaks_links(self):
-        # The documented limit of fixed keys: a reader can meet pages of two builds until the retry.
+    def test_same_count_replacement_never_mixes_builds(self):
+        # G3 removes the documented fixed-key limit: a reader following the live index sees one build only,
+        # whatever write the publication crashes on.
         mixed = self.crash_at_every_write(self.gen("2026-11-09T10:10:00Z", 2), self.gen("2026-11-09T10:20:00Z", 2))
-        self.assertGreater(mixed, 0, "mixing is possible mid-publication (generation keys proposal)")
+        self.assertEqual(mixed, 0, "generation keys: no mixing mid-publication")
 
 
 class Identity(Small):
@@ -206,9 +224,9 @@ class Identity(Small):
         self.assertEqual(pub.read_state(self.private)["committed"]["gen_id"], ib)
         pub.stop(self.private, self.clock, "restore drill")
         pub.restore(self.private, self.public, ia, self.clock)
-        self.assertEqual(self.public_files(), a)
+        self.assertEqual(self.public_files(), qualified(a))
         pub.restore(self.private, self.public, ib, self.clock)
-        self.assertEqual(self.public_files(), b)
+        self.assertEqual(self.public_files(), qualified(b))
 
     def test_conflicting_snapshot_reuse_is_refused_before_public_writes(self):
         a = self.gen("2026-11-09T10:20:00Z", 50)
@@ -234,11 +252,16 @@ CRASH = textwrap.dedent("""
 
     class Dying(LocalObjectStore):
         n = 0
-        def put(self, key, data, content_type="application/octet-stream"):
+        def _tick(self):
             Dying.n += 1
             if {where!r} == "publish" and Dying.n == 3:
                 os._exit(3)                      # abrupt exit: no finally, no lease release
-            super().put(key, data, content_type)
+        def put(self, key, data, content_type="application/octet-stream", cache_control=None):
+            self._tick()
+            super().put(key, data, content_type, cache_control=cache_control)
+        def put_if_absent(self, key, data, content_type="application/octet-stream", cache_control=None):
+            self._tick()
+            return super().put_if_absent(key, data, content_type=content_type, cache_control=cache_control)
 
     def dying_fetch(url, timeout):
         if {where!r} == "collect":

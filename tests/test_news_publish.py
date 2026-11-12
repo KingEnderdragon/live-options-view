@@ -1,5 +1,9 @@
 """M5: local publisher, inactive pilot config, stop/restore/withdraw (fixtures and local stores only).
 
+G3: publication writes immutable generations (news/v1/views/g/<gen>/...) and the fixed index; a replaced
+generation stays public (protected) instead of being deleted at the commit. Tests written for G3 were
+NOT RUN when they were added (static review only); see the G3 coverage map.
+
 Nothing here contacts a network or a bucket: feeds come from tests/fixtures/news/feeds and both
 stores are temporary directories.
 """
@@ -19,25 +23,33 @@ from market_data.news import publish as pub
 from market_data.news.__main__ import main
 from market_data.news.archive import LocalObjectStore, WriterBusy
 from market_data.news.reader import load_archive
-from market_data.news.views import LIMITS, build_views
+from market_data.news.views import LIMITS, build_views, generation_name, qualified_limits, qualify_generation
 
 CONFIG = ROOT / "market_data" / "news" / "deploy" / "news-pilot.json"
 PANEL = ROOT / "site" / "js" / "news-panel.js"
 INDEX = pub.PUBLIC_INDEX
+GEN_EXAMPLE = "20261109T100500Z-0123456789abcdef"
 
 
 def config():
     return pub.load_pilot_config(CONFIG)
 
 
+def qualified(files):
+    """The published (generation-qualified) form of a builder generation."""
+    return qualify_generation(files)[1]
+
+
 class RecordingStore(LocalObjectStore):
-    """Local store that logs operations and can fail or corrupt a chosen operation."""
+    """Local store that logs operations, records Cache-Control, and can fail or corrupt a chosen operation.
+    put_if_absent (immutable generation pages) is logged and failed as a "put"."""
 
     def __init__(self, root, log=None):
         super().__init__(root)
         self.log = log if log is not None else []
         self.fail = None        # (op, predicate, remaining_successes)
         self.corrupt = None     # predicate on key
+        self.cache = {}         # key -> Cache-Control of the last successful write
 
     def _maybe_fail(self, op, key):
         if self.fail and self.fail[0] == op and self.fail[1](key):
@@ -46,12 +58,23 @@ class RecordingStore(LocalObjectStore):
                 raise RuntimeError(f"simulated crash during {op} {key}")
             self.fail = (self.fail[0], self.fail[1], self.fail[2] - 1)
 
-    def put(self, key, data, content_type="application/octet-stream"):
+    def put(self, key, data, content_type="application/octet-stream", cache_control=None):
         self._maybe_fail("put", key)
         if self.corrupt and self.corrupt(key):
             data = data + b" "
         self.log.append(("put", key))
-        super().put(key, data, content_type)
+        super().put(key, data, content_type, cache_control=cache_control)
+        self.cache[key] = cache_control
+
+    def put_if_absent(self, key, data, content_type="application/octet-stream", cache_control=None):
+        self._maybe_fail("put", key)
+        if self.corrupt and self.corrupt(key):
+            data = data + b" "
+        created = super().put_if_absent(key, data, content_type=content_type, cache_control=cache_control)
+        if created:
+            self.log.append(("put", key))
+            self.cache[key] = cache_control
+        return created
 
     def delete(self, key):
         self._maybe_fail("delete", key)
@@ -76,20 +99,31 @@ class Base(unittest.TestCase):
         return pub.pilot_cycle(self.private, self.public, self.spool, feeds(), self.clock, self.cfg)
 
     def generation(self, when, days=None):
-        """A view generation built from the current private archive, without publishing it."""
+        """A builder generation (unqualified) from the current private archive, without publishing it."""
         self.clock.set(when)
         v = self.cfg["views"]
         return build_views(load_archive(self.private), pub.unavailable_prices(), as_of=self.clock(),
                            tolerance_s=v["tolerance_s"], data_label=v["data_label"],
-                           dates=pub.view_dates_for(self.clock(), days or v["days"]))
+                           dates=pub.view_dates_for(self.clock(), days or v["days"]), limits=qualified_limits())
 
     def public_files(self):
-        return {k: self.raw_public.get(k) for k in self.public.list_views()}
+        """The live generation: the fixed index plus every page under the generation it names."""
+        raw = self.raw_public.get(INDEX)
+        if raw is None:
+            return {}
+        gen = json.loads(raw)["gen"]
+        out = {INDEX: raw}
+        out.update({k: self.raw_public.get(k) for k in self.raw_public.list(f"{pub.GENERATION_PREFIX}{gen}/")})
+        return out
+
+    def all_public(self):
+        return {k: self.raw_public.get(k) for k in self.raw_public.list("")}
 
     def assert_index_consistent(self):
-        """The live index names only pages that exist (what a reader holding it can fetch)."""
+        """The live index names only pages that exist, all in its own generation (what a reader can fetch)."""
         index = json.loads(self.raw_public.get(INDEX))
         for v in index["views"]:
+            self.assertEqual(pub.generation_of(v["first_page"]), index["gen"])
             prefix = v["first_page"].rsplit("/", 1)[0]
             for n in range(1, v["page_count"] + 1):
                 self.assertIsNotNone(self.raw_public.get(f"{prefix}/page-{n:04d}.json"), f"{prefix} page {n}")
@@ -99,28 +133,37 @@ class Base(unittest.TestCase):
 class KeysAndSeparation(Base):
     def test_public_store_refuses_everything_but_exact_view_keys(self):
         for key in ("news/v1/runs/2026-11-09/r/manifest.json", "news/v1/publish/state.json", "news/v1/latest.json",
-                    "news/v1/views/collector/oil/2026-11-09/page-0000.json",
-                    "news/v1/views/collector/oil/2026-11-09/page-0021.json",
-                    "news/v1/views/collector/oil/2026-02-30/page-0001.json",
-                    "news/v1/views/collector/treasury/2026-11-09/page-0001.json",
+                    # unqualified pages are builder output only; they are never public (G3)
+                    "news/v1/views/collector/oil/2026-11-09/page-0001.json",
+                    f"news/v1/views/g/{GEN_EXAMPLE}/collector/oil/2026-11-09/page-0000.json",
+                    f"news/v1/views/g/{GEN_EXAMPLE}/collector/oil/2026-11-09/page-0021.json",
+                    f"news/v1/views/g/{GEN_EXAMPLE}/collector/oil/2026-02-30/page-0001.json",
+                    f"news/v1/views/g/{GEN_EXAMPLE}/collector/treasury/2026-11-09/page-0001.json",
+                    "news/v1/views/g/20261309T100500Z-0123456789abcdef/collector/oil/2026-11-09/page-0001.json",
+                    "news/v1/views/g/20261109T100500Z-0123456789ABCDEF/collector/oil/2026-11-09/page-0001.json",
+                    "news/v1/views/g/20261109T100500Z-0123456789abcde/collector/oil/2026-11-09/page-0001.json",
                     "news/v1/views/../runs/x.json", "news/v1/views/index.json.bak"):
             with self.subTest(key=key):
                 self.assertFalse(pub.is_public_view_key(key))
                 with self.assertRaises(pub.PublishError):
                     self.public.put(key, b"{}")
-        self.assertTrue(pub.is_public_view_key("news/v1/views/publication/all/2026-11-09/page-0020.json"))
+        self.assertTrue(pub.is_public_view_key(f"news/v1/views/g/{GEN_EXAMPLE}/publication/all/2026-11-09/page-0020.json"))
+        self.assertTrue(pub.is_builder_view_key("news/v1/views/publication/all/2026-11-09/page-0020.json"))
 
     def test_key_rule_matches_the_panel(self):
         node = shutil.which("node")
         if not node:
             self.skipTest("node not installed")
-        keys = ["news/v1/views/index.json", "news/v1/views/archive/ai_buildout/2026-11-09/page-0001.json",
-                "news/v1/views/archive/ai_buildout/2026-11-09/page-0020.json",
-                "news/v1/views/archive/ai_buildout/2026-11-09/page-0021.json",
-                "news/v1/views/archive/ai_buildout/2026-02-29/page-0001.json",
-                "news/v1/views/archive/ai_buildout/2028-02-29/page-0001.json",
-                "news/v1/views/archive/fed/2026-11-09/page-0001.json", "news/v1/runs/x.json",
-                "news/v1/views/collector/all/2026-11-09/page-1.json"]
+        g = f"news/v1/views/g/{GEN_EXAMPLE}"
+        keys = ["news/v1/views/index.json", f"{g}/archive/ai_buildout/2026-11-09/page-0001.json",
+                f"{g}/archive/ai_buildout/2026-11-09/page-0020.json",
+                f"{g}/archive/ai_buildout/2026-11-09/page-0021.json",
+                f"{g}/archive/ai_buildout/2026-02-29/page-0001.json",
+                f"{g}/archive/ai_buildout/2028-02-29/page-0001.json",
+                f"{g}/archive/fed/2026-11-09/page-0001.json", "news/v1/runs/x.json",
+                f"{g}/collector/all/2026-11-09/page-1.json",
+                "news/v1/views/archive/ai_buildout/2026-11-09/page-0001.json",
+                "news/v1/views/g/20261109T250000Z-0123456789abcdef/archive/all/2026-11-09/page-0001.json"]
         script = ("const p=require(process.argv[1]);const ks=JSON.parse(process.argv[2]);"
                   "process.stdout.write(JSON.stringify(ks.map(k=>p.isNewsViewKey(k))))")
         out = subprocess.run([node, "-e", script, str(PANEL), json.dumps(keys)], capture_output=True, text=True,
@@ -156,20 +199,27 @@ class KeysAndSeparation(Base):
 
 
 class Ordering(Base):
-    def test_pages_then_index_then_deletions(self):
+    def test_pages_then_index_and_no_deletion_at_the_commit(self):
         self.cycle("2026-11-09T10:05:00Z")
-        # Next day: the oldest date leaves the 7-day window and its pages must go, after the new index.
+        first = json.loads(self.raw_public.get(INDEX))["gen"]
+        # Next day: the oldest date leaves the 7-day window of the NEW generation; the old generation stays
+        # public (reader-protected) instead of being deleted after the new index.
         self.log.clear()
         self.cycle("2026-11-10T10:05:00Z")
         puts = [k for op, k in self.log if op == "put"]
-        deletes = [i for i, (op, _) in enumerate(self.log) if op == "delete"]
-        index_at = self.log.index(("put", INDEX))
         self.assertEqual(puts[-1], INDEX, "index.json must be the last public write")
-        self.assertTrue(deletes, "the date that left the window must be deleted")
-        self.assertTrue(all(i > index_at for i in deletes), "no deletion before the new index is live")
-        self.assertFalse([k for k in self.public.list_views() if "/2026-11-03/" in k])
-        self.assertTrue([k for k in self.public.list_views() if "/2026-11-10/" in k])
-        self.assert_index_consistent()
+        self.assertEqual([k for op, k in self.log if op == "delete"], [], "nothing is deleted at the commit")
+        live = self.assert_index_consistent()
+        self.assertNotEqual(live["gen"], first)
+        self.assertFalse([k for k in self.public_files() if "/2026-11-03/" in k])
+        self.assertTrue([k for k in self.public_files() if "/2026-11-10/" in k])
+        self.assertTrue(self.raw_public.list(f"{pub.GENERATION_PREFIX}{first}/"), "the old generation is protected")
+
+    def test_cache_control_is_immutable_for_pages_and_no_store_for_the_index(self):
+        self.cycle("2026-11-09T10:05:00Z")
+        for key in self.public_files():
+            self.assertEqual(self.raw_public.cache[key],
+                             pub.INDEX_CACHE_CONTROL if key == INDEX else pub.PAGE_CACHE_CONTROL, key)
 
     def test_snapshot_is_complete_before_the_first_public_write(self):
         private_log = []
@@ -186,15 +236,15 @@ class Ordering(Base):
         self.assertLess(state_writes[0], snap_at, "in-progress state is recorded before the snapshot")
         self.assertTrue(first_public[1].startswith("news/v1/views/"))
 
-    def test_unchanged_bytes_are_not_rewritten(self):
-        self.cycle("2026-11-09T10:05:00Z")
-        files = self.public_files()
+    def test_republishing_the_current_build_writes_nothing(self):
+        files = self.generation("2026-11-09T10:05:00Z")
+        pub.publish(self.private, self.public, files, self.clock)
         self.log.clear()
         self.clock.set("2026-11-09T10:06:00Z")
         report = pub.publish(self.private, self.public, files, self.clock)
         self.assertEqual(report.written, [])
-        self.assertEqual(report.unchanged, len(files))
-        self.assertEqual([op for op, _ in self.log if op == "put"], [])
+        self.assertEqual(report.unchanged, len(qualified(files)))
+        self.assertEqual([op for op, _ in self.log if op in ("put", "delete")], [])
 
 
 class Interruption(Base):
@@ -218,46 +268,58 @@ class Interruption(Base):
             pub.publish(self.private, self.public, self.gen2, self.clock)
         self.assertEqual(self.raw_public.get(INDEX), self.gen1_index)
         self.assert_index_consistent()
-        self.assertEqual(set(self.public.list_views()), set(self.gen1), "nothing deleted before the commit point")
+        self.assertEqual(self.public_files(), self.gen1, "the live generation is untouched")
         st = pub.status(self.private, self.public, self.clock)
         self.assertFalse(st["healthy"])
         self.assertEqual(sorted(st["problems"]), ["last_publication_failed", "publication_interrupted"])
         self.assertEqual(st["last_failure"]["stage"], "pages")
         # Recovery: the next attempt completes and says what it recovered from.
         report = pub.publish(self.private, self.public, self.gen2, self.clock)
-        self.assertEqual(report.recovered_from, pub.generation_id(self.gen2, json.loads(self.gen2[INDEX])))
-        self.assertEqual(self.public_files(), self.gen2)
+        self.assertEqual(report.recovered_from, generation_name(self.gen2))
+        self.assertEqual(self.public_files(), qualified(self.gen2))
         self.assertTrue(pub.status(self.private, self.public, self.clock)["healthy"])
 
-    def test_failed_index_write_leaves_the_previous_generation_live(self):
+    def test_failed_index_write_leaves_the_previous_generation_live_and_the_candidate_uncertain(self):
         self.raw_public.fail = ("put", lambda k: k == INDEX, 0)
-        with self.assertRaises(RuntimeError):
+        with self.assertRaises(pub.PublishIntegrityError):
             pub.publish(self.private, self.public, self.gen2, self.clock)
         self.assertEqual(self.raw_public.get(INDEX), self.gen1_index)
         self.assert_index_consistent()
-        self.assertEqual(pub.read_state(self.private)["last_failure"]["stage"], "index")
+        state = pub.read_state(self.private)
+        self.assertEqual(state["last_failure"]["stage"], "index")
+        self.assertEqual(state["uncertain"]["gen"], generation_name(self.gen2))
+        # Retrying the same build is not a conflicting write: it settles the candidate.
+        pub.publish(self.private, self.public, self.gen2, self.clock)
+        self.assertEqual(self.public_files(), qualified(self.gen2))
+        self.assertIsNone(pub.read_state(self.private)["uncertain"])
 
     def test_a_page_that_reads_back_wrong_stops_before_the_index(self):
-        target = sorted(k for k in self.gen2 if k != INDEX and self.gen2[k] != self.gen1.get(k))[0]
+        target = sorted(k for k in qualified(self.gen2) if k != INDEX)[0]
         self.raw_public.corrupt = lambda k: k == target
         with self.assertRaises(pub.PublishIntegrityError):
             pub.publish(self.private, self.public, self.gen2, self.clock)
         self.assertEqual(self.raw_public.get(INDEX), self.gen1_index)
         self.raw_public.corrupt = None
+        # The bad page belongs to a never-offered candidate, so the retry replaces it.
         pub.publish(self.private, self.public, self.gen2, self.clock)
-        self.assertEqual(self.public_files(), self.gen2)
+        self.assertEqual(self.public_files(), qualified(self.gen2))
 
-    def test_crash_during_cleanup_is_finished_by_the_next_cycle(self):
-        later = self.generation("2026-11-10T10:05:00Z")      # drops 2026-11-03 from the window
-        self.raw_public.fail = ("delete", lambda k: True, 1)
+    def test_crash_during_cleanup_is_finished_by_the_next_run(self):
+        # An orphan: gen2's pages written, its index write never attempted (crash on the third page).
+        self.raw_public.fail = ("put", lambda k: k != INDEX, 2)
+        with self.assertRaises(RuntimeError):
+            pub.publish(self.private, self.public, self.gen2, self.clock)
+        orphan = generation_name(self.gen2)
+        self.assertTrue(self.raw_public.list(f"{pub.GENERATION_PREFIX}{orphan}/"))
+        later = self.generation("2026-11-10T10:05:00Z")
+        self.raw_public.fail = ("delete", lambda k: True, 0)
         with self.assertRaises(RuntimeError):
             pub.publish(self.private, self.public, later, self.clock)
-        self.assertEqual(self.raw_public.get(INDEX), later[INDEX], "the new index is already committed")
-        self.assertTrue(set(self.public.list_views()) - set(later), "leftover pages remain until the retry")
-        self.assert_index_consistent()
+        self.assertEqual(self.raw_public.get(INDEX), self.gen1_index, "nothing new before cleanup finishes")
         self.assertEqual(pub.read_state(self.private)["last_failure"]["stage"], "cleanup")
         pub.publish(self.private, self.public, later, self.clock)
-        self.assertEqual(self.public_files(), later)
+        self.assertEqual(self.raw_public.list(f"{pub.GENERATION_PREFIX}{orphan}/"), [], "the orphan is gone")
+        self.assertEqual(self.public_files(), qualified(later))
 
     def test_lease_held_means_nothing_is_written(self):
         other = pub.WriterLease(self.private, self.clock, "other-publisher", key=pub.PUBLISH_LEASE_KEY)
@@ -276,8 +338,9 @@ class Interruption(Base):
         oversize[key] = self.gen2[key] + b" " * LIMITS.page_bytes
         foreign = dict(self.gen2, **{"news/v1/runs/x.json": b"{}"})
         no_index = {k: v for k, v in self.gen2.items() if k != INDEX}
+        already_qualified = qualified(self.gen2)       # publish takes builder output, never published keys
         for name, files in (("missing page", missing_page), ("oversize", oversize), ("foreign key", foreign),
-                            ("no index", no_index)):
+                            ("no index", no_index), ("qualified keys", already_qualified)):
             with self.subTest(name):
                 self.log.clear()
                 with self.assertRaises(pub.PublishError):
@@ -304,7 +367,7 @@ class StopRestoreWithdraw(Base):
         self.assertEqual(self.private.list("news/v1/runs/"), runs_before, "no collection while stopped")
         self.assertEqual(self.log, [], "no public write while stopped")
         with self.assertRaises(pub.PublishStopped):
-            pub.publish(self.private, self.public, self.gen1, self.clock)
+            pub.publish(self.private, self.public, self.generation("2026-11-09T10:35:00Z"), self.clock)
         st = pub.status(self.private, self.public, self.clock.set("2026-11-09T12:00:00Z"))
         self.assertNotIn("published_views_stale", st["problems"], "a deliberate stop is not a staleness alarm")
         self.assertEqual(st["stopped"]["reason"], "pilot paused for review")
@@ -324,7 +387,7 @@ class StopRestoreWithdraw(Base):
     def test_altered_or_unknown_snapshots_are_refused(self):
         pub.stop(self.private, self.clock, "rollback")
         with self.assertRaises(pub.PublishError):
-            pub.restore(self.private, self.public, "20990101T000000Z-000000000000", self.clock)
+            pub.restore(self.private, self.public, "20990101T000000Z-0000000000000000", self.clock)
         victim = [k for k in self.private.list(f"{pub.SNAPSHOT_PREFIX}{self.gen1_id}/") if k.endswith(".json")
                   and not k.endswith("snapshot.json")][0]
         self.private.put(victim, self.private.get(victim) + b" ")
@@ -334,15 +397,18 @@ class StopRestoreWithdraw(Base):
         self.assertEqual(self.log, [])
         self.assertEqual(self.public_files(), self.gen2)
 
-    def test_withdraw_removes_the_index_first_then_every_page(self):
+    def test_withdraw_removes_the_index_first_then_every_generation(self):
         with self.assertRaises(pub.PublishError):
             pub.withdraw(self.private, self.public, self.clock)
         pub.stop(self.private, self.clock, "take down")
+        everything = self.all_public()
+        self.assertGreater(len(everything), len(self.gen2), "the protected first generation is public too")
         self.log.clear()
         out = pub.withdraw(self.private, self.public, self.clock)
         self.assertEqual(self.log[0], ("delete", INDEX))
-        self.assertEqual(self.raw_public.list(""), [])
-        self.assertEqual(out["deleted"], len(self.gen2))
+        self.assertEqual(self.raw_public.list(""), [], "no grace: every generation is deleted at once")
+        self.assertEqual(out["deleted"], len(everything))
+        self.assertIn("cannot be recalled", out["note"])
         self.assertTrue(out["snapshots_kept"], "snapshots survive a withdrawal for a later restore")
         st = pub.status(self.private, self.public, self.clock)
         self.assertIsNone(st["committed"])
@@ -383,7 +449,6 @@ class MissingPrices(Base):
         self.assertGreater(rows, 0)
 
     def test_fixture_price_pages_do_not_gain_the_marker(self):
-        from market_data.news.views import encode
         self.cycle("2026-11-09T10:05:00Z")
         from test_news_join import PRICES
         from market_data.news.prices import load_price_file
@@ -401,6 +466,9 @@ class PilotConfig(Base):
         self.assertEqual(sorted(cfg["sources"]), ["ars_technica", "eia_today_in_energy", "oilprice_com", "techcrunch"])
         self.assertIsNone(cfg["storage"]["private"]["bucket"])
         self.assertIsNone(cfg["storage"]["public"]["bucket"])
+        policy = pub.policy_from(cfg)
+        self.assertEqual((policy.reader_grace_s, policy.delete_after_s, policy.page_cap), (2700, 2940, 6300))
+        self.assertFalse(policy.clock_bound_verified, "the store-clock bound is an assumption, not verified")
 
     def test_invalid_configs_are_refused(self):
         raw = json.loads(CONFIG.read_bytes())
@@ -412,6 +480,10 @@ class PilotConfig(Base):
             "public prefix": lambda c: c["storage"]["public"].update(prefix="news/v1/"),
             "restart": lambda c: c["schedule"].update(restart_policy="ALWAYS"),
             "active not bool": lambda c: c.update(active="yes"),
+            "grace below the reader bound": lambda c: c["generations"].update(reader_grace_s=600),
+            "cap below one generation": lambda c: c["generations"].update(page_cap=1000),
+            "clock flag not bool": lambda c: c["generations"].update(clock_bound_verified="yes"),
+            "no generations block": lambda c: c.pop("generations"),
         }
         for name, change in cases.items():
             with self.subTest(name):

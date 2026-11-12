@@ -23,17 +23,22 @@ export function publicReadAllowed(url) {
   // removed 2026-11-11 stays removed; only the exact News view keys below.)
   if (key.includes('..') || /%2e/i.test(key) || key.includes('\\') || key.includes('\0')) return false;
   if (PUBLIC_KEYS.has(key)) return true;
-  // MediaFlow News views: exactly the index, or one fixed mode / stream, a real
-  // calendar date and page 0001-0020. Mirrors isPublicNewsViewKey in
+  // MediaFlow News views (G3): exactly the index, or one immutable generation
+  // g/<YYYYMMDDTHHMMSSZ-16hex> (a real UTC instant) / mode / stream / real
+  // calendar date / page 0001-0020. Mirrors isPublicNewsViewKey in
   // backend/browser-data.js and the News panel's own key check.
   if (key === 'news/v1/views/index.json') return true;
-  const n = /^news\/v1\/views\/(?:collector|archive|publication)\/(?:all|ai_buildout|oil)\/(\d{4})-(\d{2})-(\d{2})\/page-(\d{4})\.json$/.exec(key);
+  const n = /^news\/v1\/views\/g\/(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z-[0-9a-f]{16}\/(?:collector|archive|publication)\/(?:all|ai_buildout|oil)\/(\d{4})-(\d{2})-(\d{2})\/page-(\d{4})\.json$/.exec(key);
   if (n) {
-    const page = Number(n[4]);
+    const real = (y, mo, d) => {
+      const day = `${y}-${mo}-${d}`;
+      const at = new Date(`${day}T00:00:00Z`);
+      return Number.isFinite(+at) && at.toISOString().slice(0, 10) === day;
+    };
+    if (!real(n[1], n[2], n[3]) || Number(n[4]) > 23 || Number(n[5]) > 59 || Number(n[6]) > 59) return false;
+    const page = Number(n[10]);
     if (page < 1 || page > 20) return false;
-    const day = `${n[1]}-${n[2]}-${n[3]}`;
-    const at = new Date(`${day}T00:00:00Z`);
-    return Number.isFinite(+at) && at.toISOString().slice(0, 10) === day;
+    return real(n[7], n[8], n[9]);
   }
   const m = /^(?:raw\/(?:opex\/)?qqq_chain_|prices\/qqq_intraday_)(\d{4})(\d{2})(\d{2})\.csv$/.exec(key);
   if (!m) return false;

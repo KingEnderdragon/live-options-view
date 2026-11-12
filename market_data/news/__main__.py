@@ -18,6 +18,7 @@
   python -m market_data.news publish-status|publish-stop --reason R|publish-resume|publish-withdraw
                                            [--config FILE] [--private DIR] [--public DIR] [--live]
   python -m market_data.news publish-restore --gen GEN_ID [--config FILE] [--private DIR] [--public DIR] [--live]
+  python -m market_data.news publish-fence --gen GEN_ID --reason R [--config FILE] [--private DIR] [--public DIR] [--live]
 
 Defaults are inert: fixture feeds from tests/fixtures/news/feeds and a local
 directory store. Live feeds need --network; the bucket needs --bucket plus
@@ -163,6 +164,11 @@ def main(argv=None) -> int:
     pr = sub.add_parser("publish-restore", help="republish a retained snapshot (requires publish-stop)")
     pilot_common(pr)
     pr.add_argument("--gen", required=True)
+    pf = sub.add_parser("publish-fence", help="settle an uncertain index write after confirming no writer runs "
+                                              "(requires publish-stop)")
+    pilot_common(pf)
+    pf.add_argument("--gen", required=True)
+    pf.add_argument("--reason", required=True)
     args = p.parse_args(argv)
 
     if args.cmd == "sources":
@@ -294,14 +300,18 @@ def _pilot_main(args) -> int:
         code = 1 if out["status"] == "published" and out["run"]["status"] == "failed" else 0
     elif args.cmd == "publish-status":
         out = pub.status(private, public, clock, interval_s=cfg["schedule"]["interval_s"],
-                         budget_s=cfg["cycle_budget_s"])
+                         budget_s=cfg["cycle_budget_s"], policy=pub.policy_from(cfg))
         code = 0 if out["healthy"] else 1
     elif args.cmd == "publish-stop":
         out = {"stopped": pub.stop(private, clock, args.reason)}
     elif args.cmd == "publish-resume":
         out = {"resumed": pub.resume(private)}
     elif args.cmd == "publish-restore":
-        out = pub.restore(private, public, args.gen, clock, break_stale_lease=args.break_stale_lease).summary()
+        out = pub.restore(private, public, args.gen, clock, policy=pub.policy_from(cfg),
+                          break_stale_lease=args.break_stale_lease).summary()
+    elif args.cmd == "publish-fence":
+        out = pub.fence(private, public, args.gen, clock, reason=args.reason, policy=pub.policy_from(cfg),
+                        break_stale_lease=args.break_stale_lease)
     elif args.cmd == "publish-withdraw":
         out = pub.withdraw(private, public, clock, break_stale_lease=args.break_stale_lease)
     print(json.dumps(out, indent=1, ensure_ascii=False))

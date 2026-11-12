@@ -24,9 +24,28 @@ const VIEWPORTS = { desktop: { width: 1280, height: 900 }, narrow: { width: 390,
 const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.json': 'application/json' };
 
 (async () => {
-  const views = fs.mkdtempSync(path.join(os.tmpdir(), 'news-panel-views-'));
-  execFileSync(process.env.PYTHON || 'python', [path.join(REPO, 'tests/test_news_views.py'), '--write-harness', views],
+  const built = fs.mkdtempSync(path.join(os.tmpdir(), 'news-panel-built-'));
+  execFileSync(process.env.PYTHON || 'python', [path.join(REPO, 'tests/test_news_views.py'), '--write-harness', built],
     { cwd: REPO, stdio: ['ignore', 'pipe', 'inherit'] });
+  // G3 (NOT RUN when written): the panel reads published generations, so each builder set is qualified
+  // (tests/news_panel/qualify.js, the views.qualify_generation mirror) before it is served.
+  const { qualifyFiles, listKeys } = require('./news_panel/qualify.js');
+  const views = fs.mkdtempSync(path.join(os.tmpdir(), 'news-panel-views-'));
+  const Qs = {};
+  for (const set of fs.readdirSync(built)) {
+    const dir = path.join(built, set);
+    const raw = {};
+    for (const key of listKeys(dir)) raw[key] = fs.readFileSync(path.join(dir, key));
+    if (!raw['news/v1/views/index.json']) continue;
+    const { files, q } = qualifyFiles(raw);
+    Qs[set] = q;
+    for (const [key, obj] of Object.entries(files)) {
+      const file = path.join(views, set, key);
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, JSON.stringify(obj));
+    }
+  }
+  let current = null;
   const browser = await pw.chromium.launch({ headless: true });
   const foreign = [];
   try {
@@ -51,10 +70,12 @@ const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.json': 'applic
         return route.fulfill({ path: file, contentType: TYPES[path.extname(file)] || 'application/octet-stream' });
       });
       const open = async set => {
+        current = set;
         await page.goto(`${ORIGIN}/tests/news_panel/harness.html?root=/views/${set}/`);
         await page.evaluate(() => window.newsPanelReady);
       };
-      const pick = async key => {
+      const pick = async unqualified => {
+        const key = unqualified.startsWith('news/v1/views/g/') ? unqualified : Qs[current](unqualified);
         await page.selectOption('select[aria-label^="View"]', key);
         await page.waitForFunction(k => document.querySelector('#news-panel').getAttribute('data-page') === k, key);
       };
@@ -160,6 +181,7 @@ const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.json': 'applic
   } finally {
     await browser.close();
     fs.rmSync(views, { recursive: true, force: true });
+    fs.rmSync(built, { recursive: true, force: true });
   }
   console.log('news panel browser test passed' + (EVIDENCE ? `; screenshots in ${EVIDENCE}` : ''));
 })().catch(e => { console.error(e); process.exit(1); });

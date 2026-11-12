@@ -42,6 +42,18 @@ MAX_EXCERPT_CHARS = 2_000
 LATEST_LIMIT = 200
 LEASE_TTL_S = 900
 
+# Public view generations (G3). Owner-approved defaults (2026-11-12) from the accepted G2 v2 design.
+# CLOCK_EPSILON_S is an ASSUMED bound on the object store's server clock; it has not been validated
+# for any provider, so expiry deletion stays refused until a deployment sets clock_bound_verified.
+GEN_READER_GRACE_S = 45 * 60      # nominal minimum public lifetime after a generation stops being current
+GEN_CLOCK_EPSILON_S = 120         # assumed store-clock error bound
+GEN_CLOCK_SKEW_S = 120            # allowed producer/store elapsed disagreement
+GEN_PAGE_CAP = 6300               # public generation page objects (5 x 1,260 at the pilot maximum)
+GEN_INDEX_LEASE_S = 30 * 60       # how long the panel follows links from one index (from request start)
+GEN_READER_DEADLINE_S = 20        # panel per-request deadline (index and pages)
+GEN_PROXY_DEADLINE_S = 15         # Worker upstream deadline for News keys (below the panel's)
+GEN_FENCE_DELAY_S = 15 * 60       # after an operator fence, how long before an unsettled candidate may go
+
 
 @dataclass(frozen=True)
 class Source:

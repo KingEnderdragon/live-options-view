@@ -50,12 +50,12 @@ class FailingStore(LocalObjectStore):
         super().__init__(root)
         self.fail_on = fail_on
 
-    def put(self, key, data, content_type="application/octet-stream"):
+    def put(self, key, data, content_type="application/octet-stream", cache_control=None):
         if self.fail_on and self.fail_on in key:
             raise RuntimeError(f"simulated crash writing {key}")
-        super().put(key, data, content_type)
+        super().put(key, data, content_type, cache_control=cache_control)
 
-    def put_if_absent(self, key, data):
+    def put_if_absent(self, key, data, content_type="application/octet-stream", cache_control=None):
         if self.fail_on and self.fail_on in key:
             raise RuntimeError(f"simulated crash writing {key}")
-        return super().put_if_absent(key, data)
+        return super().put_if_absent(key, data, content_type=content_type, cache_control=cache_control)

@@ -35,7 +35,7 @@ import tempfile
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import config
@@ -90,12 +90,23 @@ class LocalObjectStore:
     def _path(self, key: str) -> Path:
         return self.root.joinpath(*check_key(key).split("/"))
 
-    def put(self, key: str, data: bytes, content_type: str = "application/octet-stream") -> None:
+    def put(self, key: str, data: bytes, content_type: str = "application/octet-stream",
+            cache_control: str | None = None) -> None:
+        # A directory has no object metadata: cache_control is accepted (same signature as the bucket
+        # store) and not stored. Tests that check it use a recording store.
         path = self._path(key)
         path.parent.mkdir(parents=True, exist_ok=True)
         _atomic_write(path, data)
 
-    def put_if_absent(self, key: str, data: bytes) -> bool:
+    def last_modified(self, key: str) -> datetime | None:
+        """The store's own modification time for key (here: the file's mtime, from this machine's clock)."""
+        path = self._path(key)
+        if not path.is_file():
+            return None
+        return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+
+    def put_if_absent(self, key: str, data: bytes, content_type: str = "application/octet-stream",
+                      cache_control: str | None = None) -> bool:
         path = self._path(key)
         path.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -158,12 +169,25 @@ class R2ObjectStore:
     def _code(exc) -> str:
         return str(getattr(exc, "response", {}).get("Error", {}).get("Code", ""))
 
-    def put(self, key, data, content_type="application/octet-stream"):
-        self.client.put_object(Bucket=self.bucket, Key=check_key(key), Body=data, ContentType=content_type)
+    def put(self, key, data, content_type="application/octet-stream", cache_control=None):
+        extra = {"CacheControl": cache_control} if cache_control else {}
+        self.client.put_object(Bucket=self.bucket, Key=check_key(key), Body=data, ContentType=content_type, **extra)
 
-    def put_if_absent(self, key, data):
+    def last_modified(self, key):
+        """The bucket's own LastModified for key (server clock), or None if absent."""
         try:
-            self.client.put_object(Bucket=self.bucket, Key=check_key(key), Body=data, IfNoneMatch="*")
+            return self.client.head_object(Bucket=self.bucket, Key=check_key(key))["LastModified"]
+        except Exception as exc:
+            if self._code(exc) in ("NoSuchKey", "404", "NotFound"):
+                return None
+            raise
+
+    def put_if_absent(self, key, data, content_type="application/octet-stream", cache_control=None):
+        extra = {"ContentType": content_type}
+        if cache_control:
+            extra["CacheControl"] = cache_control
+        try:
+            self.client.put_object(Bucket=self.bucket, Key=check_key(key), Body=data, IfNoneMatch="*", **extra)
         except Exception as exc:
             if self._code(exc) in ("PreconditionFailed", "412", "ConditionalRequestConflict"):
                 return False

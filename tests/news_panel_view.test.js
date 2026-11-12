@@ -19,7 +19,12 @@ const { execFileSync } = require('node:child_process');
 const PANEL_FILE = path.join(__dirname, '../site/js/news-panel.js');
 const panel = require(PANEL_FILE);
 const VIEWS = path.join(__dirname, 'fixtures/news/views');
-const load = key => JSON.parse(fs.readFileSync(path.join(VIEWS, key), 'utf8'));
+// G3: the panel reads published (generation-qualified) views; the committed builder fixtures are
+// qualified by the tests-only helper (same gen derivation as views.qualify_generation). NOT RUN when
+// these G3 edits were made.
+const Q = require('./news_panel/qualify.js').loadQualified();
+const q = key => Q.q(key);
+const load = key => JSON.parse(JSON.stringify(Q.byKey(key)));
 const clone = o => JSON.parse(JSON.stringify(o));
 
 // --- fake DOM ------------------------------------------------------------------
@@ -57,8 +62,8 @@ function test(name, fn) { tests.push([name, fn]); }
 const index = load('news/v1/views/index.json');
 const pageKeys = index.views.map(v => v.first_page);
 const pages = Object.fromEntries(pageKeys.map(k => [k, load(k)]));
-const oil = pages['news/v1/views/collector/oil/2026-11-09/page-0001.json'];
-const pub = pages['news/v1/views/publication/all/2026-11-09/page-0001.json'];
+const oil = pages[q('news/v1/views/collector/oil/2026-11-09/page-0001.json')];
+const pub = pages[q('news/v1/views/publication/all/2026-11-09/page-0001.json')];
 
 test('the index and every fixture page validate and render', () => {
   assert.deepEqual(panel.validateIndex(index), []);
@@ -244,6 +249,7 @@ test('an index cut before its first entry still shows INCOMPLETE with its omissi
     { cwd: path.join(__dirname, '..') });
   const truncated = JSON.parse(body.toString('utf8'));
   assert.deepEqual([truncated.views.length, truncated.views_omitted, truncated.views_total, truncated.complete], [0, 9, 9, false]);
+  Object.assign(truncated, { gen: Q.gen, pages_sha256: '0'.repeat(64) });   // the published form names its generation
   const root = new Node('div');
   await panel.mount(doc, root, () => Promise.resolve(truncated), 'news/v1/views/index.json');
   const [banner] = root.byClass('np-incomplete');
@@ -260,8 +266,8 @@ test('an index cut before its first entry still shows INCOMPLETE with its omissi
 });
 
 test('the latest view choice wins when responses arrive in reverse order', async () => {
-  const COLL = 'news/v1/views/collector/oil/2026-11-09/page-0001.json';
-  const PUB = 'news/v1/views/publication/all/2026-11-09/page-0001.json';
+  const COLL = q('news/v1/views/collector/oil/2026-11-09/page-0001.json');
+  const PUB = q('news/v1/views/publication/all/2026-11-09/page-0001.json');
   const pending = {};
   const fetchJson = key => key.endsWith('index.json') || key === index.views[0].first_page
     ? Promise.resolve(load(key))
@@ -301,7 +307,7 @@ test('mount loads the index, renders the first view and switches views', async (
   await panel.mount(doc, root, fetchJson, 'news/v1/views/index.json');
   assert.equal(root.getAttribute('data-page'), index.views[0].first_page);
   const [picker] = root.byTag('select');
-  picker.value = 'news/v1/views/publication/all/2026-11-09/page-0001.json';
+  picker.value = q('news/v1/views/publication/all/2026-11-09/page-0001.json');
   picker.fire('change');
   await new Promise(r => setImmediate(r));
   assert.equal(root.getAttribute('data-page'), picker.value);
@@ -331,6 +337,14 @@ const BAD_KEYS = [
   'https://example.com/news/v1/views/index.json', '//example.com/x', '../../../secret', '',
   'news/v1/views/collector/oil/2026-11-09/page-0001.json\n', 'news/v1/views/collector/oil/２０２６-11-09/page-0001.json',
   null, undefined, 7, {},
+  // G3: unqualified pages are builder output, never published; the generation segment is exact.
+  'news/v1/views/collector/oil/2026-11-09/page-0001.json',
+  'news/v1/views/g/20261109T100500Z-0123456789ABCDEF/collector/oil/2026-11-09/page-0001.json',
+  'news/v1/views/g/20261109T100500Z-0123456789abcde/collector/oil/2026-11-09/page-0001.json',
+  'news/v1/views/g/20261131T100500Z-0123456789abcdef/collector/oil/2026-11-09/page-0001.json',
+  'news/v1/views/g/20261109T240000Z-0123456789abcdef/collector/oil/2026-11-09/page-0001.json',
+  'news/v1/views/g/20261109T100500Z-0123456789abcdef/collector/oil/2026-11-09/page-0021.json',
+  'news/v1/views/g/20261109T100500Z-0123456789abcdef/index.json',
 ];
 const resp = (status, body) => ({ status, ok: status >= 200 && status < 300, text: async () => body });
 function fixtureFetch(calls, overrides = {}) {
@@ -338,8 +352,8 @@ function fixtureFetch(calls, overrides = {}) {
     calls.push({ url, opts });
     const key = url.replace(/^.*?(news\/v1\/views\/)/, '$1').replace(/\?_=\d+$/, '');
     if (key in overrides) return overrides[key]();
-    const file = path.join(VIEWS, key);
-    return fs.existsSync(file) ? resp(200, fs.readFileSync(file, 'utf8')) : resp(404, 'not found');
+    const text = Q.text(key);   // the published (qualified) fixture
+    return text !== null ? resp(200, text) : resp(404, 'not found');
   };
 }
 const tick = () => new Promise(r => setImmediate(r));
@@ -369,7 +383,11 @@ test('the fetcher checks the key before every request', async () => {
   assert.equal(calls.length, 0, 'a refused key is never requested');
   const got = await fetchJson(INDEX_KEY);
   assert.equal(got.schema_version, 'news-view-index/v1');
-  assert.deepEqual(calls, [{ url: '/browser-data/news/v1/views/index.json?_=1762686900123', opts: { credentials: 'omit' } }]);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, '/browser-data/news/v1/views/index.json?_=1762686900123');
+  assert.equal(calls[0].opts.credentials, 'omit');
+  assert.equal(calls[0].opts.cache, 'no-store', 'G3: no cached index or page');
+  assert.ok(typeof AbortController !== 'function' || calls[0].opts.signal, 'G3: every request can be aborted at its deadline');
   const r2 = [];
   await panel.makeFetcher('https://pub.example.r2.dev', fixtureFetch(r2), () => 5)(index.views[0].first_page);
   assert.equal(r2[0].url, 'https://pub.example.r2.dev/' + index.views[0].first_page + '?_=5');
@@ -382,7 +400,7 @@ test('only a 404 on index.json means "not published"; everything else is a failu
     try { await f(key); return 'ok'; } catch (e) { return e.newsKind; }
   };
   assert.equal(await kind(INDEX_KEY, () => resp(404, '')), 'absent');
-  assert.equal(await kind(P1, () => resp(404, '')), 'http');
+  assert.equal(await kind(P1, () => resp(404, '')), 'gone');   // G3: a retired generation's page
   assert.equal(await kind(INDEX_KEY, () => resp(500, '')), 'http');
   assert.equal(await kind(INDEX_KEY, () => resp(403, '')), 'http');
   assert.equal(await kind(INDEX_KEY, () => { throw new TypeError('Failed to fetch'); }), 'network');
@@ -408,63 +426,54 @@ test('only a 404 on index.json means "not published"; everything else is a failu
     assert.ok(failed.textContent.includes('Could not load news views: ') && failed.textContent.includes(text), text);
     assert.ok(!failed.textContent.includes('No news views published yet'), text);
   }
-  // A missing page is a failure, never "not published".
+  // A missing page is never "not published": since G3 it means the generation was retired, so the
+  // reader is asked to reload the index (refresh-required), never shown another generation.
   const calls = [];
   const root = new Node('div');
   await panel.mount(doc, root, panel.makeFetcher('/browser-data',
     fixtureFetch(calls, { [index.views[0].first_page]: () => resp(404, '') }), () => 1), INDEX_KEY);
-  assert.equal(root.getAttribute('data-state'), 'failed');
+  assert.equal(root.getAttribute('data-state'), 'refresh-required');
   assert.ok(root.textContent.includes('HTTP 404') && !root.textContent.includes('No news views published yet'));
+  assert.ok(root.byTag('button').some(b => b.textContent === 'Reload'));
 });
 
 test('keys taken from the index, the picker and prev/next are refused before any request', async () => {
+  // G3: an index whose first_page (picker option) is not a key of its own generation is refused whole,
+  // before any page request; a prev/next link that leaves the generation shows refresh-required and is
+  // never requested.
   const BAD = 'news/v1/views/collector/oil/2026-02-30/page-0001.json';
-  // first_page from the index
-  let calls = [];
-  const tampered = clone(index);
-  tampered.views[0].first_page = BAD;
-  let root = new Node('div');
-  await panel.mount(doc, root, panel.makeFetcher('/browser-data',
-    fixtureFetch(calls, { [INDEX_KEY]: () => resp(200, JSON.stringify(tampered)) }), () => 1), INDEX_KEY);
-  assert.deepEqual(calls.map(c => c.url), ['/browser-data/' + INDEX_KEY + '?_=1']);
-  assert.equal(root.getAttribute('data-state'), 'failed');
-  assert.ok(root.textContent.includes('"' + BAD + '": refused: not a published news view key'));
-  // a picker option
-  calls = [];
-  const viaPicker = clone(index);
-  viaPicker.views[1].first_page = 'https://example.com/x.json';
-  root = new Node('div');
-  await panel.mount(doc, root, panel.makeFetcher('/browser-data',
-    fixtureFetch(calls, { [INDEX_KEY]: () => resp(200, JSON.stringify(viaPicker)) }), () => 1), INDEX_KEY);
-  assert.equal(root.getAttribute('data-state'), 'ready');
-  const [picker] = root.byTag('select');
-  picker.value = 'https://example.com/x.json';
-  picker.fire('change');
-  await settle();
-  assert.equal(calls.length, 2, 'only the index and the first page were requested');
-  assert.equal(root.getAttribute('data-state'), 'failed');
-  assert.ok(root.textContent.includes('"https://example.com/x.json": refused'));
-  // prev/next from a page
-  calls = [];
+  for (const [label, change] of [['first_page', i => { i.views[0].first_page = BAD; }],
+    ['picker option', i => { i.views[1].first_page = 'https://example.com/x.json'; }],
+    ['other generation', i => { i.views[0].first_page = i.views[0].first_page.replace(Q.gen, '20990101T000000Z-0000000000000000'); }]]) {
+    const calls = [];
+    const tampered = clone(index);
+    change(tampered);
+    const root = new Node('div');
+    await panel.mount(doc, root, panel.makeFetcher('/browser-data',
+      fixtureFetch(calls, { [INDEX_KEY]: () => resp(200, JSON.stringify(tampered)) }), () => 1), INDEX_KEY);
+    assert.deepEqual(calls.map(c => c.url), ['/browser-data/' + INDEX_KEY + '?_=1'], label);
+    assert.equal(root.getAttribute('data-state'), 'failed', label);
+    assert.ok(root.textContent.includes('Could not load news views: ') &&
+      root.textContent.includes('is not in generation ' + Q.gen), label);
+  }
+  // prev/next from a page: each in a fresh mount (refresh-required ends that mount).
   const FIRST = index.views[0].first_page;
-  const page = clone(load(FIRST));
-  page.next_page = '../../../../secret.json';
-  page.prev_page = 'news/v1/views/collector/oil/2026-11-09/page-0021.json';
-  root = new Node('div');
-  await panel.mount(doc, root, panel.makeFetcher('https://pub.example.r2.dev',
-    fixtureFetch(calls, { [FIRST]: () => resp(200, JSON.stringify(page)) }), () => 1), INDEX_KEY);
-  for (const [label, key] of [['older →', page.next_page], ['← newer', page.prev_page]]) {
+  for (const [label, field, key] of [['older →', 'next_page', '../../../../secret.json'],
+    ['← newer', 'prev_page', FIRST.replace('page-0001', 'page-0021')],
+    ['older →', 'next_page', FIRST.replace(Q.gen, '20990101T000000Z-0000000000000000').replace('page-0001', 'page-0002')]]) {
+    const calls = [];
+    const page = clone(load(FIRST));
+    page[field] = key;
+    const root = new Node('div');
+    await panel.mount(doc, root, panel.makeFetcher('https://pub.example.r2.dev',
+      fixtureFetch(calls, { [FIRST]: () => resp(200, JSON.stringify(page)) }), () => 1), INDEX_KEY);
     const btn = root.byTag('button').find(b => b.textContent === label);
     assert.ok(btn && !btn.disabled, label);
     btn.fire('click');
     await settle();
-    assert.equal(calls.length, 2, label + ' was not requested');
-    assert.equal(root.getAttribute('data-state'), 'failed');
-    assert.ok(root.textContent.includes(JSON.stringify(key) + ': refused'), label);
-    // back to a good page for the next button
-    const [sel] = root.byTag('select');
-    sel.value = FIRST; sel.fire('change'); await settle();
-    calls.length = 2;
+    assert.equal(calls.length, 2, label + ' ' + key + ' was not requested');
+    assert.equal(root.getAttribute('data-state'), 'refresh-required', key);
+    assert.ok(root.textContent.includes('left generation ' + Q.gen), key);
   }
 });
 
@@ -502,7 +511,7 @@ test('loadNewsPanel mounts from BROWSER_DATA on the proxy and the public R2 base
     const calls = [];
     const container = new Node('div');
     const sandbox = {
-      BROWSER_DATA: base, console, setImmediate,
+      BROWSER_DATA: base, console, setImmediate, setTimeout, clearTimeout,
       document: Object.assign({ getElementById: id => (id === 'news-panel' ? container : null) }, doc),
       fetch: fixtureFetch(calls),
       URL, Date: class extends Date { static now() { return 1762686900000; } },
@@ -606,8 +615,8 @@ test('a render failure that validation does not catch still takes the failure pa
 });
 
 test('newest selection still wins when the older response is malformed', async () => {
-  const COLL = 'news/v1/views/collector/oil/2026-11-09/page-0001.json';
-  const PUB = 'news/v1/views/publication/all/2026-11-09/page-0001.json';
+  const COLL = q('news/v1/views/collector/oil/2026-11-09/page-0001.json');
+  const PUB = q('news/v1/views/publication/all/2026-11-09/page-0001.json');
   const pending = {};
   const fetchJson = key => key.endsWith('index.json') || key === index.views[0].first_page
     ? Promise.resolve(load(key))

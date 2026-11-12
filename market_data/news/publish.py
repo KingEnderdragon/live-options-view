@@ -1,39 +1,40 @@
-"""Publish sanitized news views (M5, local preparation): private archive -> public views.
+"""Publish sanitized news views (M5, local preparation; G3 generations): private archive -> public views.
 
 Two stores, never the same one:
 
   private   the raw archive (news/v1/runs/, indexes, latest.json, writer lease)
             plus the publisher's own state under news/v1/publish/:
-              state.json                  committed generation, in-progress target, last failure
+              state.json                  committed generation, in-progress target, uncertain/blocked/paused,
+                                          last failure, clock high-water marks
+              heartbeat.json              rewritten every run; its store modification time is the store clock
+              generations/<gen>.json      the lifecycle ledger: digests, page set and events
               stop.json                   operator stop marker (cycles and publication no-op)
               lease.json                  single-publisher lease
               snapshots/<gen>/...         exact bytes of recent published generations (restore)
               receipts/<time>-<gen>.json  one per publication / restore / withdrawal
   public    only the exact view keys the panel and proxy accept:
-              news/v1/views/index.json
-              news/v1/views/<collector|archive|publication>/<all|ai_buildout|oil>/<YYYY-MM-DD>/page-NNNN.json
+              news/v1/views/index.json                                            the commit point
+              news/v1/views/g/<gen>/<mode>/<stream>/<YYYY-MM-DD>/page-NNNN.json  immutable
 
-A publication replaces one generation with the next in this order:
+A generation (G3, the accepted G2 v2 design) is the qualified form of one build (views.qualify_generation):
+gen = <build_as_of>-<16 hex of the unqualified build's digest>, every page under g/<gen>/ with links that
+stay in that generation, and an index naming gen and pages_sha256. Each run:
 
-  1. validate every file: exact keys, sizes, an index the panel accepts, and every
-     named page renderable, matching its key/index entry, with prev/next forming the
-     exact page-0001..page-N chain (nothing is written if anything fails);
-  2. record the in-progress target in private state, then snapshot the bytes privately
-     under a gen_id that binds every key and byte;
-  3. write each changed page, highest page number first within a view, reading each
-     back (unchanged pages are not rewritten);
-  4. write index.json last and read it back: this is the commit point;
-  5. only then delete public view keys the new generation does not contain;
-  6. record the committed generation and a receipt; prune old snapshots.
+  1. reads the clock (a heartbeat: producer time and the store's own time) and the ledger;
+  2. reconciles: the live index must match one recorded generation in full (index hash, gen,
+     pages_sha256, every page hash); that one is current, every other one recorded as current is
+     ceased now. Anything unmatched or unreadable blocks the run (nothing written or deleted);
+  3. cleans up: deletes orphan pages (written, never offered) and expired pages (ceased, both clocks
+     past reader grace + epsilon + skew, clocks agreeing, and only once the clock bound is verified);
+     never current, protected, uncertain or unknown pages; needs no new commit;
+  4. admits: an unsettled index write anywhere pauses publication; so does the page cap
+     (present + missing pages > cap). Nothing protected is evicted;
+  5. writes the generation's pages create-if-absent (immutable; different bytes at an existing key stop
+     the run), then the index, then reconciles again. An index write that fails or does not read back
+     leaves the candidate uncertain until a later run sees it live in full or an operator fences it.
 
-After any prefix of these writes every page reachable from the live index exists
-and renders (no page links to one not yet written). A multi-page view can show
-pages of two builds until the commit or the next cycle; each carries its own
-build_as_of (generation-specific keys would remove this; see PUBLISHING.md). The
-failure is recorded in state.json and the next cycle republishes and removes
-leftovers. Expired leases are reported, never taken over without
---break-stale-lease. Nothing here contacts a
-network or a bucket unless a caller passes such a store.
+Withdrawal deletes the index and every generation's pages at once; cached copies cannot be recalled.
+Nothing here contacts a network or a bucket unless a caller passes such a store.
 """
 
 from __future__ import annotations
@@ -50,23 +51,36 @@ from .archive import (LEASE_KEY, ArchiveError, LocalObjectStore, R2ObjectStore, 
 from .normalize import iso, parse_iso, sha256_hex
 from .prices import PriceFile
 from .reader import MODES, load_archive
-from .views import INDEX_REASONS, LIMITS, ROOT, STREAM_KEYS, build_views
+from .views import (GEN_PATTERN, INDEX_REASONS, LIMITS, ROOT, STREAM_KEYS, build_views, files_digest,
+                    generation_name, generation_page_key, is_gen, page_key, pages_digest, qualified_limits,
+                    qualify_generation)
 
 PUBLIC_PREFIX = f"{ROOT}/"
 PUBLIC_INDEX = f"{ROOT}/index.json"
+GENERATION_PREFIX = f"{ROOT}/g/"
 PUBLISH_PREFIX = f"{config.NAMESPACE}/publish/"
 STATE_KEY = PUBLISH_PREFIX + "state.json"
 STOP_KEY = PUBLISH_PREFIX + "stop.json"
 PUBLISH_LEASE_KEY = PUBLISH_PREFIX + "lease.json"
 SNAPSHOT_PREFIX = PUBLISH_PREFIX + "snapshots/"
 RECEIPT_PREFIX = PUBLISH_PREFIX + "receipts/"
-STATE_SCHEMA = "news-publish-state/v1"
+LEDGER_PREFIX = PUBLISH_PREFIX + "generations/"
+HEARTBEAT_KEY = PUBLISH_PREFIX + "heartbeat.json"
+STATE_SCHEMA = "news-publish-state/v2"            # v2: generations (no deployed v1 state exists)
 RECEIPT_SCHEMA = "news-publish-receipt/v1"
 SNAPSHOT_SCHEMA = "news-publish-snapshot/v1"
+LEDGER_SCHEMA = "news-publish-generation/v1"
 PILOT_SCHEMA = "news-pilot-config/v1"
+INDEX_CACHE_CONTROL = "no-store"
+PAGE_CACHE_CONTROL = "public, max-age=31536000, immutable"
+WITHDRAW_NOTE = ("origin objects deleted; copies already cached by browsers or intermediaries, and downloads, "
+                 "cannot be recalled")
 
+# Builder output (unqualified) and published generation pages (qualified).
 _PAGE_RE = re.compile(r"^news/v1/views/(collector|archive|publication)/(all|ai_buildout|oil)/"
                       r"([0-9]{4})-([0-9]{2})-([0-9]{2})/page-([0-9]{4})\.json$")
+_GEN_PAGE_RE = re.compile(rf"^news/v1/views/g/({GEN_PATTERN})/(collector|archive|publication)/(all|ai_buildout|oil)/"
+                          r"([0-9]{4})-([0-9]{2})-([0-9]{2})/page-([0-9]{4})\.json$")
 
 
 class PublishError(ArchiveError):
@@ -78,23 +92,46 @@ class PublishStopped(PublishError):
 
 
 class PublishIntegrityError(PublishError):
-    """A public object did not read back as written."""
+    """A public object did not read back as written, or an immutable key holds different bytes."""
 
 
-def is_public_view_key(key: str) -> bool:
-    """The same exact rule as the panel (isNewsViewKey) and the proxy (isPublicNewsViewKey)."""
-    if key == PUBLIC_INDEX:
-        return True
-    m = _PAGE_RE.match(key)
-    if not m:
-        return False
-    if not 1 <= int(m.group(6)) <= LIMITS.pages_per_view:
-        return False
-    date = f"{m.group(3)}-{m.group(4)}-{m.group(5)}"
+class PublishBlocked(PublishError):
+    """History is uncertain (unmatched live index or unreadable ledger): nothing written or deleted."""
+
+
+class PublishPaused(PublishError):
+    """Cleanup ran, but a new generation was not admitted (unsettled index write or the page cap)."""
+
+
+def _real_date(y: str, m: str, d: str) -> bool:
+    date = f"{y}-{m}-{d}"
     try:
         return datetime.strptime(date, "%Y-%m-%d").strftime("%Y-%m-%d") == date
     except ValueError:
         return False
+
+
+def is_builder_view_key(key: str) -> bool:
+    """The builder's unqualified keys (index, or mode/stream/real date/page 0001..pages_per_view)."""
+    if key == PUBLIC_INDEX:
+        return True
+    m = _PAGE_RE.match(key)
+    return bool(m) and 1 <= int(m.group(6)) <= LIMITS.pages_per_view and _real_date(m.group(3), m.group(4), m.group(5))
+
+
+def generation_of(key: str) -> str | None:
+    """The generation of a published page key, or None if key is not one."""
+    m = _GEN_PAGE_RE.match(key)
+    if not m or not is_gen(m.group(1)):
+        return None
+    if not 1 <= int(m.group(7)) <= LIMITS.pages_per_view or not _real_date(m.group(4), m.group(5), m.group(6)):
+        return None
+    return m.group(1)
+
+
+def is_public_view_key(key: str) -> bool:
+    """The same exact rule as the panel (isNewsViewKey), the proxy (isPublicNewsViewKey) and the gateway."""
+    return key == PUBLIC_INDEX or generation_of(key) is not None
 
 
 # --- the two stores ---------------------------------------------------------------
@@ -110,8 +147,11 @@ class PublicViewStore:
             raise PublishError(f"refusing non-view key on the public store: {key!r}")
         return key
 
-    def put(self, key, data, content_type="application/json"):
-        self.inner.put(self._check(key), data, content_type)
+    def put(self, key, data, content_type="application/json", cache_control=None):
+        self.inner.put(self._check(key), data, content_type, cache_control=cache_control)
+
+    def put_if_absent(self, key, data, content_type="application/json", cache_control=None) -> bool:
+        return self.inner.put_if_absent(self._check(key), data, content_type=content_type, cache_control=cache_control)
 
     def get(self, key):
         return self.inner.get(self._check(key))
@@ -122,6 +162,14 @@ class PublicViewStore:
     def list_views(self) -> list[str]:
         """Every view key present (other keys under the prefix are reported, never touched)."""
         return [k for k in self.inner.list(PUBLIC_PREFIX) if is_public_view_key(k)]
+
+    def pages_by_gen(self) -> dict[str, list[str]]:
+        out: dict[str, list[str]] = {}
+        for key in self.inner.list(GENERATION_PREFIX):
+            gen = generation_of(key)
+            if gen is not None:
+                out.setdefault(gen, []).append(key)
+        return {g: sorted(v) for g, v in sorted(out.items())}
 
     def foreign_keys(self) -> list[str]:
         return [k for k in self.inner.list(PUBLIC_PREFIX) if not is_public_view_key(k)]
@@ -175,7 +223,7 @@ def read_state(private) -> dict:
     state = _read_json(private, STATE_KEY)
     if state is None:
         return {"schema_version": STATE_SCHEMA, "committed": None, "in_progress": None, "last_failure": None,
-                "withdrawn": None}
+                "withdrawn": None, "uncertain": None, "blocked": None, "paused": None, "clock": None}
     if state.get("schema_version") != STATE_SCHEMA:
         raise PublishError(f"{STATE_KEY} has schema {state.get('schema_version')!r}")
     return state
@@ -290,6 +338,7 @@ PAGE_SPEC = {
     "?hindsight": "bool", "window": {"start": "str", "end": "str"},
     "?price_series": ("?", {"instrument_id": "str", "series": "str", "tolerance_s": "num", "?synthetic": "bool"}),
     "?prev_page": "str?", "?next_page": "str?", "page_number": "int", "page_count": "int", "?rows_offset": "int",
+    "?gen": "str",
     "view": {"rows_total": "int", "?rows_omitted": "int", "?pages_omitted": "int"},
     "complete": "bool", "overflow_reasons": ["str"], "omitted": ("map", "int"),
     "coverage": {"coverage_complete": "bool", "stream_scope": "str", "note": "str", "?quiet_blocked_by": ["str"],
@@ -301,7 +350,7 @@ PAGE_SPEC = {
 }
 INDEX_SPEC = {
     "data_label": "str", "build_as_of": "str", "complete": "bool", "overflow_reasons": ["str"],
-    "views_total": "int", "views_omitted": "int",
+    "views_total": "int", "views_omitted": "int", "?gen": "str", "?pages_sha256": "str",
     "views": [{"mode": "str", "stream": "str", "date": "str", "first_page": "str", "page_count": "int",
                "rows_total": "int", "complete": "bool"}],
 }
@@ -393,35 +442,12 @@ def index_contract_problems(index) -> list[str]:
 
 
 def _page_key(mode, stream, date, n):
-    return f"{ROOT}/{mode}/{stream}/{date}/page-{n:04d}.json"
+    """The builder's unqualified page key (validate_generation checks builder output)."""
+    return page_key(mode, stream, date, n)
 
 
-def validate_generation(files: dict[str, bytes], limits=LIMITS) -> dict:
-    """Every file checked before anything is written.
-
-    Exact keys and byte caps; an index with every field the panel and publisher
-    read (index_contract_problems); every page the index names present,
-    renderable by the unchanged renderer (page_contract_problems: validatePage's
-    checks plus every nested shape renderPage reads) and agreeing with its key and
-    its index entry; first/previous/next links forming exactly the chain
-    page-0001 .. page-<page_count>; no page that the index does not name.
-    """
-    if PUBLIC_INDEX not in files:
-        raise PublishError("generation has no index.json")
-    bad = sorted(k for k in files if not is_public_view_key(k))
-    if bad:
-        raise PublishError(f"generation has non-view keys: {bad[:5]}")
-    for key, body in files.items():
-        cap = limits.index_bytes if key == PUBLIC_INDEX else limits.page_bytes
-        if len(body) > cap:
-            raise PublishError(f"{key} is {len(body)} bytes, over its {cap}-byte cap")
-    try:
-        index = json.loads(files[PUBLIC_INDEX])
-    except ValueError as exc:
-        raise PublishError(f"index.json is not JSON: {exc}") from exc
-    problems = index_contract_problems(index)
-    if problems:
-        raise PublishError(f"index.json would not render or publish: {'; '.join(problems[:5])}")
+def _check_views(files: dict[str, bytes], index: dict, key_of, limits, gen: str | None) -> None:
+    """Every page the index names: present, renderable, agreeing with its key, entry and page chain."""
     named, seen_views = set(), set()
     for v in index["views"]:
         ident = (v["mode"], v["stream"], v["date"])
@@ -431,10 +457,10 @@ def validate_generation(files: dict[str, bytes], limits=LIMITS) -> dict:
         count = v.get("page_count")
         if not _int(count) or not 1 <= count <= limits.pages_per_view:
             raise PublishError(f"{'/'.join(ident)}: page_count {count!r} is not 1..{limits.pages_per_view}")
-        if v.get("first_page") != _page_key(*ident, 1):
+        if v.get("first_page") != key_of(*ident, 1):
             raise PublishError(f"{'/'.join(ident)}: first_page {v.get('first_page')!r} is not page-0001 of its view")
         for n in range(1, count + 1):
-            key = _page_key(*ident, n)
+            key = key_of(*ident, n)
             named.add(key)
             if key not in files:
                 raise PublishError(f"index names a page the generation lacks: {key}")
@@ -447,8 +473,10 @@ def validate_generation(files: dict[str, bytes], limits=LIMITS) -> dict:
                 raise PublishError(f"{key} would not render: {'; '.join(problems[:5])}")
             expect = {"mode": ident[0], "stream": ident[1], "date": ident[2], "page_number": n,
                       "page_count": count, "build_as_of": index["build_as_of"],
-                      "prev_page": _page_key(*ident, n - 1) if n > 1 else None,
-                      "next_page": _page_key(*ident, n + 1) if n < count else None}
+                      "prev_page": key_of(*ident, n - 1) if n > 1 else None,
+                      "next_page": key_of(*ident, n + 1) if n < count else None}
+            if gen is not None:
+                expect["gen"] = gen
             wrong = {k: page.get(k) for k, want in expect.items() if page.get(k) != want}
             if wrong:
                 raise PublishError(f"{key} disagrees with its key, index entry or page chain: {wrong}")
@@ -457,63 +485,81 @@ def validate_generation(files: dict[str, bytes], limits=LIMITS) -> dict:
     orphans = sorted(set(files) - named - {PUBLIC_INDEX})
     if orphans:
         raise PublishError(f"pages the index does not name: {orphans[:5]}")
+
+
+def _load_index(files: dict[str, bytes]) -> dict:
+    try:
+        index = json.loads(files[PUBLIC_INDEX])
+    except ValueError as exc:
+        raise PublishError(f"index.json is not JSON: {exc}") from exc
+    problems = index_contract_problems(index)
+    if problems:
+        raise PublishError(f"index.json would not render or publish: {'; '.join(problems[:5])}")
     return index
 
 
-def generation_digest(files: dict[str, bytes]) -> str:
-    """SHA-256 over every key and its content bytes (length-prefixed, sorted by key)."""
-    import hashlib
-
-    h = hashlib.sha256()
-    for key in sorted(files):
-        body = files[key]
-        h.update(f"{len(key)}:{key}:{len(body)}:".encode("utf-8"))
-        h.update(body)
-    return h.hexdigest()
+def _check_caps(files: dict[str, bytes], limits) -> None:
+    for key, body in files.items():
+        cap = limits.index_bytes if key == PUBLIC_INDEX else limits.page_bytes
+        if len(body) > cap:
+            raise PublishError(f"{key} is {len(body)} bytes, over its {cap}-byte cap")
 
 
-def generation_id(files: dict[str, bytes], index: dict) -> str:
-    built = parse_iso(index["build_as_of"])
-    return f"{built.strftime('%Y%m%dT%H%M%SZ')}-{generation_digest(files)[:16]}"
+def validate_generation(files: dict[str, bytes], limits=LIMITS) -> dict:
+    """Builder output (unqualified keys), checked before it is qualified and before anything is written.
+
+    Exact keys and byte caps; an index with every field the panel and publisher read
+    (index_contract_problems); every page the index names present, renderable by the unchanged
+    renderer (page_contract_problems) and agreeing with its key and its index entry; first/previous/
+    next links forming exactly the chain page-0001 .. page-<page_count>; no page the index does not name.
+    """
+    if PUBLIC_INDEX not in files:
+        raise PublishError("generation has no index.json")
+    bad = sorted(k for k in files if not is_builder_view_key(k))
+    if bad:
+        raise PublishError(f"generation has non-view keys: {bad[:5]}")
+    _check_caps(files, limits)
+    index = _load_index(files)
+    _check_views(files, index, _page_key, limits, None)
+    return index
+
+
+def validate_qualified(gen: str, files: dict[str, bytes], limits=LIMITS) -> dict:
+    """A published-form generation: every key under g/<gen>/, every page and link of that generation,
+    index.gen == gen, index.pages_sha256 == the pages' digest, and all of validate_generation's checks."""
+    if not is_gen(gen):
+        raise PublishError(f"{gen!r} is not a generation id")
+    if PUBLIC_INDEX not in files:
+        raise PublishError("generation has no index.json")
+    bad = sorted(k for k in files if k != PUBLIC_INDEX and generation_of(k) != gen)
+    if bad:
+        raise PublishError(f"generation {gen} has keys outside news/v1/views/g/{gen}/: {bad[:5]}")
+    _check_caps(files, limits)
+    index = _load_index(files)
+    if index.get("gen") != gen:
+        raise PublishError(f"index.gen {index.get('gen')!r} is not {gen}")
+    if index.get("pages_sha256") != pages_digest(files):
+        raise PublishError("index.pages_sha256 does not match the generation's pages")
+    _check_views(files, index, lambda m, s, d, n: generation_page_key(gen, m, s, d, n), limits, gen)
+    return index
+
+
+# Final integrity over every key and byte (snapshots, ledger). The same digest as views.files_digest.
+generation_digest = files_digest
+
+
+def generation_id(files: dict[str, bytes], index: dict | None = None) -> str:
+    """The logical generation id of an unqualified build (views.generation_name)."""
+    return generation_name(files)
 
 
 def page_write_order(files: dict[str, bytes]) -> list[str]:
-    """Pages only, highest page number first within each view.
-
-    With fixed keys a page is visible as soon as it is written, so a page must
-    never link to a page that is not yet there. Writing page N before page N-1
-    means every link reachable from the live index (old or new) resolves after
-    any prefix of the writes. It does not make a multi-page view switch builds
-    atomically; that needs generation-specific keys (see PUBLISHING.md).
-    """
-    pages = [k for k in files if k != PUBLIC_INDEX]
-    return sorted(pages, key=lambda k: (k.rsplit("/", 1)[0], -int(k[-9:-5])))
+    """Pages only, in key order. Generation pages are immutable and unreachable until the index names
+    them, so the order no longer matters to readers; it is fixed only to keep runs reproducible."""
+    return sorted(k for k in files if k != PUBLIC_INDEX)
 
 
-# --- publication ------------------------------------------------------------------
-
-@dataclass
-class PublishReport:
-    gen_id: str
-    action: str
-    written: list[str] = field(default_factory=list)
-    unchanged: int = 0
-    deleted: list[str] = field(default_factory=list)
-    recovered_from: str | None = None
-    foreign_keys: list[str] = field(default_factory=list)
-    snapshots_pruned: list[str] = field(default_factory=list)
-
-    def summary(self) -> dict:
-        return {"gen_id": self.gen_id, "action": self.action, "written": len(self.written),
-                "unchanged": self.unchanged, "deleted": len(self.deleted), "recovered_from": self.recovered_from,
-                "foreign_keys": self.foreign_keys, "snapshots_pruned": self.snapshots_pruned}
-
-
-def _put_verified(public: PublicViewStore, key: str, body: bytes) -> None:
-    public.put(key, body, "application/json")
-    if public.get(key) != body:
-        raise PublishIntegrityError(f"{key} did not read back as written")
-
+# --- snapshots, receipts, failures --------------------------------------------------
 
 def _snapshot(private, gen_id: str, files: dict[str, bytes], clock) -> None:
     prefix = f"{SNAPSHOT_PREFIX}{gen_id}/"
@@ -552,8 +598,14 @@ def load_snapshot(private, gen_id: str) -> dict[str, bytes]:
         if body is None or len(body) != info["bytes"] or sha256_hex(body) != info["sha256"]:
             raise PublishError(f"snapshot {gen_id}: {key} is missing or altered")
         files[key] = body
+    # The id's hash part is the logical digest of the unqualified build, so it cannot be recomputed from
+    # the published files; the snapshot binds them by generation_sha256 and by the index's own gen.
     digest = generation_digest(files)
-    if meta.get("generation_sha256") != digest or not gen_id.endswith("-" + digest[:16]):
+    try:
+        index_gen = json.loads(files[PUBLIC_INDEX]).get("gen")
+    except (KeyError, ValueError, AttributeError):
+        index_gen = None
+    if meta.get("generation_sha256") != digest or index_gen != gen_id:
         raise PublishError(f"snapshot {gen_id}: its files do not match the generation id")
     return files
 
@@ -587,61 +639,414 @@ def _record_failure(private, state, stage: str, exc: BaseException, clock) -> No
         pass
 
 
-def _replace(private, public: PublicViewStore, files: dict[str, bytes], clock, *, action: str,
-             keep_snapshots: int, snapshot: bool, lease_holder=None, break_stale_lease=False,
-             allow_stopped=False) -> PublishReport:
-    assert_separate(private, public)
-    if not allow_stopped and stopped(private) is not None:
-        raise PublishStopped(f"publication is stopped ({stopped(private).get('reason', '')}); run `resume` first")
-    index = validate_generation(files)
-    gen_id = generation_id(files, index)
+
+# --- publication: generation lifecycle (G3) ---------------------------------------------------------
+
+@dataclass
+class PublishReport:
+    gen_id: str
+    action: str
+    written: list[str] = field(default_factory=list)
+    unchanged: int = 0
+    deleted: list[str] = field(default_factory=list)
+    recovered_from: str | None = None
+    foreign_keys: list[str] = field(default_factory=list)
+    snapshots_pruned: list[str] = field(default_factory=list)
+    retired: dict = field(default_factory=dict)        # gen -> why its pages were deleted (orphan / expired)
+    public_pages: int = 0
+
+    def summary(self) -> dict:
+        return {"gen_id": self.gen_id, "action": self.action, "written": len(self.written),
+                "unchanged": self.unchanged, "deleted": len(self.deleted), "recovered_from": self.recovered_from,
+                "foreign_keys": self.foreign_keys, "snapshots_pruned": self.snapshots_pruned,
+                "retired": self.retired, "public_pages": self.public_pages}
+
+
+@dataclass(frozen=True)
+class GenerationPolicy:
+    """Owner-approved defaults (config.GEN_*). clock_bound_verified stays False until a deployment has
+    actually verified the store-clock bound; until then expiry deletion is refused (visibly)."""
+    reader_grace_s: int = config.GEN_READER_GRACE_S
+    clock_epsilon_s: int = config.GEN_CLOCK_EPSILON_S
+    clock_skew_s: int = config.GEN_CLOCK_SKEW_S
+    page_cap: int = config.GEN_PAGE_CAP
+    fence_delay_s: int = config.GEN_FENCE_DELAY_S
+    clock_bound_verified: bool = False
+
+    @property
+    def delete_after_s(self) -> int:
+        """Earliest deletion after a generation ceases (49 min with the defaults), plus the run delay."""
+        return self.reader_grace_s + self.clock_epsilon_s + self.clock_skew_s
+
+
+DEFAULT_POLICY = GenerationPolicy()
+LIFECYCLE_EVENTS = ("published", "restored", "ceased")
+
+
+def _ledger_key(gen: str) -> str:
+    return f"{LEDGER_PREFIX}{gen}.json"
+
+
+def read_ledger(private) -> tuple[dict[str, dict], list[str]]:
+    """(gen -> record, problems). Any problem makes history uncertain: callers retain and stop."""
+    records, problems = {}, []
+    for key in private.list(LEDGER_PREFIX):
+        name = key[len(LEDGER_PREFIX):]
+        gen = name[:-5] if name.endswith(".json") else ""
+        if not is_gen(gen):
+            problems.append(f"{key}: not a generation record")
+            continue
+        try:
+            rec = json.loads(private.get(key))
+        except (TypeError, ValueError):
+            problems.append(f"{key}: unreadable")
+            continue
+        if (not isinstance(rec, dict) or rec.get("schema_version") != LEDGER_SCHEMA or rec.get("gen") != gen
+                or not isinstance(rec.get("events"), list) or not isinstance(rec.get("page_set"), dict)):
+            problems.append(f"{key}: wrong schema, gen or shape")
+            continue
+        records[gen] = rec
+    return records, problems
+
+
+def _write_ledger(private, rec: dict) -> None:
+    private.put(_ledger_key(rec["gen"]), encode_json(rec), "application/json")
+
+
+def _at(reading: dict) -> dict:
+    return {"producer_at": iso(reading["producer"]),
+            "storage_at": iso(reading["storage"]) if reading["storage"] is not None else None}
+
+
+def _event(private, rec: dict, kind: str, reading: dict, **extra) -> None:
+    rec["events"].append({"kind": kind, **_at(reading), **extra})
+    _write_ledger(private, rec)
+
+
+def _kinds(rec: dict) -> list[str]:
+    return [e["kind"] for e in rec["events"]]
+
+
+def _epoch(rec: dict) -> dict | None:
+    """The latest published/restored/ceased event. Protection follows the latest epoch, so an old
+    restore is not a permanent exemption: a later cease starts a new retirement."""
+    for e in reversed(rec["events"]):
+        if e["kind"] in LIFECYCLE_EVENTS:
+            return e
+    return None
+
+
+def _new_record(gen: str, files: dict[str, bytes], logical_sha256: str | None) -> dict:
+    return {"schema_version": LEDGER_SCHEMA, "gen": gen, "logical_sha256": logical_sha256,
+            "pages_sha256": pages_digest(files), "index_sha256": sha256_hex(files[PUBLIC_INDEX]),
+            "generation_sha256": files_digest(files),
+            "page_set": {k: sha256_hex(b) for k, b in sorted(files.items()) if k != PUBLIC_INDEX},
+            "events": []}
+
+
+def _clock_reading(private, clock, state: dict) -> dict:
+    """One heartbeat per run: the producer's time and the store's own time for a write made now.
+
+    A clock that reads earlier than its recorded high-water mark, or a store that reports no
+    modification time, is recorded as refused: no expiry deletion this run (retention only grows)."""
+    producer = clock()
+    private.put(HEARTBEAT_KEY, encode_json({"producer_at": iso(producer)}), "application/json")
+    reader = getattr(private, "last_modified", None)
+    storage = reader(HEARTBEAT_KEY) if reader is not None else None
+    last = state.get("clock") or {}
+    refused = []
+    last_p = parse_iso(last["producer_at"]) if last.get("producer_at") else None
+    last_s = parse_iso(last["storage_at"]) if last.get("storage_at") else None
+    if last_p is not None and producer < last_p:
+        refused.append("producer clock is earlier than its last recorded reading")
+    if storage is None:
+        refused.append("the store reports no modification time")
+    elif last_s is not None and storage < last_s:
+        refused.append("store clock is earlier than its last recorded reading")
+    # High-water marks: a reading is never allowed to move them backwards.
+    high_p = producer if last_p is None else max(producer, last_p)
+    if storage is None:
+        high_s = last_s
+    else:
+        high_s = storage if last_s is None else max(storage, last_s)
+    state["clock"] = {
+        "producer_at": iso(high_p),
+        "storage_at": iso(high_s) if high_s is not None else None,
+        "last_reading": {"producer": iso(producer), "storage": iso(storage) if storage is not None else None},
+        "refused": refused,
+    }
+    return {"producer": producer, "storage": storage, "refused": refused}
+
+
+def _elapsed(event: dict, reading: dict) -> tuple[float | None, float | None]:
+    p = (reading["producer"] - parse_iso(event["producer_at"])).total_seconds()
+    s = None
+    if reading["storage"] is not None and event.get("storage_at"):
+        s = (reading["storage"] - parse_iso(event["storage_at"])).total_seconds()
+    return p, s
+
+
+def _time_passed(event: dict, reading: dict, need_s: float, policy: GenerationPolicy) -> tuple[bool, str]:
+    """Both clocks show need_s since event, agree within the skew, neither went backwards."""
+    if reading["refused"]:
+        return False, "clock refused: " + "; ".join(reading["refused"])
+    p, s = _elapsed(event, reading)
+    if s is None:
+        return False, "no store time for this event or run"
+    if min(p, s) < need_s:
+        return False, f"protected until both clocks show {int(need_s)}s (producer {int(p)}s, store {int(s)}s)"
+    if abs(p - s) > policy.clock_skew_s:
+        return False, f"producer and store elapsed disagree by {int(abs(p - s))}s (> {policy.clock_skew_s}s skew)"
+    return True, ""
+
+
+def classify(records: dict[str, dict], live_gen: str | None, listed: dict[str, list[str]], reading: dict,
+             policy: GenerationPolicy) -> dict[str, dict]:
+    """gen -> {"class": current|protected|expired|orphan|uncertain|unknown|gone, "why": ...}.
+
+    Only orphan and expired pages may be deleted. Unknown (public pages with no ledger record) and
+    uncertain generations are always retained."""
+    out = {}
+    for gen in sorted(set(records) | set(listed)):
+        rec = records.get(gen)
+        if rec is None:
+            out[gen] = {"class": "unknown", "why": "public pages with no ledger record: retained"}
+            continue
+        if gen == live_gen:
+            out[gen] = {"class": "current", "why": "named by the live index"}
+            continue
+        if gen not in listed:
+            out[gen] = {"class": "gone", "why": "no public pages"}
+            continue
+        epoch = _epoch(rec)
+        if epoch is not None and epoch["kind"] == "ceased":
+            ok, why = _time_passed(epoch, reading, policy.delete_after_s, policy)
+            if ok and not policy.clock_bound_verified:
+                ok, why = False, "clock bound unverified: expiry deletion refused"
+            out[gen] = {"class": "expired" if ok else "protected", "why": why or "past the reader grace"}
+            continue
+        if epoch is not None:
+            # Recorded current but not the live index: reconciliation ceases these before classify runs.
+            out[gen] = {"class": "uncertain", "why": f"ledger says {epoch['kind']} but the live index differs"}
+            continue
+        kinds = _kinds(rec)
+        if "index_put_attempted" not in kinds:
+            out[gen] = {"class": "orphan", "why": "written, never offered to readers (no index write attempted)"}
+            continue
+        last_attempt = max(i for i, k in enumerate(kinds) if k == "index_put_attempted")
+        fences = [e for e in rec["events"][last_attempt + 1:] if e["kind"] == "fenced"]
+        if fences:
+            ok, why = _time_passed(fences[-1], reading, policy.fence_delay_s, policy)
+            if ok and live_gen is not None:
+                out[gen] = {"class": "orphan", "why": "fenced, fence delay passed, live index is another generation"}
+                continue
+            out[gen] = {"class": "uncertain", "why": f"fenced; waiting for the fence delay ({why})"}
+            continue
+        out[gen] = {"class": "uncertain",
+                    "why": "an index write was attempted and never settled: the old index alone does not prove "
+                           "it was not published; settle by a matching live index or `publish-fence`"}
+    return out
+
+
+def _live_match(public: "PublicViewStore", records: dict[str, dict]) -> tuple[str | None, str | None, bytes | None]:
+    """(gen the live index matches in full, problem, live index bytes). Read-only."""
+    live = public.get(PUBLIC_INDEX)
+    if live is None:
+        return None, None, None
+    live_sha = sha256_hex(live)
+    try:
+        parsed = json.loads(live)
+    except ValueError:
+        return None, "the live index is not JSON", live
+    matches = []
+    for rec in records.values():
+        if rec["index_sha256"] != live_sha:
+            continue
+        if not isinstance(parsed, dict) or parsed.get("gen") != rec["gen"] or parsed.get("pages_sha256") != rec["pages_sha256"]:
+            continue
+        if all((body := public.get(k)) is not None and sha256_hex(body) == h for k, h in rec["page_set"].items()):
+            matches.append(rec["gen"])
+    if len(matches) != 1:
+        return None, ("the live index matches no recorded generation in full (index hash, gen, pages_sha256 and "
+                      "every page hash)" if not matches else f"the live index matches several records: {matches}"), live
+    return matches[0], None, live
+
+
+def _reconcile(private, public, state: dict, records: dict[str, dict], reading: dict) -> dict:
+    """Settle the ledger against the live index before anything is started or deleted.
+
+    The generation the live index matches (in full) is current: it gets a published/restored event if
+    its epoch was not already current, and every other generation recorded as current gets a ceased
+    event stamped now (never earlier than the truth). Anything that cannot be matched blocks the run."""
+    gen, problem, live = _live_match(public, records)
+    if problem:
+        return {"live": None, "blocked": problem}
+    if live is None:
+        if state.get("committed") is not None:
+            return {"live": None, "blocked": "the live index is missing although state records a committed generation"}
+        return {"live": None, "blocked": None}
+    rec = records[gen]
+    epoch = _epoch(rec)
+    if epoch is None or epoch["kind"] == "ceased":
+        action = (state.get("in_progress") or {}).get("action")
+        _event(private, rec, "restored" if (epoch is not None or action == "restore") else "published", reading)
+    for other in records.values():
+        if other["gen"] == gen:
+            continue
+        e = _epoch(other)
+        if e is not None and e["kind"] in ("published", "restored"):
+            _event(private, other, "ceased", reading)
+    committed = state.get("committed") or {}
+    if committed.get("gen_id") != gen:
+        index = json.loads(live)
+        state["committed"] = {"gen_id": gen, "action": (state.get("in_progress") or {}).get("action", "reconciled"),
+                              "build_as_of": index["build_as_of"], "published_at": iso(reading["producer"]),
+                              "index_sha256": rec["index_sha256"], "generation_sha256": rec["generation_sha256"],
+                              "pages": len(rec["page_set"]), "views_total": index["views_total"],
+                              "complete": index["complete"], "previous_gen_id": committed.get("gen_id")}
+    if (state.get("uncertain") or {}).get("gen") == gen:
+        state["uncertain"] = None
+    if (state.get("in_progress") or {}).get("gen_id") == gen:
+        state["in_progress"] = None
+    return {"live": gen, "blocked": None}
+
+
+def _cleanup(private, public: "PublicViewStore", records: dict[str, dict], live_gen: str | None, reading: dict,
+             policy: GenerationPolicy, report: PublishReport, keep: set) -> dict[str, dict]:
+    """Delete orphan and expired generations' pages (never current, protected, uncertain or unknown).
+    Runs every time, before admission, and needs no new commit."""
+    listed = public.pages_by_gen()
+    classes = classify(records, live_gen, listed, reading, policy)
+    for gen, info in classes.items():
+        if gen in keep or info["class"] not in ("orphan", "expired"):
+            continue
+        for key in listed.get(gen, []):
+            public.delete(key)
+            report.deleted.append(key)
+        _event(private, records[gen], "pages_deleted", reading, reason=info["class"])
+        report.retired[gen] = info["class"]
+    return classes
+
+
+def _run(private, public: "PublicViewStore", gen: str, files: dict[str, bytes], clock, *, action: str,
+         policy: GenerationPolicy, keep_snapshots: int, snapshot: bool, logical_sha256: str | None,
+         lease_holder=None, break_stale_lease=False) -> PublishReport:
+    """Reconcile, clean up, admit, write the generation, commit the index, reconcile again."""
     with WriterLease(private, clock, lease_holder, break_stale=break_stale_lease, key=PUBLISH_LEASE_KEY):
         state = read_state(private)
-        report = PublishReport(gen_id, action)
+        report = PublishReport(gen, action)
         if state.get("in_progress"):
             report.recovered_from = state["in_progress"]["gen_id"]
-        stage = "start"
+        stage = "clock"
         try:
-            state["in_progress"] = {"gen_id": gen_id, "action": action, "started_at": iso(clock()),
+            reading = _clock_reading(private, clock, state)
+            _write_state(private, state)
+            stage = "reconcile"
+            records, ledger_problems = read_ledger(private)
+            if ledger_problems:
+                state["blocked"] = {"at": iso(reading["producer"]), "why": "generation ledger: " + "; ".join(ledger_problems[:5])}
+                _write_state(private, state)
+                raise PublishBlocked(f"history is uncertain ({state['blocked']['why']}); nothing written or deleted")
+            settled = _reconcile(private, public, state, records, reading)
+            if settled["blocked"]:
+                state["blocked"] = {"at": iso(reading["producer"]), "why": settled["blocked"]}
+                _write_state(private, state)
+                raise PublishBlocked(f"{settled['blocked']}; nothing written or deleted until an operator settles it")
+            state["blocked"] = None
+            _write_state(private, state)
+            stage = "cleanup"
+            classes = _cleanup(private, public, records, settled["live"], reading, policy, report, keep={gen})
+            uncertain = sorted(g for g, c in classes.items() if c["class"] == "uncertain" and g != gen)
+            if uncertain:
+                state["paused"] = {"at": iso(reading["producer"]), "why": f"uncertain index write for {uncertain}"}
+                _write_state(private, state)
+                raise PublishPaused(f"publication paused: generation(s) {uncertain} are uncertain (an index write was "
+                                    "never settled); a conflicting index write could reorder with it. Settle by "
+                                    "reconciliation or `publish-fence` after confirming no writer is running")
+            listed = public.pages_by_gen()
+            report.public_pages = sum(len(v) for v in listed.values())
+            if settled["live"] == gen:
+                state["paused"] = None
+                _write_state(private, state)
+                report.unchanged = len(files)
+                _receipt(private, clock, report, {"note": "already current"})
+                return report
+            stage = "admission"
+            present = set(k for keys in listed.values() for k in keys)
+            missing = [k for k in files if k != PUBLIC_INDEX and k not in present]
+            if report.public_pages + len(missing) > policy.page_cap:
+                state["paused"] = {"at": iso(reading["producer"]),
+                                   "why": f"page cap: {report.public_pages} present + {len(missing)} missing > {policy.page_cap}"}
+                _write_state(private, state)
+                raise PublishPaused(f"publication paused at the page cap ({state['paused']['why']}); protected pages "
+                                    "are never evicted, cleanup continues every run")
+            state["paused"] = None
+            state["in_progress"] = {"gen_id": gen, "action": action, "started_at": iso(reading["producer"]),
                                     "keys": len(files)}
             _write_state(private, state)
+            stage = "ledger"
+            rec = records.get(gen)
+            fresh = _new_record(gen, files, logical_sha256)
+            if rec is None:
+                rec = fresh
+            elif any(rec[k] != fresh[k] for k in ("pages_sha256", "index_sha256", "generation_sha256", "page_set")):
+                raise PublishIntegrityError(f"generation {gen} is recorded with different content; refusing to reuse it")
+            # Never offered to readers: no index write attempted and never current. Only then may a page of
+            # this generation that holds wrong bytes (a failed earlier attempt) be replaced.
+            offered = "index_put_attempted" in _kinds(rec) or _epoch(rec) is not None
+            _event(private, rec, "candidate", reading, action=action)
             if snapshot:
                 stage = "snapshot"
-                _snapshot(private, gen_id, files, clock)
+                _snapshot(private, gen, files, clock)
             stage = "pages"
             for key in page_write_order(files):
-                if public.get(key) == files[key]:
-                    report.unchanged += 1
-                    continue
-                _put_verified(public, key, files[key])
-                report.written.append(key)
-            stage = "index"   # the commit point
-            if public.get(PUBLIC_INDEX) == files[PUBLIC_INDEX]:
-                report.unchanged += 1
-            else:
-                _put_verified(public, PUBLIC_INDEX, files[PUBLIC_INDEX])
-                report.written.append(PUBLIC_INDEX)
-            stage = "cleanup"
-            report.foreign_keys = public.foreign_keys()
-            for key in public.list_views():
-                if key not in files:
-                    public.delete(key)
+                body = files[key]
+                created = public.put_if_absent(key, body, "application/json", PAGE_CACHE_CONTROL)
+                if not created and not offered and public.get(key) != body:
+                    public.delete(key)          # our own never-offered leftover: no reader can hold it
                     report.deleted.append(key)
-            stage = "state"
-            previous = (state.get("committed") or {}).get("gen_id")
-            state["committed"] = {"gen_id": gen_id, "action": action, "build_as_of": index["build_as_of"],
-                                  "published_at": iso(clock()), "index_sha256": sha256_hex(files[PUBLIC_INDEX]),
-                                  "generation_sha256": generation_digest(files),
-                                  "pages": len(files) - 1, "views_total": index["views_total"],
-                                  "complete": index["complete"], "previous_gen_id": previous}
-            state["in_progress"] = None
+                    created = public.put_if_absent(key, body, "application/json", PAGE_CACHE_CONTROL)
+                if public.get(key) != body:
+                    raise PublishIntegrityError(f"{key} exists with different bytes" if not created
+                                                else f"{key} did not read back as written")
+                if created:
+                    report.written.append(key)
+                else:
+                    report.unchanged += 1
+            stage = "index"   # the commit point
+            _event(private, rec, "index_put_attempted", reading)
+            failure = None
+            try:
+                public.put(PUBLIC_INDEX, files[PUBLIC_INDEX], "application/json", INDEX_CACHE_CONTROL)
+                ok = public.get(PUBLIC_INDEX) == files[PUBLIC_INDEX]
+            except Exception as exc:   # outcome unknown: the write may still land
+                ok, failure = False, exc
+            if not ok:
+                state["uncertain"] = {"gen": gen, "since": iso(reading["producer"]),
+                                      "why": f"{type(failure).__name__}: {failure}"[:300] if failure else "index did not read back"}
+                _write_state(private, state)
+                raise PublishIntegrityError(f"index write for {gen} is uncertain; the next run reconciles before "
+                                            "anything else")
+            report.written.append(PUBLIC_INDEX)
+            stage = "settle"
+            records, _ = read_ledger(private)
+            settled = _reconcile(private, public, state, records, reading)
+            if settled["live"] != gen:
+                state["uncertain"] = {"gen": gen, "since": iso(reading["producer"]),
+                                      "why": settled["blocked"] or "the live index does not match the candidate"}
+                _write_state(private, state)
+                raise PublishIntegrityError(f"index for {gen} read back but did not reconcile: {state['uncertain']['why']}")
             state["last_failure"] = None
             state["withdrawn"] = None
             _write_state(private, state)
             stage = "receipt"
+            report.public_pages = sum(len(v) for v in public.pages_by_gen().values())
             if snapshot:
-                report.snapshots_pruned = _prune_snapshots(private, keep_snapshots, {gen_id, previous} - {None})
-            _receipt(private, clock, report, {"build_as_of": index["build_as_of"]})
+                previous = state["committed"].get("previous_gen_id")
+                report.snapshots_pruned = _prune_snapshots(private, keep_snapshots, {gen, previous} - {None})
+            _receipt(private, clock, report, {"build_as_of": state["committed"]["build_as_of"]})
+        except (PublishBlocked, PublishPaused):
+            raise
         except BaseException as exc:
             _record_failure(private, state, stage, exc, clock)
             raise
@@ -649,53 +1054,100 @@ def _replace(private, public: PublicViewStore, files: dict[str, bytes], clock, *
 
 
 def publish(private, public, files: dict[str, bytes], clock, *, keep_snapshots: int = 3,
+            policy: GenerationPolicy = DEFAULT_POLICY, lease_holder=None, break_stale_lease=False) -> PublishReport:
+    """Publish builder output: validate, qualify into an immutable generation, then _run."""
+    public = public if isinstance(public, PublicViewStore) else PublicViewStore(public)
+    assert_separate(private, public)
+    if stopped(private) is not None:
+        raise PublishStopped(f"publication is stopped ({stopped(private).get('reason', '')}); run `resume` first")
+    validate_generation(files)
+    gen, qualified = qualify_generation(files)
+    validate_qualified(gen, qualified)
+    return _run(private, public, gen, qualified, clock, action="publish", policy=policy,
+                keep_snapshots=keep_snapshots, snapshot=True, logical_sha256=files_digest(files),
+                lease_holder=lease_holder, break_stale_lease=break_stale_lease)
+
+
+def restore(private, public, gen_id: str, clock, *, policy: GenerationPolicy = DEFAULT_POLICY,
             lease_holder=None, break_stale_lease=False) -> PublishReport:
-    """Replace the public generation with `files` (pages first, index last, stale pages after)."""
+    """Republish a retained snapshot byte-for-byte. Requires the stop marker. Counts missing pages
+    against the cap like a publication; the displaced generation's retirement starts now."""
     public = public if isinstance(public, PublicViewStore) else PublicViewStore(public)
-    return _replace(private, public, files, clock, action="publish", keep_snapshots=keep_snapshots,
-                    snapshot=True, lease_holder=lease_holder, break_stale_lease=break_stale_lease)
-
-
-def restore(private, public, gen_id: str, clock, *, lease_holder=None, break_stale_lease=False) -> PublishReport:
-    """Republish a retained snapshot byte-for-byte. Requires the stop marker, so a cycle cannot overwrite it."""
-    public = public if isinstance(public, PublicViewStore) else PublicViewStore(public)
+    assert_separate(private, public)
     if stopped(private) is None:
         raise PublishError("restore requires `stop` first, so the next cycle does not republish over it")
     files = load_snapshot(private, gen_id)
-    return _replace(private, public, files, clock, action="restore", keep_snapshots=0, snapshot=False,
-                    lease_holder=lease_holder, break_stale_lease=break_stale_lease, allow_stopped=True)
+    validate_qualified(gen_id, files)
+    return _run(private, public, gen_id, files, clock, action="restore", policy=policy, keep_snapshots=0,
+                snapshot=False, logical_sha256=None, lease_holder=lease_holder, break_stale_lease=break_stale_lease)
+
+
+def fence(private, public, gen: str, clock, *, reason: str, policy: GenerationPolicy = DEFAULT_POLICY,
+          lease_holder=None, break_stale_lease=False) -> dict:
+    """Operator settlement of an uncertain candidate, after confirming no writer or publisher process that
+    could still deliver its index write is running. Requires the stop marker. The candidate becomes
+    deletable only after fence_delay_s on both clocks and only while the live index is another generation."""
+    public = public if isinstance(public, PublicViewStore) else PublicViewStore(public)
+    if stopped(private) is None:
+        raise PublishError("fence requires `stop` first")
+    with WriterLease(private, clock, lease_holder, break_stale=break_stale_lease, key=PUBLISH_LEASE_KEY):
+        state = read_state(private)
+        records, problems = read_ledger(private)
+        if problems:
+            raise PublishBlocked("generation ledger: " + "; ".join(problems[:5]))
+        rec = records.get(gen)
+        if rec is None or "index_put_attempted" not in _kinds(rec) or _epoch(rec) is not None:
+            raise PublishError(f"{gen} is not an unsettled candidate (no attempted, unpublished index write)")
+        reading = _clock_reading(private, clock, state)
+        _event(private, rec, "fenced", reading, reason=reason[:300])
+        if (state.get("uncertain") or {}).get("gen") == gen:
+            state["uncertain"] = dict(state["uncertain"], fenced_at=iso(reading["producer"]))
+        _write_state(private, state)
+        return {"fenced": gen, "at": _at(reading), "deletable_after_s": policy.fence_delay_s,
+                "note": "the candidate is deleted by a later run only once both clocks show the fence delay and "
+                        "the live index is another generation"}
 
 
 def withdraw(private, public, clock, *, lease_holder=None, break_stale_lease=False) -> dict:
-    """Take the views down: index.json first (the panel then reports none published), then every page."""
+    """Explicit withdrawal: delete the origin index, then every generation's pages, at once (no grace).
+    Cached copies and downloads made before this cannot be recalled."""
     public = public if isinstance(public, PublicViewStore) else PublicViewStore(public)
     assert_separate(private, public)
     if stopped(private) is None:
         raise PublishError("withdraw requires `stop` first, so the next cycle does not republish")
     with WriterLease(private, clock, lease_holder, break_stale=break_stale_lease, key=PUBLISH_LEASE_KEY):
         state = read_state(private)
+        reading = _clock_reading(private, clock, state)
+        records, _problems = read_ledger(private)   # withdrawal deletes everything public regardless
         deleted = []
         if public.get(PUBLIC_INDEX) is not None:
             public.delete(PUBLIC_INDEX)
             deleted.append(PUBLIC_INDEX)
-        for key in public.list_views():
-            public.delete(key)
-            deleted.append(key)
+        for gen, keys in sorted(public.pages_by_gen().items()):
+            for key in keys:
+                public.delete(key)
+                deleted.append(key)
+            rec = records.get(gen)
+            if rec is not None:
+                if (_epoch(rec) or {}).get("kind") in ("published", "restored"):
+                    _event(private, rec, "ceased", reading, reason="withdrawn")
+                _event(private, rec, "pages_deleted", reading, reason="withdrawn")
         gen = (state.get("committed") or {}).get("gen_id")
         state["withdrawn"] = {"at": iso(clock()), "gen_id": gen, "deleted": len(deleted)}
         state["committed"] = None
         state["in_progress"] = None
         _write_state(private, state)
         report = PublishReport(gen or "none", "withdraw", deleted=deleted)
-        _receipt(private, clock, report, {})
-        return {"withdrawn_gen_id": gen, "deleted": len(deleted), "snapshots_kept": snapshot_ids(private)}
+        _receipt(private, clock, report, {"note": WITHDRAW_NOTE})
+        return {"withdrawn_gen_id": gen, "deleted": len(deleted), "snapshots_kept": snapshot_ids(private),
+                "uncertain": state.get("uncertain"), "note": WITHDRAW_NOTE}
 
 
 # --- operating status -------------------------------------------------------------
 
 def status(private, public, clock, *, interval_s: int = config.INTERVAL_S,
-           budget_s: int = config.CYCLE_BUDGET_S) -> dict:
-    """What an operator checks: published age, in-progress/failed attempts, stop, leftovers."""
+           budget_s: int = config.CYCLE_BUDGET_S, policy: GenerationPolicy = DEFAULT_POLICY) -> dict:
+    """What an operator checks. Read-only: no heartbeat, so expiry is shown on the producer clock only."""
     public = public if isinstance(public, PublicViewStore) else PublicViewStore(public)
     state = read_state(private)
     now = clock()
@@ -710,12 +1162,42 @@ def status(private, public, clock, *, interval_s: int = config.INTERVAL_S,
         problems.append("last_publication_failed")
     if state.get("in_progress"):
         problems.append("publication_interrupted")
+    if state.get("blocked"):
+        problems.append("publication_blocked")
+    if state.get("paused"):
+        problems.append("publication_paused")
+    if state.get("uncertain"):
+        problems.append("uncertain_index_write")
     if committed and age is not None and age > stale_after and not stopped(private):
         problems.append("published_views_stale")
     if committed and (live_index is None or sha256_hex(live_index) != committed["index_sha256"]):
         problems.append("public_index_differs_from_state")
     if committed is None and not state.get("withdrawn") and not stopped(private):
         problems.append("never_published")
+    records, ledger_problems = read_ledger(private)
+    if ledger_problems:
+        problems.append("ledger_unreadable")
+    live_gen, live_problem, _ = _live_match(public, records)
+    listed = public.pages_by_gen()
+    reading = {"producer": now, "storage": None, "refused": ["status is read-only (no store time)"]}
+    classes = classify(records, live_gen, listed, reading, policy)
+    generations = {}
+    waiting_on_clock_bound = False
+    for gen, info in classes.items():
+        entry = dict(info, pages=len(listed.get(gen, [])))
+        epoch = _epoch(records[gen]) if gen in records else None
+        if epoch is not None and epoch["kind"] == "ceased" and gen in listed:
+            earliest = parse_iso(epoch["producer_at"]) + timedelta(seconds=policy.delete_after_s)
+            entry["earliest_deletion_producer_clock"] = iso(earliest)
+            if now >= earliest and not policy.clock_bound_verified:
+                waiting_on_clock_bound = True
+        generations[gen] = entry
+    if waiting_on_clock_bound:
+        problems.append("expiry_blocked_clock_bound_unverified")
+    if any(c["class"] == "unknown" for c in classes.values()):
+        problems.append("unknown_public_generations")
+    if live_problem:
+        problems.append("live_index_unmatched")
     leases = {}
     for name, key in (("writer", LEASE_KEY), ("publish", PUBLISH_LEASE_KEY)):
         lease = _read_json(private, key)
@@ -729,9 +1211,15 @@ def status(private, public, clock, *, interval_s: int = config.INTERVAL_S,
             # Left behind by a process that did not exit cleanly. Never taken over automatically: the
             # operator confirms no writer or publisher runs, then passes --break-stale-lease.
             problems.append(f"stale_{name}_lease")
+    public_pages = sum(len(v) for v in listed.values())
     return {"now": iso(now), "stopped": stopped(private), "committed": committed, "leases": leases,
             "published_age_s": age, "stale_after_s": stale_after, "in_progress": state.get("in_progress"),
             "last_failure": state.get("last_failure"), "withdrawn": state.get("withdrawn"),
+            "blocked": state.get("blocked"), "paused": state.get("paused"), "uncertain": state.get("uncertain"),
+            "clock": state.get("clock"), "live_generation": live_gen, "generations": generations,
+            "public_pages": public_pages, "page_cap": policy.page_cap,
+            "policy": {"reader_grace_s": policy.reader_grace_s, "delete_after_s": policy.delete_after_s,
+                       "clock_bound_verified": policy.clock_bound_verified},
             "snapshots": snapshot_ids(private), "public_foreign_keys": public.foreign_keys(),
             "healthy": not problems, "problems": problems}
 
@@ -788,9 +1276,29 @@ def load_pilot_config(path) -> PilotConfig:
         problems.append(f"storage.public.prefix must be {PUBLIC_PREFIX}")
     if not 1 <= ((cfg.get("retention") or {}).get("snapshots") or 0) <= 10:
         problems.append("retention.snapshots must be 1..10")
+    gens = cfg.get("generations") or {}
+    reader_floor = config.GEN_READER_DEADLINE_S + config.GEN_INDEX_LEASE_S + config.GEN_READER_DEADLINE_S
+    if not isinstance(gens.get("reader_grace_s"), int) or gens["reader_grace_s"] < reader_floor:
+        problems.append(f"generations.reader_grace_s must be an integer >= {reader_floor} "
+                        "(index age + index lease + page request deadline)")
+    for name in ("clock_epsilon_s", "clock_skew_s", "fence_delay_s"):
+        if not isinstance(gens.get(name), int) or gens[name] <= 0:
+            problems.append(f"generations.{name} must be a positive integer")
+    per_generation = 7 * len(STREAM_KEYS) * len(MODES) * LIMITS.pages_per_view
+    if not isinstance(gens.get("page_cap"), int) or gens["page_cap"] < per_generation:
+        problems.append(f"generations.page_cap must be an integer >= {per_generation} (one pilot generation at its maximum)")
+    if gens.get("clock_bound_verified") not in (True, False):
+        problems.append("generations.clock_bound_verified must be true or false")
     if problems:
         raise PublishError("pilot config invalid: " + "; ".join(problems))
     return PilotConfig(cfg)
+
+
+def policy_from(cfg: PilotConfig) -> GenerationPolicy:
+    g = cfg["generations"]
+    return GenerationPolicy(reader_grace_s=g["reader_grace_s"], clock_epsilon_s=g["clock_epsilon_s"],
+                            clock_skew_s=g["clock_skew_s"], page_cap=g["page_cap"], fence_delay_s=g["fence_delay_s"],
+                            clock_bound_verified=g["clock_bound_verified"] is True)
 
 
 def bucket_store_from_env(env, prefix: str) -> R2ObjectStore:
@@ -817,10 +1325,11 @@ def pilot_cycle(private, public, spool, fetch, clock, cfg: PilotConfig, *, commi
                           break_stale_lease=break_stale_lease)
     now = (commit_clock or clock)()
     v = cfg["views"]
+    # qualified_limits leaves room for the generation-qualified keys and fields added on publication.
     files = build_views(load_archive(private), unavailable_prices(), as_of=now, tolerance_s=v["tolerance_s"],
-                        data_label=v["data_label"], dates=view_dates_for(now, v["days"]))
+                        data_label=v["data_label"], dates=view_dates_for(now, v["days"]), limits=qualified_limits())
     pub = publish(private, public, files, commit_clock or clock, keep_snapshots=cfg["retention"]["snapshots"],
-                  lease_holder=lease_holder, break_stale_lease=break_stale_lease)
+                  policy=policy_from(cfg), lease_holder=lease_holder, break_stale_lease=break_stale_lease)
     m = report.manifest
     return {"status": "published", "run": {"run_id": report.run_id, "status": m["status"],
                                            "committed_at": m["committed_at"], "counts": m["counts"],
@@ -828,6 +1337,8 @@ def pilot_cycle(private, public, spool, fetch, clock, cfg: PilotConfig, *, commi
             "publication": pub.summary()}
 
 
-__all__ = ["MODES", "STREAM_KEYS", "PublicViewStore", "PublishError", "PublishIntegrityError", "PublishStopped",
-           "assert_separate", "is_public_view_key", "load_pilot_config", "pilot_cycle", "publish", "read_state",
-           "restore", "resume", "status", "stop", "unavailable_prices", "validate_generation", "withdraw"]
+__all__ = ["DEFAULT_POLICY", "GenerationPolicy", "MODES", "STREAM_KEYS", "PublicViewStore", "PublishBlocked",
+           "PublishError", "PublishIntegrityError", "PublishPaused", "PublishStopped", "assert_separate", "classify",
+           "fence", "generation_of", "is_builder_view_key", "is_public_view_key", "load_pilot_config", "pilot_cycle",
+           "policy_from", "publish", "read_ledger", "read_state", "restore", "resume", "status", "stop",
+           "unavailable_prices", "validate_generation", "validate_qualified", "withdraw"]
