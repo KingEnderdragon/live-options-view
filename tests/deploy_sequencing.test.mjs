@@ -1032,3 +1032,42 @@ test('Repair 7: dry-run asset authorize/deploy succeed without API readiness; re
     rmSync(fresh, { recursive: true, force: true });
   }
 });
+
+// Repair 8 — Contradictory modes (execute:true + dryRun:true) must
+// refuse before any authorization or execution. dryRun skips the
+// readiness assertion and execute invokes the executor; the combination
+// executed a stub deploy with no API evidence (Brian's repair-7
+// verdict). The guard is in deploy(), the single choke point every
+// caller reaches (CLI, workflows, direct import), and it fires before
+// any state is read, so it holds on every target.
+test('Repair 8: execute:true with dryRun:true refuses; the executor never runs', () => {
+  const fresh = mkdtempSync(join(tmpdir(), 'deploy-modes-'));
+  const prevReleases = process.env.DEPLOY_RELEASES_DIR;
+  process.env.DEPLOY_RELEASES_DIR = fresh;
+  const s = makeStage(HEAD);
+  try {
+    // Dry-run authorize succeeds without API evidence (repair 7).
+    authorizeStage({ stage: s.stage, revision: HEAD, webCheck: WEB, apiCheck: API, authorizer: 'test', dryRun: true });
+    // The contradictory combination refuses and the executor never runs.
+    const exec = stubExecutor();
+    assert.throws(() => deployStaged({ stage: s.stage, revision: HEAD, execute: true, dryRun: true, executor: exec.fn }),
+      /Contradictory modes/);
+    assert.equal(exec.calls.length, 0, 'executor must never run for contradictory modes');
+    // The legitimate combinations still work: dry-run returns the
+    // dry-run command, and real mode still refuses without evidence.
+    const dry = deployStaged({ stage: s.stage, revision: HEAD, dryRun: true });
+    assert.equal(dry.dryRun, true);
+    assert.throws(() => deployStaged({ stage: s.stage, revision: HEAD, execute: true, dryRun: false, executor: stubExecutor().fn }),
+      /API service not ready/);
+    // The guard is target-agnostic: the API lane refuses the same way
+    // (it fires before any authorization is read).
+    const execApi = stubExecutor();
+    assert.throws(() => deployApi({ revision: HEAD, execute: true, dryRun: true, executor: execApi.fn }),
+      /Contradictory modes/);
+    assert.equal(execApi.calls.length, 0, 'API executor must never run for contradictory modes');
+  } finally {
+    cleanup(s);
+    process.env.DEPLOY_RELEASES_DIR = prevReleases;
+    rmSync(fresh, { recursive: true, force: true });
+  }
+});

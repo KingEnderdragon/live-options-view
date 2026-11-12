@@ -527,6 +527,20 @@ export function defaultExecutor(command, { configPath, revision, target }) {
 }
 
 export function deploy({ target = 'asset', stage, revision, execute = false, webCheck = null, apiCheck = null, executor = defaultExecutor, dryRun = false }) {
+  // Repair 8: contradictory modes. dryRun skips the readiness
+  // assertion and execute invokes the executor; the combination would
+  // execute a real deploy with no API evidence (a dry-run bypass).
+  // Refuse before any state is read or the lock is taken, on every
+  // target — the CLI, the workflows and direct callers all reach
+  // deploy(), so this is the single choke point. The legitimate
+  // combinations are execute=false + dryRun=true (dry-run: readiness
+  // skipped, nothing executes) and execute=true + dryRun=false (real
+  // deploy: readiness asserted). authorize() takes no execute flag and
+  // recheckBeforeExecute() is only called from deploy() after this
+  // guard, so neither can produce the combination; the workflows
+  // cannot either (deploy.yml never sets DEPLOY_DRY_RUN, and
+  // deploy-staged.yml derives it as !inputs.execute).
+  if (execute && dryRun) throw new Error('Contradictory modes: execute=true with dryRun=true — a real deploy must assert readiness; a dry-run must not execute');
   if (target !== 'asset' && target !== 'api' && target !== 'rollback') throw new Error("target must be 'asset', 'api' or 'rollback'");
   if (target === 'asset' && !stage) throw new Error('Asset deploy requires --stage');
   // The shared release lock is taken FIRST, before any state is read, and
