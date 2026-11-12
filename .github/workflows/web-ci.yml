@@ -1,9 +1,8 @@
 name: Web CI
 
-# The Worker and front end had no PR gate: crassus-ci.yml is path-filtered to
-# crassus/**, so a change to worker.js or site/ showed a green tick that had
-# tested none of it -- while merging to master fires deploy.yml straight into
-# production. This runs the JS suites on any PR that touches those paths.
+# Tests exact candidate inputs for the separate asset/API release lanes.
+# Neither deployment workflow auto-promotes on push; each requires explicit
+# dispatch, successful Web CI for its candidate and production approval.
 on:
   pull_request:
     paths:

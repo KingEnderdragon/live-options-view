@@ -1,3 +1,9 @@
+# LEGACY COMBINED-WORKER RESTORATION ONLY — not the live asset configuration.
+# Bare `wrangler deploy` reads this file and would undo site/API separation.
+# Ordinary site releases use .github/workflows/deploy-staged.yml, which stages
+# wrangler.assets.toml. API releases explicitly use wrangler.api.toml.
+# Retained for the gated combined-restoration path; see docs/SITE_RELEASES.md.
+
 name = "live-options-view"
 main = "backend/index.js"
 compatibility_date = "2026-06-23"

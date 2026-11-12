@@ -1,89 +1,134 @@
 # Independent site releases and rollback (#225)
 
-Proposed operating procedure, pending Nova's G3b/G4b receipts and provider review. This file is the procedure; dated command receipts belong in docs/receipts or the quest Log, not appended here. Current production still uses the combined Worker until the separately approved one-time transition. Do not merge this lane into an automatically promoted branch as though topology already changed.
+Current operating procedure after the November 12, 2026 cutover. The public
+`live-options-view` Worker serves staged assets and forwards API/data requests
+to `live-options-api`. The API owns accounts, execution, D1, operational R2
+access and the sole settlement cron. Railway producers remain separate.
 
-## Local work
+Cutover revision: `f759582e2b327989e31749ddfeae7df9c6474890`.
+[API execution](https://github.com/OwenTanzer/live-options-view/actions/runs/43211318484)
+and [asset execution](https://github.com/OwenTanzer/live-options-view/actions/runs/43212278203)
+succeeded. Nova's implementation quest is closed; final normal-operation
+acceptance remains on the strategy's checks page for November 12, 16:45 Pacific.
+These receipts establish the cutover, not the result of that later check.
 
-Use an isolated LF worktree at the reviewed revision (Node 24; Node 22 needs --experimental-sqlite). Run:
+## Choose the release lane
 
-```
-node --test tests/asset_boundary.test.mjs tests/preview_isolation.test.mjs tests/preview_transport.test.mjs tests/asset_rollback.test.mjs tests/preview_storage_boundary.test.mjs
+| Change | Route | What stays running |
+|---|---|---|
+| HTML, CSS, browser JavaScript and packaged images | `deploy-staged.yml` | API and Railway producers |
+| Gateway/policy or asset-build/configuration changes | Affected boundary review, then `deploy-staged.yml` | API and producers, provided contracts remain compatible |
+| Backend handlers or API configuration | Separately reviewed `deploy.yml` API release | Asset version and producers |
+| Producer code or shared Python packaging | Affected Railway producer release | Unrelated services; a producer restart creates a real capture gap |
+| Schema, shared contracts or mixed changes | Explicit compatibility and ordering plan | Determined by the affected services |
+| Markdown/docs only | No Cloudflare promotion needed | All Cloudflare services; check Railway watch scopes if prose is inside producer directories |
+
+Both Cloudflare workflows are **manual dispatch only**, share concurrency group
+`deploy-live-options-view`, require the protected `production` environment,
+and query successful Web CI for the exact candidate. Cloudflare native Builds
+were disabled at cutover. A merge alone does not publish the website.
+
+**Do not run bare `wrangler deploy`.** Root `wrangler.toml` is the legacy
+combined-Worker restoration configuration, retained for the explicit rollback
+procedure below. It would replace the asset gateway with operational code.
+`wrangler.assets.toml` uses a staged `payload/` layout and must not be deployed
+directly from the source checkout either. Use the workflow.
+
+## Ordinary site release during market hours
+
+1. Review the complete change. Run `python tests/test_changed_paths.py` to
+   identify affected services; mixed/producer changes are not site-only.
+2. Commit the candidate and obtain successful Web CI for its full 40-character
+   SHA. Record the current asset revision/version for rollback. For the first
+   continuity canary use the existing #225 observation, not another study.
+3. Dispatch the asset workflow at the current reviewed workflow ref, supplying
+   the candidate SHA and `execute=true`. For example, from this repository:
+
+   ```sh
+   gh workflow run deploy-staged.yml --ref master -f revision=FULL_CANDIDATE_SHA -f execute=true
+   ```
+
+4. Approve that run's `production` environment deployment. The workflow builds
+   and stages on its runner, verifies the API service exists, binds the exact
+   revision/config/checks in its authorization, then rechecks under the release
+   lock before deployment. Dry-run is the default when `execute` is omitted;
+   a dry-run does not publish anything. No API release, migration, write fence,
+   secret copy or producer restart is part of an ordinary asset release.
+5. Read back the successful run/provider version and verify `/__environment`
+   and `X-Asset-Revision` at https://options.moopertonic.net against the candidate.
+   Check the changed feature and expected data/auth behavior. Preserve the API
+   version, sole API cron and producer identities; inspect unexpected changes
+   rather than restarting a collector to manufacture freshness.
+
+The artifact contains allowed site assets plus the two frontend gateway/policy
+modules. It excludes backend and producer code, credentials and Markdown prose.
+The gateway has ASSETS/API bindings, explicit empty crons and no direct D1/R2/KV
+binding. HTML is served with `no-store`. Static requests still invoke the
+gateway (`run_worker_first=true`); no free-invocation or latency claim is made.
+Browser API calls retain their same-origin URLs. Public archive reads on the
+custom domain still use the fixed public R2 origin; `/browser-data/` retains its
+workers.dev origin restriction. A custom-domain 403 from that proxy alone is
+not evidence of a capture failure. The legacy `/r2-proxy/` is GET-only and uses
+the bounded public-key policy, not arbitrary object access.
+
+## Local preview and artifact inspection
+
+Use Node 24 (Node 22 requires `--experimental-sqlite`) in an isolated clean
+checkout. These checks and local preview do not contact production writers:
+
+```sh
+node --test tests/asset_boundary.test.mjs tests/preview_isolation.test.mjs tests/preview_transport.test.mjs tests/asset_rollback.test.mjs tests/preview_storage_boundary.test.mjs tests/deploy_sequencing.test.mjs
 node scripts/preview-local.mjs
 ```
 
-The preview serves only http://localhost:8787, uses disposable in-memory SQLite with migrations 0001/0002 and an operational-prefix-only memory store, and has no cron or production credentials. All backend outbound fetches are replaced with deterministic quote fixtures; public data is a separate read-only fixture binding. Register a disposable account; never enter a production password. Stop with Ctrl+C; state disappears. The visible banner, environment endpoint, response headers and connect-src/form-action self policy identify and confine preview. The frontend's off-production direct-R2 selector is rewritten in the served preview HTML only; production source remains unchanged. This is application-level local emulation, not a provider-permission test.
+Preview uses localhost:8787, disposable SQLite/memory stores and fixture quotes
+and public data. Use disposable credentials. Ctrl+C stops it; state disappears.
+Hosted preview would need separate disposable resources and provider approval;
+local emulation is not a provider-permission test.
 
-Rendered check (Playwright 1.56.1 and its Chromium installed outside the repo):
+For inspection, choose new OUT and STAGE directories outside the source and
+outside each other, replacing all placeholders:
 
-```
-# PowerShell; adjust tool/evidence directories to the local installation.
-$env:NODE_PATH='C:\Users\Owen\Apps\renaissance-225-musef-tools\node_modules'
-$env:MUSEF_EVIDENCE_DIR='C:\Users\Owen\Apps\renaissance-225-musef-evidence'
-node tests/preview_browser.test.mjs
-```
-
-The browser test intercepts all requests at the local gateway; it renders registration/session, Historical chain/sidebar and mobile Historical, and attempts a production-origin POST that CSP must block before transport. Direct handler tests also execute local quotes, paper execution and expired-option settlement with production cookies refused by the empty local DB. No production account mutation is tested.
-
-## Exact-revision artifact and plan
-
-From a clean worktree at the full reviewed SHA, choose a NEW output directory OUT outside the source, and a NEW staging directory STAGE outside source/OUT. Replace the capitalized arguments below with literal paths/SHAs, not unexpanded placeholder words.
-
-```
-node scripts/build-assets.mjs --revision FULL_REVIEWED_SHA --out OUT
+```sh
+node scripts/build-assets.mjs --revision FULL_CANDIDATE_SHA --out OUT
 node scripts/build-assets.mjs --verify OUT
 node scripts/prepare-asset-release.mjs --artifact OUT --out STAGE
 node scripts/prepare-asset-release.mjs --verify-stage STAGE
 ```
 
-The CLI refuses dirty/wrong-HEAD/pre-floor source, copies tracked assets only (not ignored/unreviewed local files), stamps BUILD_ID, copies the tiny gateway/policy, and writes a hash inventory and same-origin-d1-v1/schema contract. It excludes backend code, producer code, Wrangler configs, credentials and Markdown prose. The library's synthetic-ID test helper is not a source attestation; production packaging uses the CLI. Preserve the original release.json separately with the approved revision and provider receipt; a self-hashed manifest is not a signature.
+The CLI requires clean exact-HEAD source. Staging selects the applied root asset
+config, refuses invalid/drifted source and records payload/config hashes. Stage
+verification alone proves retained integrity, not permission or current-source
+freshness. The deployment gate binds `config_root` and revalidates current
+source, authorization and checks immediately before execution. Never edit an
+old plan/hash to make a changed candidate pass. Historical proposal templates
+under `patches/` are not ordinary release configurations.
 
-Staging prefers the actual applied root wrangler.assets.toml; only while that file is absent does it use the proposed template, labelled proposal-only. It never ignores an invalid present applied file by falling back. The plan records selected source/state and staged-config SHA256; the staged bytes, not a stale proposal, are authoritative. A narrow fail-closed TOML subset admits only the named gateway, payload/site assets, one API binding, production identity, date and optional exact revision. Explicit [triggers] with crons = [] is REQUIRED to clear the old asset target schedule; omission is not clearing. Nonempty schedules, every other trigger field, operational bindings, extra environments/fields, target/path drift and duplicate fields/tables are refused before stage creation. Config links/escapes are refused. Staging re-verifies payload/schema, copies under payload/ and writes plan.json with one asset target, unchanged API and empty producer/schema/recovery actions. --verify-stage rechecks config/payload/plan/command before any separately authorized use; the recorded command is PowerShell-literal quoted. No command is executed. Nova must review/apply the shared configuration and ordered workflow patches. Build and staging do not grant deployment authority.
+## Website-only rollback
 
-### Stage integrity versus current-source attestation
+Use an accepted previous **separated asset** artifact with the current API/schema
+contract. Verify old and current manifests, then stage the old against current:
 
---verify-stage checks the retained stage's payload, config bytes/hash, plan metadata and command using this verifier's schema contract. It does not reselect or read live config_source, attest the latest source revision, prove current deployed API/schema/IAM, or enforce CI success/serialization. The verifier still requires its pinned migration files; self-contained config verification does not mean a source-free executable. An unchanged stage can pass after its named source config changes, becomes invalid, or a new applied root config replaces its proposal fallback. That pass establishes integrity, not freshness or permission.
-
-Immediately before any separately authorized promotion, Nova's serialized exact-revision gate must establish the approved source/config snapshot and successful required checks. Reselect configuration from that snapshot (applied root wins; invalid present root refuses), require applied-source, and compare selected path/state AND SHA256 against the accepted config receipt and retained plan. Re-stage into a NEW directory from the same approved artifact and current accepted config, then verify it; compare revision, schema, targets and empty operational actions as well as selected config provenance. A change requires renewed affected review/tests and a new accepted plan, never an edited old hash or silent fallback. A stale branch checkout cannot establish freshness merely because its own hash matches. Record source SHA/config hash/check conclusion and hold the same promotion lock/snapshot through deployment; changed source/config, failed or missing checks, superseding candidate or lost lock stops promotion. This is Nova's G3b responsibility, not a new deploy command here. Brian's config_evidence_stale and acceptance_evidence_stale identify which evidence to refresh; neither is provider authority.
-
-Repair 2 (2026-11-11) — this freshness check is now enforced by the gate itself, not only documented here: `verifyCurrentSourceFreshness()` in scripts/deploy-staged-payload.mjs re-reads the current source config from the config root recorded in the stage plan (`config_root`), validates it, and compares its SHA256 to the authorized record. It runs at authorize time and again in recheckBeforeExecute(), inside the shared lock, immediately before the executor. A missing, invalid, or drifted source refuses promotion; the operator re-stages and re-authorizes a new candidate. An integrity-only --verify-stage pass never substitutes for this gate check.
-
-Repair 3 (2026-11-11) — the selected config root is now BINDING, not just recorded in the plan: the authorization record binds `config_root` at authorize time, and the gate refuses any later redirection — `deploy()` and `recheckBeforeExecute()` compare the plan's `config_root` against the record's bound root and refuse if they differ, so pointing the plan at an old valid copy cannot let the executor run while the original source is invalid. A record with no bound root (pre-repair-3) also refuses; the operator re-authorizes.
-
-## One-time transition and provider gates (Nova C2)
-
-Read docs/ASSET_BOUNDARY.md and Brian's docs/RELEASE_BOUNDARIES.md at his accepted candidate. Verify provider facts rather than treating repository comments as readback. In particular identify all promotion paths including native Builds, check enforcement/order for exact reviewed SHA, routes/custom domains, API secrets and binding targets, settlement trigger ownership, and disposable preview resource IDs. Hosted preview must bind only separately provisioned preview D1/operational storage/API/quote fixtures; it cannot reuse the API production config, production credentials, production sessions or write bucket. Gateway identity strings are checks, not IAM proof. Nova owns the production public-read adapter and generic proxy restriction; local PUBLIC_DATA is fixture-only.
-
-The proposed resource/configuration changes are in patches/musef-225: a separate API service carrying the existing D1/operational binding and exact settlement cron, an asset gateway retaining the original public name/origin with only ASSETS/API service bindings and run_worker_first, one backend fallback-to-404 patch, a deployment-note reconciliation patch, and removal of recovery's unused R2 write binding. Existing root config/workflows are not changed by this lane. Nova alone applies shared entry/config/workflow changes. Copy applicable API secrets under existing approval; never copy them to frontend/preview. Asset config MUST explicitly set [triggers] crons = [] during cutover: omission may retain the old combined Worker's schedule. Nova applies it and returns actual provider trigger readback showing the asset service has no cron and only the intended API service retains the reviewed schedule. A validated empty array is local intent, not evidence that provider clearing occurred. Do not run two settlement crons during transfer. If Workers.dev name ownership cannot be switched reversibly without a service gap, return the concrete route constraint for an Owen-reviewed dispatcher alternative; do not silently redirect browsers to a different API hostname.
-
-Auth has an existing split worth preserving, not inventing away: checkOrigin currently accepts options.moopertonic.net and localhost:8787, whereas browser-data enforces the workers.dev production origin. Forward the original public Request URL and Origin unchanged; changing either policy belongs to Nova's reviewed shared patch. No CORS expansion or cookie Domain rewrite is included here. Keep the combined Worker as the transition rollback until the new API binding/topology is verified; reversal of that first transition is a separate C2 action, not ordinary asset rollback.
-
-## Compatibility effects requiring explicit review
-
-The extension allowlist excludes site/**/*.md: previously public Markdown prose URLs become404 in the separated artifact. This is a deliberate proposed compatibility change, not silently accepted continuity; Nova/controller must accept it or return a bounded requirement before release. Worker-first HTML is no-store rather than the prior reported max-age=0 behavior: it prevents document reuse without fetching, while static asset responses otherwise retain their binding headers. run_worker_first=true invokes the gateway for every static request, including those served by ASSETS; account for added invocation/latency/cost against the actual plan and request volume, neither measured here. Do not claim the static-assets-only/free invocation budget applies. These effects add no hosting/provisioning requirement.
-
-MediaFlow9063cd4 reportedly adds news/v1/views/** public reads. That commit's acceptance source is absent from this local object database and the baseline backend/preview policy has no such namespace, so current preview denies it. Exact integration delta for Nova: reconcile frontend/preview-policy.mjs publicReadAllowed with the accepted backend/browser-data.js news/v1/views/** predicate, add representative accepted news fixtures and backend-versus-preview parity tests in preview_transport, and retain query400/unknown-key404 behavior, forbidden operational namespaces and denied generic proxy. Copy only an accepted data-only predicate/list, never import backend operational code into gateway or overwrite MediaFlow's shared source. Until the exact accepted key/query corpus is returned, news compatibility is pending, not proven by older green parity totals.
-
-Hosted preview, if separately needed/authorized, requires isolated allowed-origin configuration in backend/common.js plus disposable bindings; leave production origins unchanged. Current local emulation remains sufficient for local A1. A same-origin hook in index.html overlaps MediaFlow and belongs to Nova's reviewed integration, not this local repair. No Jayden assignment is reopened by consuming his review.
-
-## Ordinary release after transition acceptance
-
-Run the exact-revision checks, package, verify and stage; immediately before authorized promotion perform BOTH --verify-stage and the current-source/config revalidation above, including fresh staging and config_source/config_sha256/applied-source matching to Nova's accepted receipt. An integrity-only pass never substitutes for that freshness gate. A proposal-only stage is review material, not production-ready configuration. Nova's ordered gate must select/test the same SHA it promotes and serialize promotions, including explicit manual bypasses; the current combined deploy.yml is not that gate. Only under the applicable existing production authority, execute the proposed asset-only Wrangler command from STAGE/plan.json. Confirm provider success/version and public BUILD_ID/X-Asset-Revision against the retained artifact, unchanged API service revision/config/cron, public reads and an isolated/nonmutating auth check. Record canary/receipt under A2; no collector restart is part of this procedure. Asset, API and producer promotion are separate actions. Account/execution/settlement code changes require their own API candidate, tests and authorization; routine asset release must not publish them.
-
-## Website-only rollback and D1 floor
-
-Choose an accepted previously retained asset artifact, not an arbitrary old Git checkout. Verify both old and current artifacts, then stage the old with current as compatibility reference:
-
-```
+```sh
 node scripts/build-assets.mjs --verify OLD_ARTIFACT
 node scripts/build-assets.mjs --verify CURRENT_ARTIFACT
 node scripts/prepare-asset-release.mjs --artifact OLD_ARTIFACT --current CURRENT_ARTIFACT --out NEW_ROLLBACK_STAGE
 node scripts/prepare-asset-release.mjs --verify-stage NEW_ROLLBACK_STAGE
-node --test tests/asset_rollback.test.mjs
 ```
 
-Execute no deployment automatically: Nova reviews the generated old-revision asset-only plan under existing authority. The local executable rollback swaps both packaged gateway/policy and site payload while keeping the same API binding object, D1 instance/accounts/sessions, schema and producer targets. It refuses modified/missing/extra payload, mismatched schemas or API targets, producer actions, a changed floor, recovery serving or legacy KV serving. Its two release IDs are explicitly synthetic same-source protocol fixtures, not a historical production rollback receipt; the exact candidate artifact is separately built and rendered. A real prior accepted separated artifact becomes the ordinary rollback target after the first transition; do not claim it already exists.
+Promote the old asset revision through the same protected asset lane after
+compatibility review; for the workflow, Web CI must exist for that revision and
+its build tooling must remain compatible. A retained-stage local promotion must
+use the reviewed gate and applicable release authority. Verify the restored
+asset revision and unchanged API/cron/producers. No schema, account, archive or
+collector rollback belongs in a website-only rollback.
 
-The serving API floor is D1-reading revision 90cdc56c207ad0c733bb2f1b1bb15d995472bf47 or a reviewed compatible descendant, with exact migration 0001_accounts_sessions.sql and 0002_cutover_support.sql hashes in release.json. This lane performs no schema migration. Additive/future schema changes need a reviewed compatibility contract; a mismatch refuses rollback rather than guessing. Never use an old KV-serving revision or restore stale archived KV into ordinary serving as a code rollback.
+The API serving floor is D1-reading revision
+`90cdc56c207ad0c733bb2f1b1bb15d995472bf47` or a reviewed compatible descendant.
+Migration 0001/0002 hashes are in release.json; schema mismatch refuses rollback.
+Never serve from stale archived KV. The first accepted separated asset baseline
+is the cutover revision above; pre-split checkouts are not asset-only rollback
+candidates.
 
 ### Combined Worker restoration (local procedure)
 
@@ -102,12 +147,19 @@ DEPLOY_REPO_ROOT=/tmp/lov-rollback-restore \
 
 The gate verifies the restoration checkout is the recorded combined build (its wrangler.toml hash must match the recorded SHA256), re-reads wrangler.toml before execution, and refuses on drift. It deploys ONLY wrangler.toml; it never re-deploys the candidate's asset or API config. The authorization record lives in the shared .deploy-releases directory (default sibling .deploy-releases), not in any workflow artifact — there is no artifact transport to supply. Proved by tests/deploy_sequencing.test.mjs ('Rollback: local candidate-script + DEPLOY_REPO_ROOT restores the recorded combined build').
 
-## Recovery, classification and bypasses
 
-backend/recovery.js remains an offline, deliberate migration utility, with no ordinary asset/API route, assets or schedule. The proposed patch removes unused PAPER_TRADES/BOT_INDEX_READS from its config; it retains D1 plus archived USERS/SESSIONS only for an explicitly approved fenced recovery window. Recovery writes affect live D1 and require separate authority, token/fence verification, no public route, and removal after the window. It is never the site rollback route. Recovery/migrate modules do not use the R2 binding, as verified in source; provider state remains Nova's readback.
+Combined restoration is an exceptional topology reversal, requiring the approved
+fence and reverse cron handoff. The commands above authorize and dry-run only;
+execution adds `--execute` under that specific restoration authority. Prevent
+duplicate settlement ownership and restore writes only after verification.
+Ordinary site release does not repeat this one-time cutover procedure.
 
-Root docs/tests changes test but do not promote a runtime. Markdown prose under site/ is not packaged; deployment-note patching currently still matches the old combined site/** trigger, so keep it off production until Nova applies the new selector contract. Existing producer directory globs may promote prose inside their runtime scope (Brian's dated matrix owns the exact behavior); do not describe a global docs exemption. Frontend/site asset changes select the asset lane; backend changes select API; shared gateway/config/build/workflow or schema-contract changes receive affected/mixed review. Mixed asset+API+producer changes require separate explicit plans and authorization, not an automatic bundle. Scheduled producer code promotion and execution are distinct; preserve all existing explicit producer gates. No manual workflow, provider-native build, recovery config or ad-hoc CLI is an authority bypass.
+## Related operating records
 
-## Remaining finalization gates
+- [Release boundaries](RELEASE_BOUNDARIES.md): changed-path matrix and dated provider baseline.
+- [Asset design](ASSET_BOUNDARY.md): original design and local evidence, not current release instructions.
+- [Producer packaging](../deployment/python/README.md) and component guides: independent producer release paths.
+- Recovery uses `wrangler.recovery.toml` only in an explicitly approved recovery window; it is never an ordinary website release.
 
-G5 is draft pending Brian's remaining follow-ups and Nova's G3b/G4b/promotion/provider contracts. Brian16a4494d now covers actual packaging/schema/tooling and prepare-script CI-only selection. Remaining cross-review asks concern selected config dependencies, complete/narrowed tracked-input coverage controls, case-sensitive extension precision, and separate rendered-evidence staleness. The applied-config preference/coupling fix and stage verification are implemented locally. See ASSET_BOUNDARY.md. The web-ci-only proposal supplies CI selection/commands without changing promotion; Nova reconciles its overlapping web-ci hunks with Brian's patch rather than stacking both. Steve1312c5f's authored preview suite is attached: fixture base6 pass/1 todo; product-module integration remains explicitly outstanding. A1 has local emulation evidence only until those dependencies are accepted; hosted preview/provider routing/IAM and exact real accepted-history rollback remain unverified, not inferred from local tests. Independent R1/R2 producer repairs are deliberately outside site acceptance.
+Keep command receipts, provider identities and observation results in dated
+release/quest records. Update this procedure when release behavior changes.
