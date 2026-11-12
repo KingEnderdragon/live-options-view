@@ -949,11 +949,86 @@ test('Repair 7: CI selector refuses while a newer check runs or queues', () => {
 // directory (.deploy-releases). actions/upload-artifact@v4 excludes hidden
 // files unless include-hidden-files is true, so the repair-5 upload found
 // no evidence and merely warned. Both lanes must include hidden files.
+// (Repair 7: the path is now the resolved absolute path from the releases
+// step — it still points at the hidden releases directory, resolved by
+// realpath -m from ../.deploy-releases, because upload-artifact rejects
+// '..' segments in the path.)
 test('Repair 6: audit upload includes hidden .deploy-releases files', () => {
   const read = name => readFileSync(join(ROOT, '.github/workflows', name), 'utf8');
   for (const name of ['deploy.yml', 'deploy-staged.yml']) {
-    const block = read(name).match(/Upload authorization and receipts[\s\S]*?if-no-files-found: \w+/)[0];
-    assert.match(block, /\.deploy-releases\//, `${name}: upload path is the hidden releases directory`);
+    const text = read(name);
+    const block = text.match(/Upload authorization and receipts[\s\S]*?if-no-files-found: \w+/)[0];
+    assert.match(block, /path: \$\{\{ steps\.releases\.outputs\.abs \}\}/, `${name}: upload path must be the resolved absolute path`);
     assert.match(block, /include-hidden-files:\s*true/, `${name}: upload must include hidden files`);
+    assert.ok(text.includes('realpath -m "$GITHUB_WORKSPACE/../.deploy-releases"'), `${name}: resolve step must target the hidden releases directory`);
+  }
+});
+
+// Repair 7, fix 2 — The audit upload path must be an absolute path with
+// no '..' segments: upload-artifact@v4 rejects the
+// `${{ github.workspace }}/../.deploy-releases/` form ("Relative pathing
+// '.' and '..' is not allowed"), which is what failed the 381addb API
+// dry-run at the final step. A resolve step (id releases, if always)
+// computes the absolute path with realpath -m, and the upload uses it.
+test('Repair 7: audit upload path is an absolute path with no .. segments', () => {
+  const read = name => readFileSync(join(ROOT, '.github/workflows', name), 'utf8');
+  for (const name of ['deploy.yml', 'deploy-staged.yml']) {
+    const text = read(name);
+    assert.ok(/Resolve the releases directory to an absolute path[\s\S]*?id: releases[\s\S]*?if: always\(\)[\s\S]*?realpath -m/.test(text),
+      `${name}: must resolve the releases directory (id releases, if always, realpath -m)`);
+    const upload = text.match(/Upload authorization and receipts[\s\S]*?if-no-files-found: \w+/)[0];
+    assert.match(upload, /path: \$\{\{ steps\.releases\.outputs\.abs \}\}/, `${name}: upload path must be the resolved absolute path`);
+    assert.ok(!upload.includes('..'), `${name}: upload path must not contain '..'`);
+  }
+});
+
+// Repair 7, fix 3 (workflow) — The asset lane's API-exists check runs
+// only in real mode. The service is created by the real API deploy,
+// which a dry-run never performs, so in dry-run mode the service is
+// expected to be absent. The verify + record steps are gated on
+// inputs.execute, and authorize + deploy receive the dry-run flag.
+test('Repair 7: asset lane skips the API-exists check in dry-run mode only', () => {
+  const read = name => readFileSync(join(ROOT, '.github/workflows', name), 'utf8');
+  const text = read('deploy-staged.yml');
+  assert.ok(/Verify the API service exists[\s\S]*?if: \$\{\{ inputs\.execute \}\}/.test(text),
+    'deploy-staged.yml: API-exists verify step must run only when execute=true');
+  assert.ok(/Record API readiness evidence[\s\S]*?if: \$\{\{ inputs\.execute \}\}/.test(text),
+    'deploy-staged.yml: API readiness record step must run only when execute=true');
+  assert.ok(/Authorize the asset candidate[\s\S]*?DEPLOY_DRY_RUN: \$\{\{ !inputs\.execute \}\}/.test(text),
+    'deploy-staged.yml: asset authorize must pass DEPLOY_DRY_RUN');
+  assert.ok(/Deploy staged payload through the gate[\s\S]*?DEPLOY_DRY_RUN: \$\{\{ !inputs\.execute \}\}/.test(text),
+    'deploy-staged.yml: asset deploy must pass DEPLOY_DRY_RUN');
+  // The API lane has no API-exists check and needs no dry-run flag.
+  assert.ok(!read('deploy.yml').includes('DEPLOY_DRY_RUN'), 'deploy.yml: API lane has no readiness check to skip');
+});
+
+// Repair 7, fix 3 (gate) — In dry-run mode the asset authorize/deploy
+// succeed without API readiness (the service is expected to be absent);
+// in real mode (default and explicit dryRun:false) they still refuse.
+// This is what failed the 381addb asset dry-run at the API-exists step.
+test('Repair 7: dry-run asset authorize/deploy succeed without API readiness; real mode still refuses', () => {
+  const fresh = mkdtempSync(join(tmpdir(), 'deploy-dryrun-'));
+  const prevReleases = process.env.DEPLOY_RELEASES_DIR;
+  process.env.DEPLOY_RELEASES_DIR = fresh;
+  const s = makeStage(HEAD);
+  try {
+    // Real mode (default and explicit) refuses without API evidence.
+    assert.throws(() => authorizeStage({ stage: s.stage, revision: HEAD, webCheck: WEB, apiCheck: API, authorizer: 'test' }),
+      /API service not ready/);
+    assert.throws(() => authorizeStage({ stage: s.stage, revision: HEAD, webCheck: WEB, apiCheck: API, authorizer: 'test', dryRun: false }),
+      /API service not ready/);
+    // Dry-run mode authorizes without API evidence.
+    authorizeStage({ stage: s.stage, revision: HEAD, webCheck: WEB, apiCheck: API, authorizer: 'test', dryRun: true });
+    // Dry-run deploy succeeds without API evidence.
+    const dry = deployStaged({ stage: s.stage, revision: HEAD, dryRun: true });
+    assert.equal(dry.dryRun, true);
+    // Real deploy (dryRun false, with and without execute) still refuses.
+    assert.throws(() => deployStaged({ stage: s.stage, revision: HEAD, dryRun: false }), /API service not ready/);
+    assert.throws(() => deployStaged({ stage: s.stage, revision: HEAD, execute: true, dryRun: false, executor: stubExecutor().fn }),
+      /API service not ready/);
+  } finally {
+    cleanup(s);
+    process.env.DEPLOY_RELEASES_DIR = prevReleases;
+    rmSync(fresh, { recursive: true, force: true });
   }
 });

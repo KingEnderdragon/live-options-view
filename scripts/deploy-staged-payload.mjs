@@ -287,7 +287,7 @@ export function acquireReleaseLock() {
 // A newer authorization supersedes every older one, so at most one
 // candidate is deployable at a time. All record mutations run under the
 // shared release lock, so supersession cannot interleave with a deploy.
-export function authorize({ target = 'asset', stage, revision, webCheck, apiCheck, authorizer, rollbackReason = null }) {
+export function authorize({ target = 'asset', stage, revision, webCheck, apiCheck, authorizer, rollbackReason = null, dryRun = false }) {
   if (target !== 'asset' && target !== 'api' && target !== 'rollback') throw new Error("target must be 'asset', 'api' or 'rollback'");
   if (!/^[a-f0-9]{40}$/.test(revision)) throw new Error('Full reviewed revision required');
   if (!authorizer) throw new Error('Authorization requires --authorizer');
@@ -321,8 +321,12 @@ export function authorize({ target = 'asset', stage, revision, webCheck, apiChec
     // Deployment order: the asset service's API binding points at the
     // live-options-api service. It must exist before the asset can be
     // authorized (and again before it deploys); otherwise the first asset
-    // deploy breaks the binding.
-    assertApiServiceReady(revision);
+    // deploy breaks the binding. In dry-run mode (dryRun=true) the service
+    // is expected to be absent — it is created by the real API deploy,
+    // which a dry-run never performs — so the readiness check is skipped
+    // here. The real run (dryRun=false, the default) re-asserts it, so a
+    // dry-run authorization can never enable a real deploy on its own.
+    if (!dryRun) assertApiServiceReady(revision);
     plan = verifyStage(stage);
     if (plan.asset_revision !== revision) throw new Error('Stage revision does not match --revision');
     if (plan.config_state !== 'applied-source') {
@@ -466,13 +470,15 @@ export function verifyCurrentSourceFreshness(stage, expectedSha256, expectedConf
 // only) and HEAD from scratch, so a supersession that landed after the
 // first checks is caught here and the executor never runs for a stale
 // candidate.
-export function recheckBeforeExecute({ stage, revision, record, webCheck = null, apiCheck = null }) {
+export function recheckBeforeExecute({ stage, revision, record, webCheck = null, apiCheck = null, dryRun = false }) {
   const fresh = loadAuthorization(revision);
   if (fresh.superseded_by) throw new Error(`Revision ${revision} is superseded by ${fresh.superseded_by}`);
   assertHeadMatches(fresh);
   assertChecksMatch(fresh, webCheck, apiCheck);
   if (fresh.target === 'asset') {
-    assertApiServiceReady(revision);
+    // Same dry-run treatment as authorize/deploy: in dry-run mode the
+    // API service is expected to be absent; the real run re-asserts it.
+    if (!dryRun) assertApiServiceReady(revision);
     const freshPlan = verifyStage(stage, ['authorized']);
     if (freshPlan.config_sha256 !== fresh.config_sha256 || freshPlan.config_state !== 'applied-source') {
       throw new Error('Stage config drifted while waiting for the lock');
@@ -520,7 +526,7 @@ export function defaultExecutor(command, { configPath, revision, target }) {
   return command;
 }
 
-export function deploy({ target = 'asset', stage, revision, execute = false, webCheck = null, apiCheck = null, executor = defaultExecutor }) {
+export function deploy({ target = 'asset', stage, revision, execute = false, webCheck = null, apiCheck = null, executor = defaultExecutor, dryRun = false }) {
   if (target !== 'asset' && target !== 'api' && target !== 'rollback') throw new Error("target must be 'asset', 'api' or 'rollback'");
   if (target === 'asset' && !stage) throw new Error('Asset deploy requires --stage');
   // The shared release lock is taken FIRST, before any state is read, and
@@ -536,8 +542,10 @@ export function deploy({ target = 'asset', stage, revision, execute = false, web
     let manifest = null;
     if (target === 'asset') {
       // Deployment order, enforced at deploy time as well as authorize
-      // time: the API service must exist before the asset deploy.
-      assertApiServiceReady(revision);
+      // time: the API service must exist before the asset deploy. In
+      // dry-run mode the service is expected to be absent (see
+      // authorize); the real run re-asserts it.
+      if (!dryRun) assertApiServiceReady(revision);
       plan = verifyStage(stage, ['authorized']);
       manifest = verifyArtifact(resolve(stage, 'payload'));
       if (plan.asset_revision !== revision || manifest.revision !== revision) {
@@ -558,7 +566,7 @@ export function deploy({ target = 'asset', stage, revision, execute = false, web
     }
     assertChecksMatch(record, webCheck, apiCheck);
     // Recheck immediately before deploy, under the lock (B3).
-    const freshPlan = recheckBeforeExecute({ stage, revision, record, webCheck, apiCheck });
+    const freshPlan = recheckBeforeExecute({ stage, revision, record, webCheck, apiCheck, dryRun });
     const dryCommand = target === 'asset' ? freshPlan.proposed_command
       : target === 'api' ? 'wrangler deploy --config wrangler.api.toml'
       : 'wrangler deploy --config wrangler.toml';
@@ -621,6 +629,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
         apiCheck: get('--api-check', 'DEPLOY_API_CHECK'),
         authorizer: get('--authorizer', 'DEPLOY_AUTHORIZER'),
         rollbackReason: get('--rollback-reason', 'DEPLOY_ROLLBACK_REASON'),
+        dryRun: has('--dry-run', 'DEPLOY_DRY_RUN'),
       })));
     } else if (has('--supersede', 'DEPLOY_SUPERSEDE')) {
       console.log(JSON.stringify(supersede({ revision: get('--revision', 'DEPLOY_REVISION'), supersededBy: get('--superseded-by', 'DEPLOY_SUPERSEDED_BY') })));
@@ -632,6 +641,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
         execute: has('--execute', 'DEPLOY_EXECUTE'),
         webCheck: get('--web-check', 'DEPLOY_WEB_CHECK') || null,
         apiCheck: get('--api-check', 'DEPLOY_API_CHECK') || null,
+        dryRun: has('--dry-run', 'DEPLOY_DRY_RUN'),
       })));
     } else throw new Error('Usage: --authorize|--deploy|--supersede|--record-api-service [--target asset|api|rollback] --stage DIR --revision FULL_SHA [--execute] [--web-check id:success] [--api-check id:success] [--authorizer NAME] [--superseded-by REV] [--rollback-reason TEXT]');
   } catch (error) {

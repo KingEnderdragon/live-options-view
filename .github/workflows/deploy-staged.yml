@@ -120,6 +120,12 @@ jobs:
           DEPLOY_STAGE: ${{ github.workspace }}/../.deploy-stage
         run: node scripts/prepare-asset-release.mjs --artifact "$DEPLOY_ARTIFACT" --out "$DEPLOY_STAGE"
       - name: Verify the API service exists (live provider readback)
+        # Real runs only: the service is created by the real API deploy,
+        # which a dry-run never performs, so in dry-run mode the service
+        # is expected to be absent and this check is skipped. The gate
+        # script's readiness assertion is likewise skipped in dry-run
+        # mode (DEPLOY_DRY_RUN) and re-asserted by the real run.
+        if: ${{ inputs.execute }}
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
@@ -135,6 +141,9 @@ jobs:
           test "$code" = "200"
           jq -er --arg name "live-options-api" '.result[] | select(.id == $name) | .id' "$tmp/scripts.json" >/dev/null
       - name: Record API readiness evidence (on the execution runner)
+        # Real runs only, same reason as the verify step above: there is
+        # no readiness to record in dry-run mode.
+        if: ${{ inputs.execute }}
         env:
           DEPLOY_RELEASES_DIR: ${{ github.workspace }}/../.deploy-releases
           DEPLOY_REVISION: ${{ inputs.revision }}
@@ -149,6 +158,7 @@ jobs:
           DEPLOY_API_CHECK: ${{ steps.checks.outputs.run_id }}:success
           DEPLOY_AUTHORIZER: ${{ github.actor }}
           DEPLOY_AUTHORIZE: 'true'
+          DEPLOY_DRY_RUN: ${{ !inputs.execute }}
         run: node scripts/deploy-staged-payload.mjs --authorize --target asset
       - name: Deploy staged payload through the gate
         env:
@@ -158,14 +168,27 @@ jobs:
           DEPLOY_WEB_CHECK: ${{ steps.checks.outputs.run_id }}:success
           DEPLOY_API_CHECK: ${{ steps.checks.outputs.run_id }}:success
           DEPLOY_EXECUTE: ${{ inputs.execute }}
+          DEPLOY_DRY_RUN: ${{ !inputs.execute }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: node scripts/deploy-staged-payload.mjs --deploy --target asset
+      - name: Resolve the releases directory to an absolute path
+        # upload-artifact rejects '..' segments in the path, so resolve
+        # the releases directory (which lives outside the checkout) to
+        # an absolute path with no '..'. realpath -m resolves lexically,
+        # so it works even when the directory does not exist yet (e.g.
+        # the checks refused before any authorization was created).
+        # Always runs, so the audit upload always has a valid path.
+        id: releases
+        if: always()
+        run: |
+          set -euo pipefail
+          echo "abs=$(realpath -m "$GITHUB_WORKSPACE/../.deploy-releases")" >> "$GITHUB_OUTPUT"
       - name: Upload authorization and receipts (audit evidence)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: authorization-${{ inputs.revision }}-asset-${{ github.run_attempt }}
-          path: ${{ github.workspace }}/../.deploy-releases/
+          path: ${{ steps.releases.outputs.abs }}
           # The releases directory is hidden (.deploy-releases); the
           # upload excludes hidden files unless told otherwise.
           include-hidden-files: true
