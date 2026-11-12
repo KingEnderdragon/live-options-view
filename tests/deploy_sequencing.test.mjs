@@ -577,6 +577,56 @@ test('Freshness: authorize refuses when the current source config is already inv
   } finally { cleanup(s); }
 });
 
+// Repair 3 — the selected config root is bound in the authorization
+// record; any later redirection refuses. Brian's repair-2 witness:
+// stage and authorize from a valid applied configRoot, invalidate the
+// ORIGINAL source, then change ONLY plan.config_root to an old valid
+// copy holding the same config — the stub executor must NOT run.
+test('Freshness: redirected config_root after authorize stops deploy before execution', () => {
+  const s = makeStage(HEAD);
+  const oldRoot = join(s.base, 'old-config');
+  mkdirSync(oldRoot, { recursive: true });
+  writeFileSync(join(oldRoot, 'wrangler.assets.toml'), PROPOSED);
+  try {
+    authorizeStage({ stage: s.stage, revision: HEAD, webCheck: WEB, apiCheck: API, authorizer: 'test' });
+    writeFileSync(join(s.base, 'config', 'wrangler.assets.toml'), 'invalid current config');
+    const planPath = join(s.stage, 'plan.json');
+    const plan = JSON.parse(readFileSync(planPath, 'utf8'));
+    plan.config_root = oldRoot;
+    writeFileSync(planPath, JSON.stringify(plan, null, 2) + '\n');
+    const exec = stubExecutor();
+    assert.throws(() => deployStaged({ stage: s.stage, revision: HEAD, execute: true, executor: exec.fn }),
+      /redirect/i);
+    assert.equal(exec.calls.length, 0, 'executor must never run for a redirected config root');
+  } finally { cleanup(s); }
+});
+
+// Repair 3 — the authorization record binds the selected config root,
+// and the unchanged normal path still deploys.
+test('Freshness: authorization binds config_root and the unchanged path still deploys', () => {
+  const s = makeStage(HEAD);
+  try {
+    const record = authorizeStage({ stage: s.stage, revision: HEAD, webCheck: WEB, apiCheck: API, authorizer: 'test' });
+    assert.equal(record.config_root, join(s.base, 'config'));
+    const exec = stubExecutor();
+    const result = deployStaged({ stage: s.stage, revision: HEAD, execute: true, executor: exec.fn });
+    assert.equal(result.deployed, true);
+    assert.equal(exec.calls.length, 1);
+  } finally { cleanup(s); }
+});
+
+// Repair 3 — fail-closed for legacy records: an authorization record
+// with no bound config_root cannot prove its root, so deploy refuses.
+test('Freshness: deploy refuses an authorization record with no bound config_root', () => {
+  const s = makeStage(HEAD);
+  try {
+    const record = authorizeStage({ stage: s.stage, revision: HEAD, webCheck: WEB, apiCheck: API, authorizer: 'test' });
+    delete record.config_root;
+    writeFileSync(join(releases, `${HEAD}.authorization.json`), JSON.stringify(record, null, 2) + '\n');
+    assert.throws(() => deployStaged({ stage: s.stage, revision: HEAD }), /redirect|bound config_root/i);
+  } finally { cleanup(s); }
+});
+
 // C2 repair — Receipts are per-target: the asset receipt must not
 // overwrite the API receipt that proves the API service was deployed.
 test('Order: per-target receipts do not overwrite each other', () => {

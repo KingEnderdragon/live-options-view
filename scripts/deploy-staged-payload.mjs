@@ -59,6 +59,16 @@
 // immediately before the executor. A missing, invalid, or drifted source
 // refuses promotion (the operator re-stages and re-authorizes).
 //
+// Repair 3 (2026-11-11) — the selected config root is BINDING, not just
+// recorded in the plan. Repair 2's freshness check trusted
+// plan.config_root at deploy time, so changing only plan.config_root
+// after authorization redirected the check to an old valid copy while
+// the originally authorized source was invalid (Brian's repair-2
+// witness: stub executor ran). The authorization record now also binds
+// config_root at authorize time, and recheckBeforeExecute() refuses any
+// later redirection — the plan's root must equal the record's bound
+// root, or the executor never runs.
+//
 // B3 — One shared release lock for the whole release target, held in the
 // external releases dir — not one lock per stage. authorize, supersede and
 // deploy all take the same lock, so supersession cannot interleave with
@@ -354,6 +364,12 @@ export function authorize({ target = 'asset', stage, revision, webCheck, apiChec
       stage_path: target === 'asset' ? resolve(stage) : null,
       config_source: plan ? plan.config_source : (target === 'api' ? API_CONFIG_FILE : ROLLBACK_CONFIG_FILE),
       config_sha256: plan ? plan.config_sha256 : (target === 'api' ? apiCfg.sha256 : rbCfg.sha256),
+      // Repair 3: bind the selected config root for the asset target.
+      // The freshness check re-reads the source from this root; binding
+      // it here makes any later plan.config_root redirection detectable
+      // at deploy time. api/rollback lanes read their config from
+      // DEPLOY_REPO_ROOT and compare by hash; they have no stage root.
+      config_root: plan ? plan.config_root : null,
       web_check_run_id: web ? web.runId : null, web_check_status: web ? web.status : 'waived-rollback',
       api_check_run_id: api ? api.runId : null, api_check_status: api ? api.status : 'waived-rollback',
       authorizer, authorized_at: new Date().toISOString(), superseded_by: null,
@@ -399,26 +415,37 @@ export function supersedeStage(args) {
   return supersede(args);
 }
 
-// Freshness (repair 2, blocker 2) — the retained stage's config is
-// integrity-only: verifyStage checks the stage's own bytes, so an
-// unchanged stage still verifies after its named source config changes
-// or becomes invalid. Before promotion, re-read the CURRENT source
-// config from the config root recorded in the plan, validate it, and
-// compare its hash to the authorized record. If the source is missing,
-// invalid, or drifted since authorization, promotion refuses — the
-// operator must re-stage and re-authorize a new candidate. This is the
-// current accepted source/config snapshot check the freshness contract
-// (docs/SITE_RELEASES.md) promises; it runs inside the shared lock,
-// immediately before the executor, so a source change that lands after
-// the first checks is still caught. It does not re-stage: a refusal is
-// the signal to re-stage fresh and authorize a new candidate.
-export function verifyCurrentSourceFreshness(stage, expectedSha256) {
+// Freshness (repair 2, blocker 2; root binding repair 3) — the retained
+// stage's config is integrity-only: verifyStage checks the stage's own
+// bytes, so an unchanged stage still verifies after its named source
+// config changes or becomes invalid. Before promotion, re-read the
+// CURRENT source config from the config root recorded in the plan,
+// validate it, and compare its hash to the authorized record. If the
+// source is missing, invalid, or drifted since authorization, promotion
+// refuses — the operator must re-stage and re-authorize a new candidate.
+// This is the current accepted source/config snapshot check the
+// freshness contract (docs/SITE_RELEASES.md) promises; it runs inside
+// the shared lock, immediately before the executor, so a source change
+// that lands after the first checks is still caught. It does not
+// re-stage: a refusal is the signal to re-stage fresh and authorize a
+// new candidate.
+//
+// Repair 3: when expectedConfigRoot is given (the root bound in the
+// authorization record), the plan's config_root must equal it. Without
+// this, changing only plan.config_root after authorization redirects
+// this check to an old valid copy while the originally authorized source
+// is invalid. At authorize time there is no record yet, so no expected
+// root is passed — the plan's own root is the selected root being bound.
+export function verifyCurrentSourceFreshness(stage, expectedSha256, expectedConfigRoot = null) {
   const plan = JSON.parse(readFileSync(resolve(stage, 'plan.json'), 'utf8'));
   if (plan.config_state !== 'applied-source') {
     throw new Error('Freshness check requires applied-source config');
   }
   if (!plan.config_root || typeof plan.config_root !== 'string') {
     throw new Error('Stage plan lacks config_root; re-stage with the current gate before promotion');
+  }
+  if (expectedConfigRoot != null && plan.config_root !== expectedConfigRoot) {
+    throw new Error('Config root redirected since authorization; re-stage and re-authorize before promotion');
   }
   const sourcePath = resolve(plan.config_root, plan.config_source);
   if (!existsSync(sourcePath)) {
@@ -450,9 +477,16 @@ export function recheckBeforeExecute({ stage, revision, record, webCheck = null,
     if (freshPlan.config_sha256 !== fresh.config_sha256 || freshPlan.config_state !== 'applied-source') {
       throw new Error('Stage config drifted while waiting for the lock');
     }
-    // Freshness (repair 2): the CURRENT source config must still be
-    // valid and match the authorized hash, or the executor never runs.
-    verifyCurrentSourceFreshness(stage, fresh.config_sha256);
+    // Freshness (repair 2) + root binding (repair 3): the CURRENT source
+    // config must still be valid and match the authorized hash, read from
+    // the config root BOUND in the authorization record. A record with no
+    // bound root (pre-repair-3) cannot prove its root, and a plan whose
+    // root differs from the bound root is a redirection — both refuse
+    // here, inside the lock, before the executor runs.
+    if (!fresh.config_root || typeof fresh.config_root !== 'string') {
+      throw new Error('Authorization record lacks bound config_root; re-authorize before promotion');
+    }
+    verifyCurrentSourceFreshness(stage, fresh.config_sha256, fresh.config_root);
     return freshPlan;
   }
   if (fresh.target === 'rollback') {
@@ -508,6 +542,14 @@ export function deploy({ target = 'asset', stage, revision, execute = false, web
       manifest = verifyArtifact(resolve(stage, 'payload'));
       if (plan.asset_revision !== revision || manifest.revision !== revision) {
         throw new Error('Revision mismatch: HEAD, authorization, plan and manifest must be the same exact revision');
+      }
+      // Repair 3: the plan's config root must equal the root bound in the
+      // authorization record. This refuses a redirection at the earliest
+      // point (recheckBeforeExecute enforces the same binding again
+      // immediately before the executor); a record with no bound root
+      // also refuses, since it cannot prove its root.
+      if (plan.config_root !== record.config_root) {
+        throw new Error('Config root redirected since authorization; re-stage and re-authorize before promotion');
       }
       if (plan.config_sha256 !== record.config_sha256 || plan.config_source !== record.config_source ||
           plan.config_state !== 'applied-source') {
