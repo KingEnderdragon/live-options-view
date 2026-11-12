@@ -865,6 +865,8 @@ test('F1: no expression interpolation in any deploy run step; CLI accepts env', 
 // picked the newest *success* (`.workflow_runs[] | select(.conclusion ==
 // "success")`), so an older success overrode a newer failure. The selector
 // is extracted from each workflow and run against fixtures with jq.
+// (Repair 7: fixtures now carry status + updated_at, since the selector
+// requires the newest run/attempt to be completed/success.)
 test('Repair 6: CI selector refuses a stale success when a newer run failed', () => {
   const read = name => readFileSync(join(ROOT, '.github/workflows', name), 'utf8');
   const runJq = (filter, input) => {
@@ -874,12 +876,12 @@ test('Repair 6: CI selector refuses a stale success when a newer run failed', ()
   };
   // GitHub lists runs newest-first. Newer run failed, older run succeeded.
   const stale = JSON.stringify({ workflow_runs: [
-    { id: 200, conclusion: 'failure', created_at: '2026-11-12T09:00:00Z' },
-    { id: 100, conclusion: 'success', created_at: '2026-11-12T08:00:00Z' },
+    { id: 200, status: 'completed', conclusion: 'failure', created_at: '2026-11-12T09:00:00Z', updated_at: '2026-11-12T09:05:00Z' },
+    { id: 100, status: 'completed', conclusion: 'success', created_at: '2026-11-12T08:00:00Z', updated_at: '2026-11-12T08:05:00Z' },
   ] });
   const fresh = JSON.stringify({ workflow_runs: [
-    { id: 300, conclusion: 'success', created_at: '2026-11-12T10:00:00Z' },
-    { id: 200, conclusion: 'failure', created_at: '2026-11-12T09:00:00Z' },
+    { id: 300, status: 'completed', conclusion: 'success', created_at: '2026-11-12T10:00:00Z', updated_at: '2026-11-12T10:05:00Z' },
+    { id: 200, status: 'completed', conclusion: 'failure', created_at: '2026-11-12T09:00:00Z', updated_at: '2026-11-12T09:05:00Z' },
   ] });
   const empty = JSON.stringify({ workflow_runs: [] });
   for (const name of ['deploy.yml', 'deploy-staged.yml']) {
@@ -887,6 +889,59 @@ test('Repair 6: CI selector refuses a stale success when a newer run failed', ()
     assert.equal(runJq(filter, stale), '', `${name}: a newer failure must refuse, not fall back to an older success`);
     assert.equal(runJq(filter, fresh), '300', `${name}: the newest success is accepted`);
     assert.equal(runJq(filter, empty), '', `${name}: no runs must refuse`);
+  }
+});
+
+// Repair 7 — The selector must fetch ALL statuses (no status=completed
+// filter) and select the NEWEST run/attempt (by last update), then require
+// completed/success. A newer running or queued check must not be hidden
+// by an older success, and a re-run attempt on an older run is the current
+// attempt: while it runs the selector refuses, once it passes it is the
+// accepted evidence.
+test('Repair 7: CI selector refuses while a newer check runs or queues', () => {
+  const read = name => readFileSync(join(ROOT, '.github/workflows', name), 'utf8');
+  const runJq = (filter, input) => {
+    const r = spawnSync('jq', ['-r', filter], { input, encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+    return r.stdout.trim();
+  };
+  const success = { id: 100, status: 'completed', conclusion: 'success', created_at: '2026-11-12T08:00:00Z', updated_at: '2026-11-12T08:05:00Z' };
+  // Newer distinct run in progress; older success must not be selected.
+  const running = JSON.stringify({ workflow_runs: [
+    { id: 400, status: 'in_progress', conclusion: null, created_at: '2026-11-12T11:00:00Z', updated_at: '2026-11-12T11:00:00Z' },
+    success,
+  ] });
+  // Newer distinct run queued; older success must not be selected.
+  const queued = JSON.stringify({ workflow_runs: [
+    { id: 400, status: 'queued', conclusion: null, created_at: '2026-11-12T11:00:00Z', updated_at: '2026-11-12T11:00:00Z' },
+    success,
+  ] });
+  // Newest run completed success; accepted.
+  const fresh = JSON.stringify({ workflow_runs: [
+    { id: 300, status: 'completed', conclusion: 'success', created_at: '2026-11-12T10:00:00Z', updated_at: '2026-11-12T10:05:00Z' },
+    { id: 200, status: 'completed', conclusion: 'failure', created_at: '2026-11-12T09:00:00Z', updated_at: '2026-11-12T09:05:00Z' },
+  ] });
+  // Older run re-run: its attempt is the newest activity and is running.
+  const rerunRunning = JSON.stringify({ workflow_runs: [
+    { id: 200, status: 'completed', conclusion: 'success', created_at: '2026-11-12T09:00:00Z', updated_at: '2026-11-12T09:05:00Z' },
+    { id: 100, status: 'in_progress', conclusion: null, created_at: '2026-11-12T08:00:00Z', updated_at: '2026-11-12T11:00:00Z' },
+  ] });
+  // Same re-run, now passed: the re-run attempt is the accepted evidence.
+  const rerunPassed = JSON.stringify({ workflow_runs: [
+    { id: 200, status: 'completed', conclusion: 'success', created_at: '2026-11-12T09:00:00Z', updated_at: '2026-11-12T09:05:00Z' },
+    { id: 100, status: 'completed', conclusion: 'success', created_at: '2026-11-12T08:00:00Z', updated_at: '2026-11-12T11:00:00Z' },
+  ] });
+  for (const name of ['deploy.yml', 'deploy-staged.yml']) {
+    const text = read(name);
+    const filter = text.match(/--jq '([^']+)'/)[1];
+    // No status filter in the API query: all statuses must be fetched.
+    const query = text.match(/web-ci\.yml\/runs\?[^"']+/)[0];
+    assert.ok(!query.includes('status='), `${name}: CI query must fetch all statuses, got ${query}`);
+    assert.equal(runJq(filter, running), '', `${name}: a newer running check must refuse, not fall back to an older success`);
+    assert.equal(runJq(filter, queued), '', `${name}: a newer queued check must refuse, not fall back to an older success`);
+    assert.equal(runJq(filter, fresh), '300', `${name}: the newest completed success is accepted`);
+    assert.equal(runJq(filter, rerunRunning), '', `${name}: a re-run attempt in progress must refuse`);
+    assert.equal(runJq(filter, rerunPassed), '100', `${name}: a re-run attempt that passed is the accepted evidence`);
   }
 });
 

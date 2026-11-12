@@ -76,12 +76,16 @@ jobs:
           DEPLOY_REVISION: ${{ inputs.revision }}
         run: |
           set -euo pipefail
-          # Query GitHub (not the dispatcher) for the NEWEST completed Web
-          # CI run on the exact revision. That run must be successful: an
-          # older success does not override a newer failure. A missing or
-          # failed newest check refuses the deploy here, before any
-          # authorization is created.
-          run_id="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/web-ci.yml/runs?head_sha=${DEPLOY_REVISION}&status=completed&per_page=5" --jq '.workflow_runs | max_by(.created_at) | select(.conclusion == "success") | .id')"
+          # Query GitHub (not the dispatcher) for ALL Web CI runs on
+          # the exact revision — no status filter, so a newer running
+          # or queued check is visible and cannot be hidden by an
+          # older success. The NEWEST run/attempt (by last update)
+          # must be completed with a success conclusion: an older
+          # success does not override a newer failure, and a newer
+          # running or queued check refuses the deploy here, before
+          # any authorization is created. A missing newest check
+          # also refuses.
+          run_id="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/web-ci.yml/runs?head_sha=${DEPLOY_REVISION}&per_page=5" --jq '.workflow_runs | max_by(.updated_at) | select(.status == "completed" and .conclusion == "success") | .id')"
           if [ -z "$run_id" ]; then
             echo "No successful Web CI run for revision ${DEPLOY_REVISION}" >&2
             exit 1
