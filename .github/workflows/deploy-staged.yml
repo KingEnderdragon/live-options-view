@@ -86,10 +86,12 @@ jobs:
           DEPLOY_REVISION: ${{ inputs.revision }}
         run: |
           set -euo pipefail
-          # Query GitHub (not the dispatcher) for a successful Web CI run
-          # on the exact revision. A missing or failed check refuses the
-          # deploy here, before any authorization is created.
-          run_id="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/web-ci.yml/runs?head_sha=${DEPLOY_REVISION}&status=completed&per_page=5" --jq '.workflow_runs[] | select(.conclusion == "success") | .id' | head -n 1)"
+          # Query GitHub (not the dispatcher) for the NEWEST completed Web
+          # CI run on the exact revision. That run must be successful: an
+          # older success does not override a newer failure. A missing or
+          # failed newest check refuses the deploy here, before any
+          # authorization is created.
+          run_id="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/web-ci.yml/runs?head_sha=${DEPLOY_REVISION}&status=completed&per_page=5" --jq '.workflow_runs | max_by(.created_at) | select(.conclusion == "success") | .id')"
           if [ -z "$run_id" ]; then
             echo "No successful Web CI run for revision ${DEPLOY_REVISION}" >&2
             exit 1
@@ -160,4 +162,7 @@ jobs:
         with:
           name: authorization-${{ inputs.revision }}-asset-${{ github.run_attempt }}
           path: ${{ github.workspace }}/../.deploy-releases/
+          # The releases directory is hidden (.deploy-releases); the
+          # upload excludes hidden files unless told otherwise.
+          include-hidden-files: true
           if-no-files-found: warn

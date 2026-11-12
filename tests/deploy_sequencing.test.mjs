@@ -859,3 +859,46 @@ test('F1: no expression interpolation in any deploy run step; CLI accepts env', 
     assert.match(out.stdout, /"dryRun":\s*true/);
   } finally { cleanup(s); }
 });
+
+// Repair 6, defect 1 — The CI selector must require the NEWEST completed
+// Web CI run for the exact revision to be successful. The repair-5 selector
+// picked the newest *success* (`.workflow_runs[] | select(.conclusion ==
+// "success")`), so an older success overrode a newer failure. The selector
+// is extracted from each workflow and run against fixtures with jq.
+test('Repair 6: CI selector refuses a stale success when a newer run failed', () => {
+  const read = name => readFileSync(join(ROOT, '.github/workflows', name), 'utf8');
+  const runJq = (filter, input) => {
+    const r = spawnSync('jq', ['-r', filter], { input, encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+    return r.stdout.trim();
+  };
+  // GitHub lists runs newest-first. Newer run failed, older run succeeded.
+  const stale = JSON.stringify({ workflow_runs: [
+    { id: 200, conclusion: 'failure', created_at: '2026-11-12T09:00:00Z' },
+    { id: 100, conclusion: 'success', created_at: '2026-11-12T08:00:00Z' },
+  ] });
+  const fresh = JSON.stringify({ workflow_runs: [
+    { id: 300, conclusion: 'success', created_at: '2026-11-12T10:00:00Z' },
+    { id: 200, conclusion: 'failure', created_at: '2026-11-12T09:00:00Z' },
+  ] });
+  const empty = JSON.stringify({ workflow_runs: [] });
+  for (const name of ['deploy.yml', 'deploy-staged.yml']) {
+    const filter = read(name).match(/--jq '([^']+)'/)[1];
+    assert.equal(runJq(filter, stale), '', `${name}: a newer failure must refuse, not fall back to an older success`);
+    assert.equal(runJq(filter, fresh), '300', `${name}: the newest success is accepted`);
+    assert.equal(runJq(filter, empty), '', `${name}: no runs must refuse`);
+  }
+});
+
+// Repair 6, defect 2 — The audit upload points at the hidden releases
+// directory (.deploy-releases). actions/upload-artifact@v4 excludes hidden
+// files unless include-hidden-files is true, so the repair-5 upload found
+// no evidence and merely warned. Both lanes must include hidden files.
+test('Repair 6: audit upload includes hidden .deploy-releases files', () => {
+  const read = name => readFileSync(join(ROOT, '.github/workflows', name), 'utf8');
+  for (const name of ['deploy.yml', 'deploy-staged.yml']) {
+    const block = read(name).match(/Upload authorization and receipts[\s\S]*?if-no-files-found: \w+/)[0];
+    assert.match(block, /\.deploy-releases\//, `${name}: upload path is the hidden releases directory`);
+    assert.match(block, /include-hidden-files:\s*true/, `${name}: upload must include hidden files`);
+  }
+});
