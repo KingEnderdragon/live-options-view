@@ -22,6 +22,8 @@ const POSITIVE_KEYS = [
   'news/v2/views/p/20261109T100500Z-0123456789abcdef.1/collector/oil/2026-11-09/page-0001.json',
   'news/v2/views/p/20261109T100500Z-0123456789abcdef.1/archive/ai_buildout/2024-02-29/page-0020.json',
   'news/v2/views/p/20261109T100500Z-0123456789abcdef.1/publication/all/2026-11-09/page-0002.json',
+  // MediaFlow P1: exactly the sanitized research view.
+  'news/v2/research/view.json',
 ];
 const NEGATIVE_KEYS = [
   '', 'system/bot-membership-v1.json', 'paper-trades/requests/x.json',
@@ -38,6 +40,9 @@ const NEGATIVE_KEYS = [
   // The News grant is exact keys only: every other shape stays 404.
   'news/v1/views/', 'news/v1/views/index.json', 'news/v1/views/index.json/', 'news/v1/views/index.json.bak',
   'news/v2/views/', 'news/v2/views/index.json/', 'news/v2/views/index.json.bak',
+  'news/v1/research/runs/2026-11-13/20261113T180000Z-0123abcd/annotations.jsonl.gz',
+  'news/v1/research/_writer/lease.json', 'news/v2/research/', 'news/v2/research/other.json',
+  'news/v2/research/view.json/', 'news/v2/research/view.json.bak',
   'news/v2/views/p/20261109T100500Z-0123456789abcdef/collector/oil/2026-11-09/page-0001.json',
   'news/v2/views/p/20261109T100500Z-0123456789abcdef.0/collector/oil/2026-11-09/page-0001.json',
   'news/v1/views/collector/oil/2026-11-09/page-0000.json',

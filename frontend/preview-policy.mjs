@@ -30,6 +30,9 @@ export function publicReadAllowed(url) {
   // isPublicNewsViewKey in backend/browser-data.js and the News panel's own key
   // check. Legacy news/v1/views keys are no longer allowed.
   if (key === 'news/v2/views/index.json') return true;
+  // MediaFlow P1: exactly the sanitized research view; never the private
+  // research ledger (news/v1/research/**) or any other research key.
+  if (key === 'news/v2/research/view.json') return true;
   const n = /^news\/v2\/views\/p\/(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z-[0-9a-f]{16}\.[1-9][0-9]{0,3}\/(?:collector|archive|publication)\/(?:all|ai_buildout|oil)\/(\d{4})-(\d{2})-(\d{2})\/page-(\d{4})\.json$/.exec(key);
   if (n) {
     const real = (y, mo, d) => {

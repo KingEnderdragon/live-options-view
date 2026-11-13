@@ -18,6 +18,8 @@ const KEYS = [
   `news/v2/views/p/${GEN}.1/collector/all/2026-11-09/page-0001.json`,
   `news/v2/views/p/${GEN}.1/archive/oil/2026-11-09/page-0002.json`,
   `news/v2/views/p/${GEN}.1/publication/ai_buildout/2024-02-29/page-0020.json`,
+  // MediaFlow P1: exactly the sanitized research view.
+  'news/v2/research/view.json',
 ];
 // The panel applies the same key rule before every request (both bases); the two must agree.
 const newsPanel = require('../site/js/news-panel.js');
@@ -39,6 +41,11 @@ const NEWS_REJECTED = [
   'news/v1/views/collector/%6fil/2026-11-09/page-0001.json', 'news%2fv1%2fviews%2findex.json',
   'news/v1/index.json', 'news/oil/v1/latest.json', 'news/v1/raw/observations.jsonl', 'news/', 'news',
   'NEWS/v2/views/index.json', 'NEWS/v1/views/index.json',
+  // P1: the private research ledger and any other research key are never served.
+  'news/v1/research/runs/2026-11-13/20261113T180000Z-0123abcd/annotations.jsonl.gz',
+  'news/v1/research/runs/2026-11-13/20261113T180000Z-0123abcd/manifest.json', 'news/v1/research/_writer/lease.json',
+  'news/v2/research/', 'news/v2/research/view.json/', 'news/v2/research/view.json.bak', 'news/v2/research/other.json',
+  'news/v2/research/view.JSON', 'news/v2/research//view.json', 'news/v2/research/%76iew.json',
   // G3: unqualified pages are no longer public, and the generation segment is exact.
   'news/v1/views/collector/all/2026-11-09/page-0001.json',
   `news/v2/views/p/${GEN.toUpperCase()}.1/collector/all/2026-11-09/page-0001.json`,

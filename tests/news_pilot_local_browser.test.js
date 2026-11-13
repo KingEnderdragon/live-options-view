@@ -75,21 +75,23 @@ const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/cs
         for (const [vname, viewport] of viewports) {
           const label = `${stage.stage} ${base} ${vname}`;
           const page = await browser.newPage({ viewport });
-          const errors = [], foreign = [], news = [];
+          const errors = [], foreign = [], news = [], researchReqs = [];
           page.on('pageerror', e => errors.push(e.message));
           page.on('dialog', d => { errors.push('dialog: ' + d.message()); d.dismiss(); });
           await page.route('**/*', async route => {
             const url = new URL(route.request().url());
             if (url.origin === pageOrigin && url.pathname.startsWith('/browser-data/')) {
               const key = url.pathname.slice('/browser-data/'.length);
-              if (key.startsWith('news/')) news.push({ base: 'proxy', key });
+              if (key === 'news/v2/research/view.json') researchReqs.push({ base: 'proxy', key });
+              else if (key.startsWith('news/')) news.push({ base: 'proxy', key });
               const res = await worker.fetch(new Request(url, { headers: { Origin: APP } }), env);
               return route.fulfill({ status: res.status, body: Buffer.from(await res.arrayBuffer()),
                 headers: Object.fromEntries(res.headers) });
             }
             if (url.origin === R2) {
               const key = url.pathname.slice(1);
-              if (key.startsWith('news/')) news.push({ base: 'r2', key });
+              if (key === 'news/v2/research/view.json') researchReqs.push({ base: 'r2', key });
+              else if (key.startsWith('news/')) news.push({ base: 'r2', key });
               const r = upstream(key);
               return route.fulfill({ status: r.status, body: r.body, contentType: r.type || 'text/plain',
                 headers: { 'Access-Control-Allow-Origin': '*' } });
@@ -136,6 +138,7 @@ const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/cs
             fs.mkdirSync(EVIDENCE, { recursive: true });
             await page.screenshot({ path: path.join(EVIDENCE, `${stage.stage}-${base}-${viewport.width}.png`), fullPage: false });
           }
+          assert.deepEqual(researchReqs, [{ base, key: 'news/v2/research/view.json' }], `${label}: the research view (absent here) is one request`);
           assert.deepEqual(foreign, [], `${label}: requests left the page and R2 origins`);
           assert.deepEqual(errors, [], `${label}: page errors`);
           checks++;
@@ -144,7 +147,7 @@ const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/cs
         }
       }
     }
-    for (const key of upstreamCalls.filter(k => k.startsWith('news/'))) assert.ok(panel.isNewsViewKey(key), key);
+    for (const key of upstreamCalls.filter(k => k.startsWith('news/') && k !== 'news/v2/research/view.json')) assert.ok(panel.isNewsViewKey(key), key);
   } finally {
     global.fetch = originalFetch;
     await browser.close();

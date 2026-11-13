@@ -110,4 +110,76 @@ test('only http(s) URLs become links', () => {
   assert.ok(root.textContent.includes('SYNTHETIC: fund reported cutting gross exposure'));
 });
 
-console.log(`\n${n} news research view tests passed`);
+// --- P1 wiring: the fetcher, mount and site wiring -------------------------------------------------
+const tick = () => new Promise(r => setImmediate(r));
+function fakeFetch(calls, respond) {
+  return async (url, opts) => { calls.push({ url, opts }); return respond(url); };
+}
+const resp = (status, body) => ({ status, ok: status >= 200 && status < 300, text: async () => body });
+
+async function asyncTests() {
+  const goodText = fs.readFileSync(path.join(out, 'prepared-research.json'), 'utf8');
+  {
+    const calls = [];
+    const f = research.makeFetcher('/browser-data/', fakeFetch(calls, () => resp(200, goodText)), () => 1762686900123.7);
+    const v = await f();
+    assert.equal(v.schema_version, 'news-research-view/v1');
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, '/browser-data/news/v2/research/view.json?_=1762686900123');
+    assert.equal(calls[0].opts.credentials, 'omit');
+    assert.equal(calls[0].opts.cache, 'no-store');
+    await assert.rejects(f('news/v1/research/runs/x/manifest.json'), e => e.researchKind === 'refused');
+    await assert.rejects(f('news/v2/views/index.json'), e => e.researchKind === 'refused');
+    assert.equal(calls.length, 1, 'a refused key is never requested');
+    const r2 = [];
+    await research.makeFetcher('https://pub.example.r2.dev', fakeFetch(r2, () => resp(200, goodText)), () => 5)();
+    assert.equal(r2[0].url, 'https://pub.example.r2.dev/news/v2/research/view.json?_=5');
+    n++; console.log('ok - the fetcher requests exactly the research view key, uncached, without credentials');
+  }
+  for (const [what, respond, state, text] of [
+    ['404', () => resp(404, 'nf'), 'absent', 'No research view published'],
+    ['500', () => resp(500, 'x'), 'failed', 'Could not load research records: HTTP 500'],
+    ['bad json', () => resp(200, '{'), 'failed', 'response is not valid JSON'],
+    ['network', () => { throw new TypeError('down'); }, 'failed', 'network error'],
+    ['wrong schema', () => resp(200, JSON.stringify({ schema_version: 'x', items: [] })), 'failed', 'Could not show research records'],
+  ]) {
+    const root = new Node('div');
+    const got = await research.mount(makeDoc(), root, research.makeFetcher('/b', fakeFetch([], respond), () => 1));
+    assert.equal(got, state, what);
+    assert.equal(root.getAttribute('data-state'), state, what);
+    assert.ok(root.textContent.includes(text), `${what}: ${root.textContent}`);
+    n++; console.log(`ok - mount: ${what} -> ${state}`);
+  }
+  {
+    let fire = null;
+    const timers = { set: f => { fire = f; return 1; }, clear: () => {} };
+    const f = research.makeFetcher('/b', () => new Promise(() => {}), () => 1, 20000, timers);
+    const root = new Node('div');
+    const p = research.mount(makeDoc(), root, f);
+    assert.equal(root.getAttribute('data-state'), 'loading');
+    await tick(); fire();
+    assert.equal(await p, 'failed');
+    assert.ok(root.textContent.includes('no complete response within 20 s'));
+    n++; console.log('ok - mount: a request past its deadline is a failure');
+  }
+  {
+    const html = fs.readFileSync(path.join(__dirname, '../site/index.html'), 'utf8');
+    const { createHash } = require('node:crypto');
+    const hash = f => createHash('sha256').update(fs.readFileSync(path.join(__dirname, '../site/js', f))).digest('hex').slice(0, 16);
+    assert.ok(html.includes('<script src="js/news-research.js?v=' + hash('news-research.js') + '"></script>'), 'research stamp');
+    const at = s => html.indexOf(s);
+    assert.ok(at('js/news-research.js?v=') > 0 && at('js/news-research.js?v=') < at('js/news-panel.js?v='), 'loaded before the panel');
+    assert.equal((html.match(/id="news-research"/g) || []).length, 1, 'one research container');
+    const between = html.slice(at('id="news-panel"'), at('id="news-research"'));
+    assert.ok(at('id="news-panel"') < at('id="news-research"') && between.split('\n').length <= 2,
+      'the research container directly follows #news-panel (the sibling rule hides it with the tab)');
+    assert.ok(html.includes('#news-panel.hidden + #news-research { display: none; }'));
+    assert.ok(!/news\/v1\/research/.test(html), 'the page never names the private ledger');
+    const panelSrc = fs.readFileSync(path.join(__dirname, '../site/js/news-panel.js'), 'utf8');
+    assert.ok(/function loadNewsPanel\(\) \{[\s\S]{0,200}if \(typeof loadNewsResearch === 'function'\) loadNewsResearch\(\);/.test(panelSrc));
+    n++; console.log('ok - site wiring: stamp, order, one container after #news-panel, hidden with it, mounted by loadNewsPanel');
+  }
+}
+
+asyncTests().then(() => console.log(`${n} news research view tests passed`))
+  .catch(e => { console.error(e); process.exit(1); });

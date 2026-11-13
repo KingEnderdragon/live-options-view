@@ -807,6 +807,8 @@
     #news-panel .np-table td { border: 0; padding: 1px 0; }
     #news-panel .np-src { min-width: 0; }
   }
+  /* MediaFlow P1 research view (js/news-research.js styles its own content): shown with the News tab. */
+  #news-panel.hidden + #news-research { display: none; }
   /* ── end news panel ── */
 
   /* ── short-squeeze scanner panel (OA-191) ────────────────────────────── */
@@ -1324,6 +1326,7 @@
 </div> <!-- /squeeze-panel -->
 
 <div id="news-panel" class="hidden" aria-live="polite"></div> <!-- MediaFlow news views (js/news-panel.js) -->
+<div id="news-research" aria-live="polite"></div> <!-- MediaFlow P1 research view (js/news-research.js); hidden with #news-panel -->
 
 <div id="footer">
   OI color = calibrated historical percentile. Cell: OI · top-right = total vol · bottom-right = contracts last 60s (amber=20+, orange=100+, white=500+).<br>
@@ -1481,7 +1484,8 @@ let timerHandle = null;
 // Lives in js/news-panel.js, loaded below; the News tab mounts it on first
 // open. The banner stays here as the section's marker.
 </script>
-<script src="js/news-panel.js?v=ffff511c0c6fa293"></script>
+<script src="js/news-research.js?v=a7fcf498354a5032"></script>
+<script src="js/news-panel.js?v=73e65deafd6f58a3"></script>
 <script>
 
 // ── tab switching ────────────────────────────────────────────────────────────

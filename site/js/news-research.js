@@ -1,7 +1,11 @@
-// News research view (MediaFlow P1, inactive): renders the sanitized research projection written by
+// News research view (MediaFlow P1): renders the sanitized research projection written by
 // `python -m market_data.news research-view` (market_data/news/research.py, schema
-// news-research-view/v1). NOT loaded by site/index.html: it is exercised only through the tests-only
-// harness (tests/news_panel/research.html) until a separate, approved wiring step.
+// news-research-view/v1). site/index.html loads it before news-panel.js; loadNewsPanel (the News tab's
+// first open) also calls loadNewsResearch, which mounts it under the news views from the one public key
+// RESEARCH_KEY (news/v2/research/view.json) on the same base as the panel (/browser-data on the
+// production origin, the public R2 origin otherwise). The fetcher requests that exact key only, never
+// the private ledger; a 404 shows "No research view published", anything else that fails shows a
+// failure. The tests-only harness (tests/news_panel/research.html) still renders a projection directly.
 // Text goes through textContent only; links are re-checked with new URL() and must be http(s).
 // What the view keeps apart, and this page shows apart:
 //   - how we know: evidence kind, the source chain (who published, who they cite, the origin) and each
@@ -18,6 +22,8 @@
   'use strict';
 
   var VIEW_SCHEMA = 'news-research-view/v1';
+  var RESEARCH_KEY = 'news/v2/research/view.json';
+  var DEADLINE_MS = 20000;
   var MODES = ['collector', 'archive', 'publication', 'research'];
   var EVIDENCE = {
     primary_disclosure: 'primary disclosure', attributed_report: 'attributed report',
@@ -293,7 +299,78 @@
     return 'ready';
   }
 
-  var api = { VIEW_SCHEMA: VIEW_SCHEMA, CSS: CSS, render: render, viewProblems: viewProblems, safeUrl: safeUrl };
+  function researchError(kind, message) {
+    var e = new Error(message);
+    e.researchKind = kind;  // refused | absent | deadline | http | network | json
+    return e;
+  }
+
+  // Returns fetchView() -> Promise<object>: exactly RESEARCH_KEY on base, no cached copy, no credentials,
+  // the existing ?_= query, and a deadline (aborted when AbortController exists).
+  function makeFetcher(base, fetchImpl, now, deadlineMs, timers) {
+    var root = String(base).replace(/\/+$/, '');
+    var limit = deadlineMs || DEADLINE_MS;
+    var T = timers || { set: function (f, ms) { return setTimeout(f, ms); }, clear: function (h) { clearTimeout(h); } };
+    return function fetchView(key) {
+      if (key !== undefined && key !== RESEARCH_KEY) {
+        return Promise.reject(researchError('refused', 'refused: only the research view key is requested'));
+      }
+      var url = root + '/' + RESEARCH_KEY + '?_=' + Math.floor(now());
+      var ctrl = typeof AbortController === 'function' ? new AbortController() : null;
+      var timer = null;
+      var expired = new Promise(function (_, reject) {
+        timer = T.set(function () {
+          if (ctrl) { try { ctrl.abort(); } catch (e) { /* settled */ } }
+          reject(researchError('deadline', 'no complete response within ' + Math.round(limit / 1000) + ' s'));
+        }, limit);
+      });
+      var work = Promise.resolve().then(function () {
+        var init = { credentials: 'omit', cache: 'no-store' };
+        if (ctrl) init.signal = ctrl.signal;
+        return fetchImpl(url, init);
+      }).then(function (r) {
+        if (r.status === 404) throw researchError('absent', 'No research view published');
+        if (!r.ok) throw researchError('http', 'HTTP ' + r.status);
+        return r.text().then(function (body) {
+          try { return JSON.parse(body); } catch (e) { throw researchError('json', 'response is not valid JSON'); }
+        });
+      }, function (e) {
+        throw e && e.researchKind ? e : researchError('network', 'network error');
+      });
+      return Promise.race([work, expired]).then(function (v) { T.clear(timer); return v; },
+        function (e) { T.clear(timer); throw e; });
+    };
+  }
+
+  // Mount once: loading, then ready / absent / failed. Never throws.
+  function mount(doc, container, fetchView) {
+    ensureStyle(doc);
+    clear(container);
+    container.setAttribute('data-state', 'loading');
+    add(container, el(doc, 'p', 'nr-box nr-dim', 'Loading research records…'));
+    return fetchView().then(function (view) {
+      return render(doc, container, view);
+    }, function (e) {
+      clear(container);
+      var absent = e && e.researchKind === 'absent';
+      container.setAttribute('data-state', absent ? 'absent' : 'failed');
+      add(container, el(doc, 'p', 'nr-box ' + (absent ? 'nr-empty' : 'nr-bad'),
+        absent ? 'No research view published' : 'Could not load research records: ' + (e && e.message || 'unknown error')));
+      return container.getAttribute('data-state');
+    });
+  }
+
+  var api = { VIEW_SCHEMA: VIEW_SCHEMA, RESEARCH_KEY: RESEARCH_KEY, CSS: CSS, render: render, viewProblems: viewProblems,
+              safeUrl: safeUrl, makeFetcher: makeFetcher, mount: mount };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.NewsResearch = api;
 })(typeof window !== 'undefined' ? window : this);
+
+// Called by loadNewsPanel (js/news-panel.js) on the News tab's first open. BROWSER_DATA is the page's
+// data base (index.html). Absent container (the harness, other pages): nothing happens.
+function loadNewsResearch() {
+  var box = typeof document !== 'undefined' ? document.getElementById('news-research') : null;
+  if (!box) return null;
+  return NewsResearch.mount(document, box,
+    NewsResearch.makeFetcher(BROWSER_DATA, function (url, opts) { return fetch(url, opts); }, Date.now));
+}

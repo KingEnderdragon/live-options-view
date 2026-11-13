@@ -642,6 +642,8 @@
 // BROWSER_DATA is the page's shared data base (index.html): the bounded
 // /browser-data proxy on the production origin, the public R2 origin otherwise.
 function loadNewsPanel() {
+  // MediaFlow P1: the research view (js/news-research.js) mounts with the news views, under them.
+  if (typeof loadNewsResearch === 'function') loadNewsResearch();
   return NewsPanel.mount(document, document.getElementById('news-panel'),
     NewsPanel.makeFetcher(BROWSER_DATA, function (url, opts) { return fetch(url, opts); }, Date.now),
     NewsPanel.INDEX_KEY, { events: typeof window !== 'undefined' ? window : null });
