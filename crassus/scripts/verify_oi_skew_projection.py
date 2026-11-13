@@ -128,7 +128,37 @@ with tempfile.TemporaryDirectory() as tmp:
     # Revision alone missing is still unavailable (no guessed source revision).
     norev = dict(rec, code_revision=None)
     check("unknown revision -> unavailable", proj.build_projection(norev, published_at=PUB)["status"]["reason"]
-          == "missing:code_revision")
+          == "missing_or_invalid:code_revision")
+
+    # Review 5:42 PM: empty/malformed provenance is not provenance. Each case
+    # must be unavailable and name exactly the offending field.
+    def with_meta(**kw):
+        return dict(rec, decision=dict(rec["decision"], metadata=dict(meta, **kw)))
+    malformed = [
+        ("code_revision", dict(rec, code_revision="")),
+        ("code_revision", dict(rec, code_revision="not-a-sha")),
+        ("code_revision", dict(rec, code_revision="F" * 40)),          # uppercase is not git's form
+        ("strategy_version", dict(rec, strategy_version="  ")),
+        ("session_key", with_meta(session_key="")),
+        ("session_key", with_meta(session_key="2024-02-30")),          # not a real date
+        ("session_key", with_meta(session_key="2024-1-1")),
+        ("anchor_observed_at", with_meta(anchor_observed_at="")),
+        ("anchor_observed_at", with_meta(anchor_observed_at="yesterday")),
+        ("anchor_observed_at", with_meta(anchor_observed_at="2024-01-01T14:00:00")),  # naive
+        ("observed_snapshot_timestamp", dict(rec, market_snapshot_timestamp="")),
+        ("observed_snapshot_timestamp", dict(rec, market_snapshot_timestamp="2024-13-01T00:00:00Z")),
+        ("decision_at", dict(rec, timestamp_utc="not a time")),
+        ("band_strikes", with_meta(band_strikes=-1)),
+    ]
+    for field, bad in malformed:
+        d = proj.build_projection(bad, published_at=PUB)
+        check(f"malformed {field} ({str((bad.get(field) if field in bad else '') or '')[:20]!r}) -> unavailable",
+              d["status"]["code"] == "unavailable"
+              and d["status"]["reason"] == f"missing_or_invalid:{field}", d["status"])
+    zulu = dict(rec, timestamp_utc="2024-01-01T15:00:05Z")
+    check("Z-suffixed instants are valid", proj.build_projection(zulu, published_at=PUB)["status"]["code"] == "ok")
+    check("short SHA accepted", proj.build_projection(dict(rec, code_revision="abc1234"),
+                                                     published_at=PUB)["status"]["code"] == "ok")
 
     other = dict(rec, strategy_id="momentum_qqq")
     check("other strategy -> unavailable", "not_an_oi_skew_decision" in

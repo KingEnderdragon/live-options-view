@@ -24,8 +24,9 @@ import argparse
 import hashlib
 import json
 import math
+import re
 import sys
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -34,8 +35,10 @@ STRATEGY_ID = "oi_skew_qqq"
 PARAM_KEYS = ("near_money_pct", "imbalance_threshold", "min_change_from_session_start", "min_band_strikes")
 #: Fields the display needs. `imbalance_ratio` may legitimately be null (no
 #: OI in band) and `session_phase` is optional, so neither is listed.
-REQUIRED = ("code_revision", "run_identity", "session_key", "anchor_observed_at", "session_start_imbalance",
-            "band_strikes", "params", "observed_snapshot_timestamp", "decision_at")
+REQUIRED = ("strategy_version", "code_revision", "run_identity", "session_key", "anchor_observed_at",
+            "session_start_imbalance", "band_strikes", "params", "observed_snapshot_timestamp", "decision_at")
+_REVISION_RE = re.compile(r"[0-9a-f]{7,40}")
+_SESSION_KEY_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 #: Keys that must never appear anywhere in a projection (checked by tests).
 FORBIDDEN_KEYS = frozenset({
     "account_alias", "username", "account_state_before", "account_state_after", "balance_cash",
@@ -52,6 +55,35 @@ def run_identity(run_id: str | None) -> str | None:
 
 def _finite(x: Any) -> float | None:
     return float(x) if isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) else None
+
+
+def _timestamp(value: Any) -> str | None:
+    """A timezone-aware ISO-8601 instant, kept verbatim; anything else is absent.
+
+    Empty strings, unparseable text and naive times are not provenance."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return value if parsed.tzinfo is not None and parsed.utcoffset() is not None else None
+
+
+def _session_key(value: Any) -> str | None:
+    """The tracker's reset key: a real UTC calendar date, YYYY-MM-DD."""
+    if not isinstance(value, str) or not _SESSION_KEY_RE.fullmatch(value):
+        return None
+    try:
+        date.fromisoformat(value)
+    except ValueError:
+        return None
+    return value
+
+
+def _revision(value: Any) -> str | None:
+    """A git commit SHA (7-40 lowercase hex); anything else is unknown."""
+    return value if isinstance(value, str) and _REVISION_RE.fullmatch(value) else None
 
 
 def _params(raw: Any) -> dict[str, Any] | None:
@@ -78,14 +110,16 @@ def build_projection(record: dict[str, Any], *, published_at: datetime | None = 
     meta = (decision or {}).get("metadata") if isinstance(decision, dict) else None
     meta = meta if isinstance(meta, dict) else {}
     band = meta.get("band_strikes")
+    band = band if isinstance(band, int) and not isinstance(band, bool) and band >= 0 else None
     doc: dict[str, Any] = {
         "schema_version": SCHEMA,
         "strategy_id": STRATEGY_ID,
-        "strategy_version": record.get("strategy_version") if isinstance(record.get("strategy_version"), str) else None,
-        "code_revision": record.get("code_revision") if isinstance(record.get("code_revision"), str) else None,
+        "strategy_version": record.get("strategy_version")
+        if isinstance(record.get("strategy_version"), str) and record.get("strategy_version").strip() else None,
+        "code_revision": _revision(record.get("code_revision")),
         "run_identity": run_identity(record.get("run_id") if isinstance(record.get("run_id"), str) else None),
-        "session_key": meta.get("session_key") if isinstance(meta.get("session_key"), str) else None,
-        "anchor_observed_at": meta.get("anchor_observed_at") if isinstance(meta.get("anchor_observed_at"), str) else None,
+        "session_key": _session_key(meta.get("session_key")),
+        "anchor_observed_at": _timestamp(meta.get("anchor_observed_at")),
         "session_start_imbalance": _finite(meta.get("session_start_imbalance")),
         "imbalance_ratio": _finite(meta.get("imbalance_ratio")),
         "delta_from_session_start": _finite(meta.get("delta_from_session_start")),
@@ -94,9 +128,8 @@ def build_projection(record: dict[str, Any], *, published_at: datetime | None = 
         # The strategy records the phase only on its market-closed branch;
         # when absent it stays null rather than being inferred.
         "session_phase": meta.get("session_phase") if isinstance(meta.get("session_phase"), str) else None,
-        "observed_snapshot_timestamp": record.get("market_snapshot_timestamp")
-        if isinstance(record.get("market_snapshot_timestamp"), str) else None,
-        "decision_at": record.get("timestamp_utc") if isinstance(record.get("timestamp_utc"), str) else None,
+        "observed_snapshot_timestamp": _timestamp(record.get("market_snapshot_timestamp")),
+        "decision_at": _timestamp(record.get("timestamp_utc")),
         "published_at": (published_at or datetime.now(timezone.utc)).isoformat(),
     }
     problems = []
@@ -104,7 +137,8 @@ def build_projection(record: dict[str, Any], *, published_at: datetime | None = 
         problems.append("not_an_oi_skew_decision")
     missing = [k for k in REQUIRED if doc.get(k) is None]
     if missing:
-        problems.append("missing:" + ",".join(missing))
+        # Absent and malformed are the same for the display: not evidence.
+        problems.append("missing_or_invalid:" + ",".join(missing))
     doc["status"] = ({"code": "ok", "reason": None} if not problems
                      else {"code": "unavailable", "reason": ";".join(problems)})
     return doc

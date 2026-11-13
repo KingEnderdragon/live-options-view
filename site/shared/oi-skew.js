@@ -158,9 +158,17 @@ function describeBotOiSkew(projection, nowMs = Date.now()) {
   // The projection says when its own evidence is incomplete (legacy ledger
   // rows, unknown source revision...). That is shown as unavailable, never
   // classified from whatever fields happen to be present.
-  if (projection.status?.code !== 'ok' || !projection.params) {
+  // Review 5:42 PM: a status of ok is not trusted on its own -- every field
+  // the display relies on is re-checked here with the builder's own rules
+  // (crassus/crassus/oi_skew_projection.py), so a document missing or
+  // mangling provenance can never produce a live signal.
+  const problems = projection.status?.code !== 'ok'
+    ? [projection.status?.reason || 'status not ok']
+    : oiSkewProjectionProblems(projection);
+  if (problems.length) {
     return { availability: 'unavailable', state: 'unknown', text: 'Bot signal: unavailable',
-      detail: `The published bot state is incomplete (${projection.status?.reason || 'no params'}); `
+      problems,
+      detail: `The published bot state is incomplete (${problems.join('; ')}); `
         + 'its effective signal is not shown.' };
   }
   const obsMs = Date.parse(projection.observed_snapshot_timestamp || '');
@@ -183,6 +191,36 @@ function describeBotOiSkew(projection, nowMs = Date.now()) {
     detail: `${cls.reason} ${provenance}` };
 }
 
+// Field rules mirrored from the builder: an aware ISO instant, a real UTC
+// calendar date, a lowercase git SHA, the digest run identity, finite
+// numbers and complete params. Returns the offending field names.
+function _awareInstant(v) {
+  return typeof v === 'string'
+    && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/.test(v)
+    && Number.isFinite(Date.parse(v));
+}
+function _calendarDate(v) {
+  if (typeof v !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(v)) return false;
+  const d = new Date(`${v}T00:00:00Z`);
+  return Number.isFinite(d.getTime()) && d.toISOString().slice(0, 10) === v;
+}
+function oiSkewProjectionProblems(p) {
+  const bad = [];
+  if (typeof p.strategy_version !== 'string' || !p.strategy_version.trim()) bad.push('strategy_version');
+  if (typeof p.code_revision !== 'string' || !/^[0-9a-f]{7,40}$/.test(p.code_revision)) bad.push('code_revision');
+  if (typeof p.run_identity !== 'string' || !/^run:[0-9a-f]{16}$/.test(p.run_identity)) bad.push('run_identity');
+  if (!_calendarDate(p.session_key)) bad.push('session_key');
+  if (!_awareInstant(p.anchor_observed_at)) bad.push('anchor_observed_at');
+  if (!_finite(p.session_start_imbalance)) bad.push('session_start_imbalance');
+  if (!(Number.isInteger(p.band_strikes) && p.band_strikes >= 0)) bad.push('band_strikes');
+  const prm = p.params;
+  if (!prm || !_finite(prm.near_money_pct) || !_finite(prm.imbalance_threshold)
+      || !_finite(prm.min_change_from_session_start) || !Number.isInteger(prm.min_band_strikes)) bad.push('params');
+  if (!_awareInstant(p.observed_snapshot_timestamp)) bad.push('observed_snapshot_timestamp');
+  if (!_awareInstant(p.decision_at)) bad.push('decision_at');
+  return bad;
+}
+
 // A projection fetch that failed: unavailable, never the last state as live.
 function describeBotOiSkewFetchFailure(reason) {
   return { availability: 'unavailable', state: 'unknown', text: 'Bot signal: unavailable',
@@ -199,6 +237,6 @@ function oiSkewMeterPercent(value) {
 if (typeof module !== 'undefined') {
   module.exports = { OI_SKEW_DEFAULTS, OI_SKEW_STALE_AFTER_MS, OI_SKEW_CLOSED_AFTER_MS,
     classifyOiSkewSignal, describeReferenceOiSkew, degradeOiSkewForRefreshFailure, describeBotOiSkew,
-    describeBotOiSkewFetchFailure,
+    describeBotOiSkewFetchFailure, oiSkewProjectionProblems,
     oiSkewMeterPercent };
 }

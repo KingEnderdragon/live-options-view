@@ -284,6 +284,46 @@ checks += 3;
   checks += 4;
 }
 
+// ── consumer re-checks provenance even when status says ok (review 5:42) ────
+{
+  const { oiSkewProjectionProblems } = require('../site/shared/oi-skew.js');
+  const good = fixture.cases.find(c => c.bot.state === 'bullish').projection;
+  const at = Date.parse('2026-11-13T17:30:30Z');
+  assert.deepEqual(oiSkewProjectionProblems(good), []);
+  assert.equal(describeBotOiSkew(good, at).availability, 'live');
+  const drop = k => { const c = { ...good }; delete c[k]; return c; };
+  const cases = [
+    ['code_revision', drop('code_revision')], ['code_revision', { ...good, code_revision: '' }],
+    ['code_revision', { ...good, code_revision: 'not-a-sha' }], ['code_revision', { ...good, code_revision: 'F'.repeat(40) }],
+    ['session_key', drop('session_key')], ['session_key', { ...good, session_key: '' }],
+    ['session_key', { ...good, session_key: '2026-02-30' }], ['session_key', { ...good, session_key: '2026-1-1' }],
+    ['anchor_observed_at', drop('anchor_observed_at')], ['anchor_observed_at', { ...good, anchor_observed_at: '' }],
+    ['anchor_observed_at', { ...good, anchor_observed_at: 'yesterday' }],
+    ['anchor_observed_at', { ...good, anchor_observed_at: '2026-11-13T11:00:00' }],   // naive
+    ['observed_snapshot_timestamp', { ...good, observed_snapshot_timestamp: '' }],
+    ['observed_snapshot_timestamp', { ...good, observed_snapshot_timestamp: '2026-13-01T00:00:00Z' }],
+    ['decision_at', { ...good, decision_at: 'not a time' }],
+    ['run_identity', { ...good, run_identity: 'parity-run' }],
+    ['strategy_version', { ...good, strategy_version: '  ' }],
+    ['session_start_imbalance', { ...good, session_start_imbalance: null }],
+    ['band_strikes', { ...good, band_strikes: -1 }],
+    ['params', { ...good, params: { ...good.params, min_band_strikes: undefined } }],
+    ['params', { ...good, params: {} }],
+  ];
+  for (const [field, doc] of cases) {
+    assert.equal(doc.status.code, 'ok', 'status left ok on purpose');
+    const r = describeBotOiSkew(doc, at);
+    assert.equal(r.availability, 'unavailable', `${field}: ${JSON.stringify(doc[field])}`);
+    assert.equal(r.state, 'unknown', field);
+    assert.deepEqual(r.problems, [field], field);
+    assert.doesNotMatch(r.detail, /undefined/, field);
+    checks += 4;
+  }
+  assert.equal(describeBotOiSkew({ ...good, decision_at: '2026-11-13T17:30:05.123+00:00' }, at).availability, 'live');
+  assert.equal(describeBotOiSkew({ ...good, code_revision: 'abc1234' }, at).availability, 'live');
+  checks += 4;
+}
+
 // ── projection fetch: disabled by default; when invoked, fails closed ────────
 (async () => {
   const src = fs.readFileSync(path.join(root, 'site', 'js', 'oi-skew-meter.js'), 'utf8');

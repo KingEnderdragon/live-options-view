@@ -52,7 +52,7 @@ Built on `claude/oi-skew-meter` 7d123de (#233). One commit per release lane:
 | API + gateway | 462f6ed, then relocated | `OI_SKEW_PROJECTION_KEY` with `OI_SKEW_PROJECTION_PUBLIC = false` in `backend/browser-data.js` and `frontend/preview-policy.mjs`. While disabled the key returns 404; a test pins both sides. | None. |
 | Asset (site) | 888a12c | The meter reads the projection's status and provenance. `OI_SKEW_PROJECTION_ENABLED = false`, so no request is made. A missing, 404, wrong or incomplete document shows unavailable. 184 checks, with 14/14 projection parity cases. | None. The page still shows "Bot signal: not published". |
 
-**Local evidence.** On the real private export (Sep 3 – Nov 9) the builder returns `status: unavailable`, `missing:code_revision,session_key,anchor_observed_at,params`. Those rows predate the additive fields, so nothing is guessed. No alias, username, raw run_id, cash or decision ID appears in the output.
+**Local evidence.** On the real private export (Sep 3 – Nov 9) the builder returns `status: unavailable`, `missing_or_invalid:code_revision,session_key,anchor_observed_at,params`. Those rows predate the additive fields, so nothing is guessed. No alias, username, raw run_id, cash or decision ID appears in the output.
 
 **MediaFlow coordination.** This branch changes only the two `oi-skew` `?v=` lines in `site/index.html` and the key-set lines of the two allowlists. Trial merges with `feat/news-g6` and `feat/news-g7` are conflict-free.
 
