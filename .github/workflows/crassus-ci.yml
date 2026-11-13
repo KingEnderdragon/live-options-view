@@ -5,10 +5,16 @@ on:
     branches: [master]
     paths:
       - "crassus/**"
+      - "tests/oi_skew_meter_parity.py"
+      - "tests/fixtures/oi_skew_parity.json"
+      - "market_data/overview/readings.py"
       - ".github/workflows/crassus-ci.yml"
   pull_request:
     paths:
       - "crassus/**"
+      - "tests/oi_skew_meter_parity.py"
+      - "tests/fixtures/oi_skew_parity.json"
+      - "market_data/overview/readings.py"
       - ".github/workflows/crassus-ci.yml"
 
 jobs:
@@ -31,6 +37,12 @@ jobs:
       - name: Run OI-skew per-account tracker suite (#107)
         working-directory: crassus
         run: python scripts/verify_oi_skew_accounts.py
+      # The site OI skew meter (site/shared/oi-skew.js) is pinned to the real
+      # bot gates and collector reading by this fixture; a strategy or reading
+      # change that alters any case fails here until the fixture (and, if the
+      # semantics moved, the meter) is updated. Web CI checks the JS side.
+      - name: OI skew meter parity fixture is current
+        run: python tests/oi_skew_meter_parity.py
       - name: Run immutable market-readings join suite (#107)
         working-directory: crassus
         run: python scripts/verify_market_readings_join.py

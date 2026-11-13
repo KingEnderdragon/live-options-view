@@ -1,0 +1,530 @@
+{
+ "cases": [
+  {
+   "bot": {
+    "action": "buy",
+    "band_strikes": 5,
+    "delta_from_session_start": 0.6551724137931034,
+    "imbalance_ratio": 0.6551724137931034,
+    "reason": "Near-money OI skew is bullish (imbalance=0.655, call_oi=2400, put_oi=500, moved 0.655 from session start); opening one call.",
+    "session_start_imbalance": 0.0,
+    "state": "bullish"
+   },
+   "name": "bullish_directional",
+   "params": {},
+   "reference": {
+    "parameters": {
+     "account_specific": false,
+     "band": "reference",
+     "near_money_pct": 0.02
+    },
+    "status": {
+     "code": "ok",
+     "reason": null
+    },
+    "units": {
+     "band_strikes": "count",
+     "imbalance_ratio": "dimensionless",
+     "near_money_call_oi": "contracts",
+     "near_money_put_oi": "contracts"
+    },
+    "values": {
+     "band_strikes": 5,
+     "imbalance_ratio": 0.6551724137931034,
+     "near_money_call_oi": 2400.0,
+     "near_money_put_oi": 500.0
+    }
+   },
+   "strategy_version": "1.0.0"
+  },
+  {
+   "bot": {
+    "action": "buy",
+    "band_strikes": 5,
+    "delta_from_session_start": -0.6551724137931034,
+    "imbalance_ratio": -0.6551724137931034,
+    "reason": "Near-money OI skew is bearish (imbalance=-0.655, call_oi=500, put_oi=2400, moved -0.655 from session start); opening one put.",
+    "session_start_imbalance": 0.0,
+    "state": "bearish"
+   },
+   "name": "bearish_directional",
+   "params": {},
+   "reference": {
+    "parameters": {
+     "account_specific": false,
+     "band": "reference",
+     "near_money_pct": 0.02
+    },
+    "status": {
+     "code": "ok",
+     "reason": null
+    },
+    "units": {
+     "band_strikes": "count",
+     "imbalance_ratio": "dimensionless",
+     "near_money_call_oi": "contracts",
+     "near_money_put_oi": "contracts"
+    },
+    "values": {
+     "band_strikes": 5,
+     "imbalance_ratio": -0.6551724137931034,
+     "near_money_call_oi": 500.0,
+     "near_money_put_oi": 2400.0
+    }
+   },
+   "strategy_version": "1.0.0"
+  },
+  {
+   "bot": {
+    "action": "no_trade",
+    "band_strikes": 5,
+    "delta_from_session_start": 0.09090909090909091,
+    "imbalance_ratio": 0.09090909090909091,
+    "reason": "Near-money imbalance (0.091) is below the 0.3 threshold.",
+    "session_start_imbalance": 0.0,
+    "state": "neutral"
+   },
+   "name": "neutral_below_threshold",
+   "params": {},
+   "reference": {
+    "parameters": {
+     "account_specific": false,
+     "band": "reference",
+     "near_money_pct": 0.02
+    },
+    "status": {
+     "code": "ok",
+     "reason": null
+    },
+    "units": {
+     "band_strikes": "count",
+     "imbalance_ratio": "dimensionless",
+     "near_money_call_oi": "contracts",
+     "near_money_put_oi": "contracts"
+    },
+    "values": {
+     "band_strikes": 5,
+     "imbalance_ratio": 0.09090909090909091,
+     "near_money_call_oi": 1200.0,
+     "near_money_put_oi": 1000.0
+    }
+   },
+   "strategy_version": "1.0.0"
+  },
+  {
+   "bot": {
+    "action": "no_trade",
+    "band_strikes": 5,
+    "delta_from_session_start": 0.011336797354747241,
+    "imbalance_ratio": 0.6551724137931034,
+    "reason": "Near-money imbalance (0.655) hasn't moved enough from the session-start reading (0.6438356164383562) -- delta=0.011336797354747241, need >= 0.1; likely stale/structural skew rather than fresh positioning.",
+    "session_start_imbalance": 0.6438356164383562,
+    "state": "neutral"
+   },
+   "name": "neutral_skewed_since_open",
+   "params": {},
+   "reference": {
+    "parameters": {
+     "account_specific": false,
+     "band": "reference",
+     "near_money_pct": 0.02
+    },
+    "status": {
+     "code": "ok",
+     "reason": null
+    },
+    "units": {
+     "band_strikes": "count",
+     "imbalance_ratio": "dimensionless",
+     "near_money_call_oi": "contracts",
+     "near_money_put_oi": "contracts"
+    },
+    "values": {
+     "band_strikes": 5,
+     "imbalance_ratio": 0.6551724137931034,
+     "near_money_call_oi": 2400.0,
+     "near_money_put_oi": 500.0
+    }
+   },
+   "strategy_version": "1.0.0"
+  },
+  {
+   "bot": {
+    "action": "no_trade",
+    "band_strikes": 5,
+    "delta_from_session_start": 0.0,
+    "imbalance_ratio": 0.6551724137931034,
+    "reason": "Near-money imbalance (0.655) hasn't moved enough from the session-start reading (0.6551724137931034) -- delta=0.0, need >= 0.1; likely stale/structural skew rather than fresh positioning.",
+    "session_start_imbalance": 0.6551724137931034,
+    "state": "neutral"
+   },
+   "name": "neutral_first_reading_is_anchor",
+   "params": {},
+   "reference": {
+    "parameters": {
+     "account_specific": false,
+     "band": "reference",
+     "near_money_pct": 0.02
+    },
+    "status": {
+     "code": "ok",
+     "reason": null
+    },
+    "units": {
+     "band_strikes": "count",
+     "imbalance_ratio": "dimensionless",
+     "near_money_call_oi": "contracts",
+     "near_money_put_oi": "contracts"
+    },
+    "values": {
+     "band_strikes": 5,
+     "imbalance_ratio": 0.6551724137931034,
+     "near_money_call_oi": 2400.0,
+     "near_money_put_oi": 500.0
+    }
+   },
+   "strategy_version": "1.0.0"
+  },
+  {
+   "bot": {
+    "action": "buy",
+    "band_strikes": 5,
+    "delta_from_session_start": 0.3,
+    "imbalance_ratio": 0.3,
+    "reason": "Near-money OI skew is bullish (imbalance=0.300, call_oi=650, put_oi=350, moved 0.300 from session start); opening one call.",
+    "session_start_imbalance": 0.0,
+    "state": "bullish"
+   },
+   "name": "boundary_exact_threshold_directional",
+   "params": {},
+   "reference": {
+    "parameters": {
+     "account_specific": false,
+     "band": "reference",
+     "near_money_pct": 0.02
+    },
+    "status": {
+     "code": "ok",
+     "reason": null
+    },
+    "units": {
+     "band_strikes": "count",
+     "imbalance_ratio": "dimensionless",
+     "near_money_call_oi": "contracts",
+     "near_money_put_oi": "contracts"
+    },
+    "values": {
+     "band_strikes": 5,
+     "imbalance_ratio": 0.3,
+     "near_money_call_oi": 650.0,
+     "near_money_put_oi": 350.0
+    }
+   },
+   "strategy_version": "1.0.0"
+  },
+  {
+   "bot": {
+    "action": "no_trade",
+    "band_strikes": 5,
+    "delta_from_session_start": 0.2998,
+    "imbalance_ratio": 0.2998,
+    "reason": "Near-money imbalance (0.300) is below the 0.3 threshold.",
+    "session_start_imbalance": 0.0,
+    "state": "neutral"
+   },
+   "name": "boundary_threshold_just_below",
+   "params": {},
+   "reference": {
+    "parameters": {
+     "account_specific": false,
+     "band": "reference",
+     "near_money_pct": 0.02
+    },
+    "status": {
+     "code": "ok",
+     "reason": null
+    },
+    "units": {
+     "band_strikes": "count",
+     "imbalance_ratio": "dimensionless",
+     "near_money_call_oi": "contracts",
+     "near_money_put_oi": "contracts"
+    },
+    "values": {
+     "band_strikes": 5,
+     "imbalance_ratio": 0.2998,
+     "near_money_call_oi": 6499.0,
+     "near_money_put_oi": 3501.0
+    }
+   },
+   "strategy_version": "1.0.0"
+  },
+  {
+   "bot": {
+    "action": "no_trade",
+    "band_strikes": 5,
+    "delta_from_session_start": 0.09999999999999998,
+    "imbalance_ratio": 0.3,
+    "reason": "Near-money imbalance (0.300) hasn't moved enough from the session-start reading (0.2) -- delta=0.09999999999999998, need >= 0.1; likely stale/structural skew rather than fresh positioning.",
+    "session_start_imbalance": 0.2,
+    "state": "neutral"
+   },
+   "name": "boundary_session_change_float",
+   "params": {},
+   "reference": {
+    "parameters": {
+     "account_specific": false,
+     "band": "reference",
+     "near_money_pct": 0.02
+    },
+    "status": {
+     "code": "ok",
+     "reason": null
+    },
+    "units": {
+     "band_strikes": "count",
+     "imbalance_ratio": "dimensionless",
+     "near_money_call_oi": "contracts",
+     "near_money_put_oi": "contracts"
+    },
+    "values": {
+     "band_strikes": 5,
+     "imbalance_ratio": 0.3,
+     "near_money_call_oi": 650.0,
+     "near_money_put_oi": 350.0
+    }
+   },
+   "strategy_version": "1.0.0"
+  },
+  {
+   "bot": {
+    "action": "buy",
+    "band_strikes": 5,
+    "delta_from_session_start": -0.19999999999999998,
+    "imbalance_ratio": -0.3,
+    "reason": "Near-money OI skew is bearish (imbalance=-0.300, call_oi=350, put_oi=650, moved -0.200 from session start); opening one put.",
+    "session_start_imbalance": -0.1,
+    "state": "bearish"
+   },
+   "name": "bearish_after_session_move",
+   "params": {},
+   "reference": {
+    "parameters": {
+     "account_specific": false,
+     "band": "reference",
+     "near_money_pct": 0.02
+    },
+    "status": {
+     "code": "ok",
+     "reason": null
+    },
+    "units": {
+     "band_strikes": "count",
+     "imbalance_ratio": "dimensionless",
+     "near_money_call_oi": "contracts",
+     "near_money_put_oi": "contracts"
+    },
+    "values": {
+     "band_strikes": 5,
+     "imbalance_ratio": -0.3,
+     "near_money_call_oi": 350.0,
+     "near_money_put_oi": 650.0
+    }
+   },
+   "strategy_version": "1.0.0"
+  },
+  {
+   "bot": {
+    "action": "buy",
+    "band_strikes": 5,
+    "delta_from_session_start": 0.10000000000000003,
+    "imbalance_ratio": 0.4,
+    "reason": "Near-money OI skew is bullish (imbalance=0.400, call_oi=700, put_oi=300, moved 0.100 from session start); opening one call.",
+    "session_start_imbalance": 0.3,
+    "state": "bullish"
+   },
+   "name": "boundary_session_change_float_passes",
+   "params": {},
+   "reference": {
+    "parameters": {
+     "account_specific": false,
+     "band": "reference",
+     "near_money_pct": 0.02
+    },
+    "status": {
+     "code": "ok",
+     "reason": null
+    },
+    "units": {
+     "band_strikes": "count",
+     "imbalance_ratio": "dimensionless",
+     "near_money_call_oi": "contracts",
+     "near_money_put_oi": "contracts"
+    },
+    "values": {
+     "band_strikes": 5,
+     "imbalance_ratio": 0.4,
+     "near_money_call_oi": 700.0,
+     "near_money_put_oi": 300.0
+    }
+   },
+   "strategy_version": "1.0.0"
+  },
+  {
+   "bot": {
+    "action": "no_trade",
+    "band_strikes": 3,
+    "delta_from_session_start": 0.6551724137931034,
+    "imbalance_ratio": 0.6551724137931034,
+    "reason": "Only 3 near-money strike(s) carry open interest (need 4); insufficient band coverage for a signal.",
+    "session_start_imbalance": 0.0,
+    "state": "neutral"
+   },
+   "name": "neutral_thin_band",
+   "params": {},
+   "reference": {
+    "parameters": {
+     "account_specific": false,
+     "band": "reference",
+     "near_money_pct": 0.02
+    },
+    "status": {
+     "code": "ok",
+     "reason": null
+    },
+    "units": {
+     "band_strikes": "count",
+     "imbalance_ratio": "dimensionless",
+     "near_money_call_oi": "contracts",
+     "near_money_put_oi": "contracts"
+    },
+    "values": {
+     "band_strikes": 3,
+     "imbalance_ratio": 0.6551724137931034,
+     "near_money_call_oi": 2400.0,
+     "near_money_put_oi": 500.0
+    }
+   },
+   "strategy_version": "1.0.0"
+  },
+  {
+   "bot": {
+    "action": "no_trade",
+    "band_strikes": 0,
+    "delta_from_session_start": null,
+    "imbalance_ratio": null,
+    "reason": "No open interest in the near-money band (+/-2.0% of underlying).",
+    "session_start_imbalance": 0.0,
+    "state": "neutral"
+   },
+   "name": "missing_no_open_interest",
+   "params": {},
+   "reference": {
+    "parameters": {
+     "account_specific": false,
+     "band": "reference",
+     "near_money_pct": 0.02
+    },
+    "status": {
+     "code": "no_data",
+     "reason": "no_open_interest_in_reference_band"
+    },
+    "units": {
+     "band_strikes": "count",
+     "imbalance_ratio": "dimensionless",
+     "near_money_call_oi": "contracts",
+     "near_money_put_oi": "contracts"
+    },
+    "values": {
+     "band_strikes": 0,
+     "imbalance_ratio": null,
+     "near_money_call_oi": 0.0,
+     "near_money_put_oi": 0.0
+    }
+   },
+   "strategy_version": "1.0.0"
+  },
+  {
+   "bot": {
+    "action": "no_trade",
+    "band_strikes": 7,
+    "delta_from_session_start": 0.09090909090909091,
+    "imbalance_ratio": 0.09090909090909091,
+    "reason": "Near-money imbalance (0.091) is below the 0.5 threshold.",
+    "session_start_imbalance": 0.0,
+    "state": "neutral"
+   },
+   "name": "override_wider_band_and_threshold",
+   "params": {
+    "imbalance_threshold": 0.5,
+    "near_money_pct": 0.06
+   },
+   "reference": {
+    "parameters": {
+     "account_specific": false,
+     "band": "reference",
+     "near_money_pct": 0.02
+    },
+    "status": {
+     "code": "ok",
+     "reason": null
+    },
+    "units": {
+     "band_strikes": "count",
+     "imbalance_ratio": "dimensionless",
+     "near_money_call_oi": "contracts",
+     "near_money_put_oi": "contracts"
+    },
+    "values": {
+     "band_strikes": 5,
+     "imbalance_ratio": 0.6551724137931034,
+     "near_money_call_oi": 2400.0,
+     "near_money_put_oi": 500.0
+    }
+   },
+   "strategy_version": "1.0.0"
+  },
+  {
+   "bot": {
+    "action": "no_trade",
+    "band_strikes": 5,
+    "delta_from_session_start": 0.4551724137931034,
+    "imbalance_ratio": 0.6551724137931034,
+    "reason": "Near-money imbalance (0.655) hasn't moved enough from the session-start reading (0.2) -- delta=0.4551724137931034, need >= 0.5; likely stale/structural skew rather than fresh positioning.",
+    "session_start_imbalance": 0.2,
+    "state": "neutral"
+   },
+   "name": "override_stricter_change",
+   "params": {
+    "min_change_from_session_start": 0.5
+   },
+   "reference": {
+    "parameters": {
+     "account_specific": false,
+     "band": "reference",
+     "near_money_pct": 0.02
+    },
+    "status": {
+     "code": "ok",
+     "reason": null
+    },
+    "units": {
+     "band_strikes": "count",
+     "imbalance_ratio": "dimensionless",
+     "near_money_call_oi": "contracts",
+     "near_money_put_oi": "contracts"
+    },
+    "values": {
+     "band_strikes": 5,
+     "imbalance_ratio": 0.6551724137931034,
+     "near_money_call_oi": 2400.0,
+     "near_money_put_oi": 500.0
+    }
+   },
+   "strategy_version": "1.0.0"
+  }
+ ],
+ "generated_by": "tests/oi_skew_meter_parity.py",
+ "schema": "oi_skew_meter_parity.v1",
+ "underlying": 400.0
+}
