@@ -10,6 +10,14 @@ import { R2_ORIGIN, jsonResponse } from './common.js';
 // Never use the private bucket binding or a caller-provided destination.
 export const BROWSER_DATA_ORIGIN = 'https://live-options-view.otmooper12.workers.dev';
 export const BROWSER_DATA_PREFIX = '/browser-data/';
+// OI skew meter bot-state projection (Skew + Direction H1, INACTIVE). The key
+// is prepared but DISABLED: no projector writes it yet, and a public grant for
+// an object that does not exist is not justified on its own (see the news
+// grant removal below). Flip to true only in the approved release that also
+// enables the projector; frontend/preview-policy.mjs carries the same key and
+// flag, and tests/r2_proxy_bounded.test.js pins them together.
+export const OI_SKEW_PROJECTION_KEY = 'crassus/oi-skew/v1/latest.json';
+export const OI_SKEW_PROJECTION_PUBLIC = false;
 export const BROWSER_DATA_KEYS = new Set([
   'intraday/latest.json',
   'intraday/spy/latest.json',
@@ -22,6 +30,7 @@ export const BROWSER_DATA_KEYS = new Set([
   'squeeze-scanner/v1/scheduled/latest.json',
   'squeeze-scanner/v1/scheduled/latest-attempt.json',
   'squeeze-scanner/v1/scheduled/latest-schedule.json',
+  ...(OI_SKEW_PROJECTION_PUBLIC ? [OI_SKEW_PROJECTION_KEY] : []),
 ]);
 // Only the three QQQ archive filename families consumed by Historical.
 // Validate calendar dates, not just eight arbitrary digits. No prefix proxying.
@@ -40,17 +49,8 @@ export function isPublicArchiveKey(key) {
 // accepted MediaFlow source/key corpus exists (9063cd4 is not a git
 // identifier in this baseline); absence of the object does not justify
 // inventing future public access.
-// OI skew meter bot-state projection (Skew + Direction H1, INACTIVE). The
-// key is prepared but DISABLED: no projector writes it yet, and a public
-// grant for an object that does not exist is not justified on its own (see
-// the news grant removal above). Flip to true only in the approved release
-// that also enables the projector; frontend/preview-policy.mjs carries the
-// same key and flag, and tests/r2_proxy_bounded.test.js pins them together.
-export const OI_SKEW_PROJECTION_KEY = 'crassus/oi-skew/v1/latest.json';
-export const OI_SKEW_PROJECTION_PUBLIC = false;
 export function isPublicBrowserDataKey(key) {
   if (key.includes('..') || /%2e/i.test(key) || key.includes('\\') || key.includes('\0')) return false;
-  if (OI_SKEW_PROJECTION_PUBLIC && key === OI_SKEW_PROJECTION_KEY) return true;
   return BROWSER_DATA_KEYS.has(key) || isPublicArchiveKey(key);
 }
 const MAX_LIVE_QUOTE_SYMBOLS = 100;

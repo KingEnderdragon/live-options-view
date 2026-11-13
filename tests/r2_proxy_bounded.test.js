@@ -19,8 +19,6 @@ const POSITIVE_KEYS = [
   'squeeze-scanner/v1/scheduled/latest-schedule.json',
 ];
 const NEGATIVE_KEYS = [
-  // OI skew meter projection: prepared but disabled until its approved release.
-  'crassus/oi-skew/v1/latest.json',
   '', 'system/bot-membership-v1.json', 'paper-trades/requests/x.json',
   'intraday/other.json', 'raw/qqq_chain_20260229.csv', 'raw/qqq_chain_20261301.csv',
   'raw/qqq_chain_20260431.csv', 'manifest.json.png', 'manifest.json/',
@@ -218,10 +216,15 @@ test('OI skew projection key is prepared, identical and disabled on both allowli
   assert.equal(g.OI_SKEW_PROJECTION_KEY, b.OI_SKEW_PROJECTION_KEY);
   assert.equal(b.OI_SKEW_PROJECTION_PUBLIC, false);
   assert.equal(g.OI_SKEW_PROJECTION_PUBLIC, false);
-  assert.equal(b.isPublicBrowserDataKey(b.OI_SKEW_PROJECTION_KEY), false);
-  assert.equal(g.publicReadAllowed(new URL(APP + '/browser-data/' + g.OI_SKEW_PROJECTION_KEY)), false);
-  // Only the exact key could ever be granted: siblings stay private.
-  for (const k of ['crassus/oi-skew/v1/', 'crassus/oi-skew/v1/latest.json.bak', 'crassus/ledger.jsonl']) {
+  assert.equal(b.BROWSER_DATA_KEYS.has(b.OI_SKEW_PROJECTION_KEY), false);
+  // Disabled means refused by both predicates and 404 at HTTP, exactly like
+  // any unlisted key; siblings of the key stay private either way.
+  for (const k of [b.OI_SKEW_PROJECTION_KEY, 'crassus/oi-skew/v1/', 'crassus/oi-skew/v1/latest.json.bak',
+                   'crassus/ledger.jsonl']) {
     assert.equal(b.isPublicBrowserDataKey(k), false, k);
+    assert.equal(g.publicReadAllowed(new URL(APP + '/browser-data/' + k)), false, k);
   }
+  const res = await b.handleBrowserData(new Request(APP + '/browser-data/' + b.OI_SKEW_PROJECTION_KEY),
+    new URL(APP + '/browser-data/' + b.OI_SKEW_PROJECTION_KEY));
+  assert.equal(res.status, 404);
 });
