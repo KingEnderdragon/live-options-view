@@ -80,7 +80,8 @@ What the provider documents and what this code assumes are listed separately at 
 
 - **Head** (`news/v1/publish/head.json`, private). The one shared record, changed only by
   compare-and-swap with a fresh nonce in its body: the live commit, every incarnation (`pinned` or
-  `retiring`, its reserved page count, its lifecycle events), prepared commits, per-generation
+  `retiring`, its reserved page count, its lifecycle events, any unanswered page-upload attempts),
+  prepared commits, per-generation
   high-water marks, and `withdrawing`. Every operation changes the head **before** it touches the
   public store.
 - **Commit record** (`news/v1/publish/commits/<nonce>.json`, private, create-if-absent). One per
@@ -126,13 +127,26 @@ What the provider documents and what this code assumes are listed separately at 
   stays. Snapshots hold the unqualified build for this reason.
 - **A mismatching page** of a never-offered incarnation is not deleted and rewritten: the
   incarnation is abandoned (retiring) and the next run uses a fresh one.
-- **Cleanup before admission.** Orphan (pinned, never offered, no open commit) and expired
-  incarnations are marked retiring by one head compare-and-swap, which revalidates on the document
-  it replaces that no commit names them. Only then are pages deleted; namespaces a fresh listing
-  shows empty are recorded retired. Current, protected, open and unknown pages are never deleted.
+- **Page uploads are recorded before they are sent.** Before its first page PUT a run records an
+  upload attempt in the incarnation's head entry (one compare-and-swap, refused unless the
+  incarnation is still pinned). Only after every PUT of the attempt returned and its page read back
+  as written is the attempt recorded answered. An attempt left recorded (a PUT timed out, the
+  process exited, the lease lapsed, the answered write was ambiguous) means a PUT may still land at
+  any time. That incarnation is **quarantined**: it keeps its head entry and its full page
+  reservation and is never retired or released. An empty listing, elapsed time, a later identical
+  upload, a local process exit or a tombstone is **not** settlement. If the incarnation is retiring
+  (abandoned, withdrawn) its pages are deleted every run as they land, and the entry stays.
+  **There is no in-code release**: quarantined reservations accumulate until the owner provides a
+  real settlement mechanism or a fence, and enough of them pause publication at the cap.
+- **Cleanup before admission.** Orphan (pinned, never offered, no open commit, no unanswered upload)
+  and expired incarnations are marked retiring by one head compare-and-swap, which revalidates on
+  the document it replaces that no commit names them and no upload into them is unanswered. Only
+  then are pages deleted; namespaces a fresh listing shows empty are recorded retired, except those
+  with an unanswered upload, which stay in the head with their reservation. Current, protected,
+  open, quarantined and unknown pages are never deleted.
 - **Capacity.** `page_cap` (6,300) is counted as pages **reserved in the head** (every pinned or
-  retiring incarnation, written or not, with or without an open commit) plus public pages with no
-  head record. The reservation is taken in the same compare-and-swap that pins the incarnation, so
+  retiring incarnation, written or not, with or without an open commit or an unanswered upload)
+  plus public pages with no head record. The reservation is taken in the same compare-and-swap that pins the incarnation, so
   two admissions cannot both fit into the last free room. At the cap publication pauses (visible);
   nothing protected is evicted; cleanup keeps running.
 - **Retirement.** A replaced generation stays public for at least `reader_grace_s` (45 min). Its pages
@@ -162,6 +176,12 @@ withdrawal that lands late. Either names pages that no longer exist: a reader lo
 when a tombstone is confirmed; run `publish-withdraw` again to send another. Cached copies and
 downloads cannot be recalled in any case.
 
+The tombstone confirms the index only. A page PUT sent before the withdrawal whose upload attempt
+has no recorded answer may land after the pages were deleted, and the page reappears (named by no
+index). The result lists those incarnations in `uploads_unsettled`; they keep their head entry and
+full reservation, and every later `publish-withdraw` or cleanup run deletes what lands.
+**This page-reappearance interval also has no time bound**, and nothing in code ends it.
+
 ### Migration and recovery
 
 - **Fresh namespaces.** The new code writes only `news/v2/views/index.json` and
@@ -173,6 +193,10 @@ downloads cannot be recalled in any case.
   v1) are refused, not converted. No G3 state was ever deployed.
 - **Blocked run.** `publish-status` names the reason. A foreign index (unknown nonce) is not repaired
   by the publisher: the owner decides. An unreadable head blocks everything.
+- **Quarantined incarnations** (`page_uploads_unsettled`) have no recovery command. Settlement needs
+  evidence the publisher does not have (that the outstanding PUT can no longer land, or a fence that
+  makes it harmless); providing it is an owner decision outside this patch. Removing the `uploads`
+  record by hand without that evidence reopens the late-landing case.
 - **Conflict (`PublishConflict`).** A head or index compare-and-swap lost, or a head write could not
   be verified as the committed head. Nothing further was done for that intent. Run again.
 - **Open commits.** Listed in `publish-status` (`open_commits`). They close when the next index
@@ -294,6 +318,9 @@ present:
 - `expiry_blocked_clock_bound_unverified`: a replaced generation is past its grace on the producer
   clock, but expiry deletion is refused until the store-clock bound is verified.
 - `unknown_public_generations`: public pages with no head record (retained, never deleted, counted against the cap).
+- `page_uploads_unsettled`: an incarnation has a page-upload attempt with no recorded answer (its
+  `uploads_unsettled` in `generations`). A PUT may still land; the incarnation keeps its full
+  reservation and is never released. Not a pause by itself. Nothing in code clears it.
 - `live_index_unmatched`: the live index matches no prepared commit in full (nonce, bytes, every page).
 - `stale_writer_lease` / `stale_publish_lease`: an expired lease left by a process that did not exit
   cleanly. The `leases` field shows the holder and expiry. An unexpired lease is listed but is not a

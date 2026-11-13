@@ -20,10 +20,15 @@ The four criteria:
   C2  the retirement CAS revalidates the current commit protections        Criteria.test_c2_*
   C3  after an ambiguous head write, exact intent is verified first        Criteria.test_c3_*
   C4  page-cap capacity is reserved atomically (open and in-flight too)    Criteria.test_c4_*
+G6 r1 (Chej 11-13): a page PUT with no answer keeps durable protection and the full reservation:
+  timeout -> next-run cleanup/admission -> late landing                    Uploads.test_u1_*, test_u2_*
+  the withdrawal variant                                                   Uploads.test_u4_*
+  intent before the first PUT; a retiring mark that wins first             Uploads.test_u5_*, test_u6_*
 CAS ambiguity: Ambiguity.*, Genesis.*, ProviderMapping.* (the store-level outcome mapping).
 """
 import json
 import unittest
+from unittest import mock
 
 from test_news_generations import VERIFIED, Gen, Scripted
 from test_news_publish import INDEX, Base, qualified, with_nonce0
@@ -264,7 +269,7 @@ class Criteria(Settle):
     def test_c2_retirement_is_refused_when_the_head_gained_a_commit_naming_the_incarnation(self):
         files = self.build("2026-11-09T10:20:00Z")
         B = generation_name(files)
-        self.raw_public.fail = ("put", lambda k: k != INDEX, 2)
+        self.private.fail = ("put", lambda k: k.startswith(pub.COMMIT_PREFIX), 0)   # every page PUT answered
         with self.assertRaises(RuntimeError):
             self.publish(files)                                             # B.1: pinned, never offered
         stale_head, stale_etag = pub.read_head(self.private)                # the cleanup's earlier read
@@ -326,6 +331,8 @@ class Criteria(Settle):
         listed = self.public.pages_by_incarnation()
         self.assertEqual(sum(len(v) for v in listed.values()), per, "the listing shows only A's pages")
         self.assertEqual(pub.reserved_pages(head, listed), 2 * per, "B's reservation counts although nothing is written")
+        self.assertEqual(len(pub._unsettled_uploads(head["incarnations"][generation_name(files_b) + ".1"])), 1,
+                         "G6 r1: the crashed PUT had no answer, so B.1 is quarantined, not an orphan")
         files_c = self.build("2026-11-09T10:35:00Z")
         with self.assertRaises(pub.PublishPaused):
             pub._pin(self.private, head, etag, generation_name(files_c), files_c, "publish", self.reading(), two, listed)
@@ -355,6 +362,135 @@ class Criteria(Settle):
         now = self.head()
         self.assertEqual(sorted(now["incarnations"]), sorted([self.A + ".1", generation_name(files_b) + ".1"]))
         self.assertEqual(pub.reserved_pages(now, listed), 2 * per, "never over the cap")
+
+
+class Uploads(Settle):
+    """G6 r1. A page PUT that times out may still land. Its upload attempt was recorded in the head
+    before the first PUT and is never recorded answered, so the incarnation keeps its head entry and
+    full reservation: no empty listing, elapsed time, process exit, identical re-upload or tombstone
+    releases it. NOT RUN."""
+
+    def timed_out(self, when, policy=pub.DEFAULT_POLICY):
+        """B's first page PUT times out (no answer) and is held; the run fails at the pages stage."""
+        files = self.build(when)
+        B = generation_name(files)
+        self.raw_public.hold_put = lambda k: pub.incarnation_of(k) == B + ".1"
+        with self.assertRaises(TimeoutError):
+            self.publish(files, policy)
+        self.assertEqual(len(self.raw_public.held_puts), 1)
+        self.assertEqual(pub.read_state(self.private)["last_failure"]["stage"], "pages")
+        return files, B
+
+    def test_u1_timeout_then_next_run_cleanup_and_admission_then_late_landing_stays_within_the_cap(self):
+        per = len(self.pages_of(self.A))
+        two = pub.GenerationPolicy(page_cap=2 * per)                        # room for A and one more
+        _files_b, B = self.timed_out("2026-11-09T10:20:00Z", two)
+        head = self.head()
+        self.assertEqual(len(pub._unsettled_uploads(head["incarnations"][B + ".1"])), 1, "recorded before the PUT")
+        self.assertEqual(self.pages_of(B), [], "the listing shows nothing of B")
+        self.assertEqual(self.klass(B + ".1", two), "quarantined")
+        self.assertIn("page_uploads_unsettled", pub.status(self.private, self.public, self.clock, policy=two)["problems"])
+        # The next run (ordinary lease, not broken). Before r1, cleanup saw an empty pinned orphan, retired
+        # it, released its reservation and admitted C: then the late PUT put the store over the cap.
+        with self.assertRaises(pub.PublishPaused):
+            self.publish(self.build("2026-11-09T10:35:00Z"), two)
+        head = self.head()
+        self.assertEqual(head["incarnations"][B + ".1"]["state"], "pinned", "not retired by the empty listing")
+        listed = self.public.pages_by_incarnation()
+        self.assertEqual(pub.reserved_pages(head, listed), 2 * per, "B's full reservation is retained")
+        self.assertEqual(self.live(), self.A + ".1")
+        # The timed-out PUT lands now.
+        self.assertTrue(self.raw_public.land_put())
+        listed = self.public.pages_by_incarnation()
+        self.assertEqual(len(listed[B + ".1"]), 1, "the late page is present")
+        self.assertLessEqual(sum(len(v) for v in listed.values()), two.page_cap)
+        self.assertEqual(pub.reserved_pages(self.head(), listed), 2 * per, "it was already reserved")
+        self.assertEqual(self.klass(B + ".1", two), "quarantined", "landing is not settlement either")
+
+    def test_u2_elapsed_time_and_later_runs_do_not_settle_and_a_late_page_is_retained(self):
+        _files_b, B = self.timed_out("2026-11-09T10:20:00Z")
+        self.at("2026-11-10T10:20:00Z")                                     # a day later
+        self.publish(self.build("2026-11-10T10:20:00Z"), VERIFIED)          # cleanup runs; C is admitted
+        self.at("2026-11-10T13:00:00Z")
+        self.publish(self.build("2026-11-10T13:00:00Z"), VERIFIED)          # and again, past every grace
+        self.assertEqual(self.klass(B + ".1", VERIFIED), "quarantined")
+        self.assertEqual(self.head()["incarnations"][B + ".1"]["state"], "pinned")
+        self.assertTrue(self.raw_public.land_put())                         # a day late
+        self.publish(self.build("2026-11-10T13:30:00Z"), VERIFIED)
+        self.assertEqual(len(self.pages_of(B)), 1, "retained: it is counted in B's reservation, never evicted")
+        self.assertEqual(self.klass(B + ".1", VERIFIED), "quarantined", "landing is not recorded settlement")
+
+    def test_u4_withdrawal_after_a_timeout_keeps_the_reservation_and_deletes_what_lands_later(self):
+        _files_b, B = self.timed_out("2026-11-09T10:20:00Z")
+        pub.stop(self.private, self.clock, "take down")
+        out = pub.withdraw(self.private, self.public, self.clock)
+        self.assertFalse(out["withdrawal_unconfirmed"], "the tombstone is confirmed: that covers the index only")
+        self.assertEqual(out["uploads_unsettled"], [B + ".1"])
+        self.assertIn("reappear", out["uploads_note"])
+        self.assertEqual(self.raw_public.list(pub.PAGES_PREFIX), [])
+        head = self.head()
+        self.assertEqual(sorted(head["incarnations"]), [B + ".1"], "A.1 is released; B.1 is not")
+        self.assertEqual(head["incarnations"][B + ".1"]["state"], "retiring")
+        st = pub.status(self.private, self.public, self.clock)
+        self.assertIn("page_uploads_unsettled", st["problems"])
+        self.assertGreater(st["generations"][B + ".1"]["reserved"], 0, "the full reservation stays")
+        self.assertEqual(st["generations"][B + ".1"]["pages"], 0)
+        # The PUT sent before the withdrawal lands after it: the page reappears, named by no index.
+        self.assertTrue(self.raw_public.land_put())
+        self.assertEqual(len(self.raw_public.list(pub.PAGES_PREFIX)), 1)
+        self.assertEqual(json.loads(self.raw_public.get(INDEX))["state"], "withdrawn")
+        # Every later withdraw deletes what landed; the entry and its reservation stay.
+        out = pub.withdraw(self.private, self.public, self.clock)
+        self.assertEqual(out["deleted"], 1)
+        self.assertEqual(self.raw_public.list(pub.PAGES_PREFIX), [])
+        self.assertEqual(out["uploads_unsettled"], [B + ".1"])
+        self.assertIn(B + ".1", self.head()["incarnations"])
+
+    def test_u4_after_resume_cleanup_deletes_a_late_page_and_reports_the_quarantine(self):
+        _files_b, B = self.timed_out("2026-11-09T10:20:00Z")
+        pub.stop(self.private, self.clock, "take down")
+        pub.withdraw(self.private, self.public, self.clock)
+        self.assertTrue(self.raw_public.land_put())                         # lands after the withdrawal
+        pub.resume(self.private)
+        report = self.publish(self.build("2026-11-09T10:35:00Z"))
+        self.assertEqual(self.pages_of(B), [], "cleanup deleted the late page (a retiring namespace)")
+        self.assertEqual(report.quarantined, [B + ".1"])
+        self.assertEqual(self.head()["incarnations"][B + ".1"]["state"], "retiring")
+
+    def test_u5_an_upload_intent_write_that_does_not_land_sends_no_page(self):
+        files = self.build("2026-11-09T10:20:00Z")
+        B = generation_name(files)
+        real = pub._write_head
+
+        def lossy(private, head, etag, intent):
+            if intent.startswith("uploads started"):
+                self.private.script[HEAD] = ["lost"]                        # ambiguous, not applied
+            return real(private, head, etag, intent)
+
+        self.log.clear()
+        with mock.patch.object(pub, "_write_head", lossy):
+            with self.assertRaises(pub.PublishConflict):
+                self.publish(files)
+        self.assertEqual([k for op, k in self.log if op == "put" and pub.incarnation_of(k) == B + ".1"], [],
+                         "no page PUT without a recorded upload attempt")
+        self.assertNotIn("uploads", self.head()["incarnations"][B + ".1"])
+        self.assertEqual(self.klass(B + ".1"), "orphan", "nothing was sent, so nothing is outstanding")
+
+    def test_u6_a_retiring_mark_that_commits_first_refuses_the_upload(self):
+        files = self.build("2026-11-09T10:20:00Z")
+        B = generation_name(files)
+        self.private.fail = ("put", lambda k: k.startswith(pub.COMMIT_PREFIX), 0)
+        with self.assertRaises(RuntimeError):
+            self.publish(files)                                             # B.1 pinned, uploads answered
+        stale_head, stale_etag = pub.read_head(self.private)
+        pub.stop(self.private, self.clock, "take down")
+        pub.withdraw(self.private, self.public, self.clock)                 # marks B.1 retiring first
+        for name, (head, etag) in {"its stale head": (stale_head, stale_etag),
+                                   "a fresh head": pub.read_head(self.private)}.items():
+            with self.subTest(name):
+                with self.assertRaises(pub.PublishConflict):
+                    pub._record_upload(self.private, head, etag, B + ".1", "e" * 32, self.reading(), answered=False)
+        self.assertNotIn("uploads", self.head()["incarnations"].get(B + ".1") or {})
 
 
 class Ambiguity(Settle):

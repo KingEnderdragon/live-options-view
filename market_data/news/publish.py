@@ -42,8 +42,11 @@ Settlement (the accepted G5 design and its lifecycle addendum):
 
 Each run: read the clock and the head; observe the live index in full (index bytes, commit nonce, every
 page hash) and record what that proves; clean up (mark orphan/expired incarnations retiring, delete
-their pages, record empties); pin an incarnation within the cap; write its pages create-if-absent;
-prepare the commit; send the index; observe again.
+their pages, record empties); pin an incarnation within the cap; record the page-upload attempt in the
+head; write its pages create-if-absent; record that every upload was answered; prepare the commit; send
+the index; observe again. An incarnation with an upload attempt that was never answered is quarantined:
+a page PUT may still land, so it keeps its head entry and full reservation and is never released (no
+listing, elapsed time, process exit or tombstone counts as settlement; there is no in-code release).
 
 PROVIDER / SDK ASSUMPTIONS (documented or assumed in archive.py; none verified by this module): atomic
 conditional PutObject, 412 on a failed condition, one request per call on the no-retry client, a returned
@@ -99,6 +102,10 @@ WITHDRAW_NOTE = ("tombstone confirmed live and origin pages deleted; copies alre
 UNCONFIRMED_NOTE = ("origin pages deleted, but no tombstone is confirmed live: the public index may still be the old "
                     "index, or one from an earlier commit that lands late, naming pages that no longer exist. This "
                     "has no time bound. Run publish-withdraw again. Cached copies cannot be recalled")
+UPLOADS_UNSETTLED_NOTE = ("a page upload sent before the withdrawal has no recorded answer and may still land: a "
+                          "deleted page can reappear, named by no index. Its incarnation keeps its head entry and "
+                          "page reservation; every later withdraw or cleanup run deletes what lands. This has no "
+                          "time bound and nothing in code settles it")
 
 # Builder output (unqualified) and published generation pages (qualified).
 _PAGE_RE = re.compile(r"^news/v1/views/(collector|archive|publication)/(all|ai_buildout|oil)/"
@@ -710,13 +717,14 @@ class PublishReport:
     public_pages: int = 0
     incarnation: str | None = None
     commit: str | None = None
+    quarantined: list[str] = field(default_factory=list)   # retiring, emptied, kept: an upload may still land
 
     def summary(self) -> dict:
         return {"gen_id": self.gen_id, "action": self.action, "written": len(self.written),
                 "unchanged": self.unchanged, "deleted": len(self.deleted), "recovered_from": self.recovered_from,
                 "foreign_keys": self.foreign_keys, "snapshots_pruned": self.snapshots_pruned,
                 "retired": self.retired, "public_pages": self.public_pages, "incarnation": self.incarnation,
-                "commit": self.commit}
+                "commit": self.commit, "quarantined": self.quarantined}
 
 
 @dataclass(frozen=True)
@@ -780,8 +788,9 @@ def _write_head(private, head: dict, etag: str | None, intent: str) -> tuple[dic
       rejected   another actor changed the head first (412);
       ambiguous  the outcome is unknown and the committed head is not this document. The write may
                  still land later; the intents here are all safe to find in the head with no actor
-                 behind them (a pin is an orphan, a prepared commit that was never sent stays open
-                 until the index moves on, a retiring mark is finished by the next cleanup).
+                 behind them (a pin is an orphan, a recorded upload attempt quarantines its
+                 incarnation, a prepared commit that was never sent stays open until the index
+                 moves on, a retiring mark is finished by the next cleanup).
     """
     doc = copy.deepcopy(head)
     doc["nonce"] = _new_nonce()
@@ -815,6 +824,15 @@ def _epoch(entry: dict) -> dict | None:
         if e["kind"] in LIFECYCLE_EVENTS:
             return e
     return None
+
+
+def _unsettled_uploads(entry: dict | None) -> list[str]:
+    """Page-upload attempts into this incarnation that were recorded before their first PUT and never
+    recorded as answered. Any of their PUTs may still land, at any time: a timed-out request, a process
+    that exited, a lease that lapsed. Nothing in this module settles one: not an empty listing, elapsed
+    time, a later identical upload, a local exit or a tombstone. While one is recorded the incarnation
+    keeps its head entry and its full page reservation and is never retired."""
+    return sorted((entry or {}).get("uploads") or {})
 
 
 def _clock_reading(private, clock, state: dict) -> dict:
@@ -891,7 +909,9 @@ def classify(head: dict, listed: dict[str, list[str]], reading: dict, policy: Ge
       open       a prepared index write naming it may still land: retained
       protected  ceased, inside the reader grace (or the clocks cannot show it has passed)
       expired    ceased and past the grace on both clocks: may be retired
-      orphan     pinned, never offered, no open commit: may be retired
+      quarantined  a page upload into it was never answered and may still land: retained, with its
+                 full reservation, until a real settlement mechanism exists (none in code)
+      orphan     pinned, never offered, no open commit, every upload answered: may be retired
       retiring   a delete has been started in it: never written again; pages are deleted
       retired    no head entry and n <= the generation's high-water mark: stray pages are deleted
       uncertain  recorded current but not live (reconciliation ceases these first)
@@ -920,23 +940,29 @@ def classify(head: dict, listed: dict[str, list[str]], reading: dict, policy: Ge
                                                 "on the live index); retained until the index moves on"}
             continue
         epoch = _epoch(entry)
+        if epoch is not None and epoch["kind"] != "ceased":
+            out[inc] = {"class": "uncertain", "why": f"head says {epoch['kind']} but the live index differs"}
+            continue
+        if _unsettled_uploads(entry):
+            # Would be orphan, protected or expired: the retirement path. Never on it while a PUT may land.
+            out[inc] = {"class": "quarantined", "why": "a page upload into it has no recorded answer and may still "
+                                                       "land: retained with its full reservation, never retired"}
+            continue
         if epoch is None:
             out[inc] = {"class": "orphan", "why": "pinned, never offered to readers, no open index write"}
             continue
-        if epoch["kind"] == "ceased":
-            ok, why = _time_passed(epoch, reading, policy.delete_after_s, policy)
-            if ok and not policy.clock_bound_verified:
-                ok, why = False, "clock bound unverified: expiry deletion refused"
-            out[inc] = {"class": "expired" if ok else "protected", "why": why or "past the reader grace"}
-            continue
-        out[inc] = {"class": "uncertain", "why": f"head says {epoch['kind']} but the live index differs"}
+        ok, why = _time_passed(epoch, reading, policy.delete_after_s, policy)
+        if ok and not policy.clock_bound_verified:
+            ok, why = False, "clock bound unverified: expiry deletion refused"
+        out[inc] = {"class": "expired" if ok else "protected", "why": why or "past the reader grace"}
     return out
 
 
 def reserved_pages(head: dict, listed: dict[str, list[str]]) -> int:
     """Page-cap usage: the pages reserved by every incarnation in the head (pinned or retiring, written
     or not, with or without an open commit) plus public pages that have no head entry. The reservation
-    is part of the head document, so it is taken and released only by a head compare-and-swap."""
+    is part of the head document, so it is taken and released only by a head compare-and-swap, and an
+    entry with an unanswered upload attempt is never removed, so its reservation is never released."""
     known = sum(int(e["pages"]) for e in head["incarnations"].values())
     strays = sum(len(keys) for inc, keys in listed.items() if inc not in head["incarnations"])
     return known + strays
@@ -1204,7 +1230,8 @@ def _genesis(private, public: "PublicViewStore", head: dict, hetag, state: dict,
 def _finish_retiring(private, public: "PublicViewStore", head: dict, hetag, report: PublishReport, classes: dict):
     """Delete the pages of every retiring namespace and every stray in a retired one, then record the
     retiring namespaces a fresh listing shows empty. The generation's high-water mark stays, so the
-    incarnation id is never issued again; only its page reservation is released."""
+    incarnation id is never issued again; only its page reservation is released, and only for an
+    incarnation with no unanswered upload attempt (see _unsettled_uploads)."""
     listed = public.pages_by_incarnation()
     for inc in sorted(listed):
         entry = head["incarnations"].get(inc)
@@ -1217,7 +1244,11 @@ def _finish_retiring(private, public: "PublicViewStore", head: dict, hetag, repo
             report.deleted.append(key)
         report.retired[inc] = (classes.get(inc) or {}).get("class", "retiring")
     after = public.pages_by_incarnation()
-    empty = sorted(i for i, e in head["incarnations"].items() if e["state"] == "retiring" and i not in after)
+    emptied = sorted(i for i, e in head["incarnations"].items() if e["state"] == "retiring" and i not in after)
+    # An empty listing is not settlement: a page PUT recorded as unanswered may land after it. Such an
+    # entry stays retiring in the head with its full reservation; every later run deletes what lands.
+    report.quarantined = sorted(i for i in emptied if _unsettled_uploads(head["incarnations"][i]))
+    empty = [i for i in emptied if i not in report.quarantined]
     if empty:
         new = copy.deepcopy(head)
         for inc in empty:
@@ -1232,8 +1263,9 @@ def _retire(private, public: "PublicViewStore", head: dict, hetag, reading: dict
 
     1. Orphan and expired incarnations are marked retiring by one head compare-and-swap. The
        protections are revalidated on the document that compare-and-swap replaces (no commit names
-       the incarnation, it is not live, it is still pinned), so they are the shared protections in
-       force when the mark commits, not an earlier read. From then the namespace is never written.
+       the incarnation, it is not live, it is still pinned, no upload into it is unanswered), so
+       they are the shared protections in force when the mark commits, not an earlier read. From
+       then the namespace is never written.
     2. Only then are pages deleted (retiring namespaces and strays in retired ones).
     3. Namespaces a fresh listing shows empty are recorded retired.
     """
@@ -1246,7 +1278,7 @@ def _retire(private, public: "PublicViewStore", head: dict, hetag, reading: dict
         protected = {c.get("inc") for c in new["commits"].values()} | {(new.get("live") or {}).get("inc")}
         for inc in targets:
             entry = new["incarnations"].get(inc)
-            if entry is None or entry["state"] != "pinned" or inc in protected:
+            if entry is None or entry["state"] != "pinned" or inc in protected or _unsettled_uploads(entry):
                 raise PublishConflict(f"incarnation {inc} is protected in the current head; it is not retired")
             entry["state"] = "retiring"
             entry["events"].append({"kind": "retiring", **stamp, "reason": classes[inc]["class"]})
@@ -1296,10 +1328,12 @@ def _pin(private, head: dict, hetag, gen: str, files: dict[str, bytes], action: 
     return head, hetag, inc, qualified
 
 
-def _abandon(private, head: dict, hetag, inc: str, reading: dict) -> None:
+def _abandon(private, head: dict, hetag, inc: str, reading: dict, attempt: str) -> None:
     """A page of a never-offered incarnation holds other bytes. It is not deleted and rewritten (a
     delete with an unknown outcome could land on the rewrite): the incarnation is marked retiring and
-    the next run uses a fresh one."""
+    the next run uses a fresh one. Every PUT this attempt sent was answered (the last one too: it
+    returned and was read back), so the same compare-and-swap records the attempt answered; an older
+    unanswered attempt, if any, stays recorded and keeps the entry and its reservation."""
     entry = head["incarnations"].get(inc)
     named = any(c.get("inc") == inc for c in head["commits"].values())
     if entry is None or entry["state"] != "pinned" or named or _epoch(entry) is not None:
@@ -1307,7 +1341,37 @@ def _abandon(private, head: dict, hetag, inc: str, reading: dict) -> None:
     new = copy.deepcopy(head)
     new["incarnations"][inc]["state"] = "retiring"
     new["incarnations"][inc]["events"].append({"kind": "retiring", **_at(reading), "reason": "abandoned"})
+    uploads = new["incarnations"][inc].get("uploads") or {}
+    uploads.pop(attempt, None)
+    if not uploads:
+        new["incarnations"][inc].pop("uploads", None)
     _write_head(private, new, hetag, f"abandon {inc}")
+
+
+def _record_upload(private, head: dict, hetag, inc: str, attempt: str, reading: dict, *, answered: bool):
+    """Durable intent before the first page PUT, and its settlement after the last.
+
+      started   one head compare-and-swap records the attempt before any PUT is sent. Refused unless
+                the incarnation is still pinned on the document it replaces (a cleanup or withdrawal
+                that marked it retiring first wins, and no page is written into that namespace).
+      answered  sent only when every PUT of this attempt returned and its page read back as written.
+                Removes this attempt only; any other unanswered attempt stays recorded.
+    An attempt left recorded (a PUT timed out, the process exited, the answered write was ambiguous)
+    quarantines the incarnation: see _unsettled_uploads. Returns (head, hetag)."""
+    new = copy.deepcopy(head)
+    entry = new["incarnations"].get(inc)
+    if answered:
+        if entry is None or attempt not in (entry.get("uploads") or {}):
+            raise PublishIntegrityError(f"upload attempt {attempt} into {inc} is not recorded in the head")
+        del entry["uploads"][attempt]
+        if not entry["uploads"]:
+            del entry["uploads"]
+        return _write_head(private, new, hetag, f"uploads answered {inc} {attempt}")
+    if entry is None or entry["state"] != "pinned":
+        raise PublishConflict(f"incarnation {inc} is no longer pinned (it was marked retiring); no page is written "
+                              "into it. Run again: the build is published under a fresh incarnation")
+    entry.setdefault("uploads", {})[attempt] = {"started": _at(reading)}
+    return _write_head(private, new, hetag, f"uploads started {inc} {attempt}")
 
 
 def _pause(private, state: dict, reading: dict, why: str) -> None:
@@ -1373,18 +1437,23 @@ def _run(private, public: "PublicViewStore", gen: str, files: dict[str, bytes], 
             if snapshot:
                 stage = "snapshot"
                 _snapshot(private, gen, files, clock)
+            stage = "upload-intent"     # durable, in the head, before the first page PUT
+            attempt = _new_nonce()
+            head, hetag = _record_upload(private, head, hetag, inc, attempt, reading, answered=False)
             stage = "pages"
             for key in page_write_order(qualified):
                 body = qualified[key]
                 created = public.put_if_absent(key, body, "application/json", PAGE_CACHE_CONTROL)
                 if public.get(key) != body:
-                    _abandon(private, head, hetag, inc, reading)
+                    _abandon(private, head, hetag, inc, reading, attempt)
                     raise PublishIntegrityError(f"{key} exists with different bytes" if not created
                                                 else f"{key} did not read back as written")
                 if created:
                     report.written.append(key)
                 else:
                     report.unchanged += 1
+            stage = "upload-answered"   # every PUT above returned and read back: this attempt is settled
+            head, hetag = _record_upload(private, head, hetag, inc, attempt, reading, answered=True)
             stage = "prepare"   # durable intent, in the head, before the public commit
             body = commit_index(qualified[PUBLIC_INDEX], _new_nonce())
             page_set = {k: sha256_hex(b) for k, b in sorted(qualified.items()) if k != PUBLIC_INDEX}
@@ -1495,6 +1564,10 @@ def withdraw(private, public, clock, *, lease_holder=None, break_stale_lease=Fal
        index from a commit prepared earlier that lands late; either names pages that no longer
        exist (readers see "refresh required"). That interval has no time bound: it ends when a
        tombstone is confirmed. Run withdraw again to send another tombstone.
+    5. An incarnation with an unanswered page upload keeps its head entry and full reservation after
+       its pages are deleted: a PUT sent before the withdrawal may land after it, and the page then
+       reappears (named by no index). The tombstone confirms the index only. `uploads_unsettled`
+       lists them; every later withdraw or cleanup run deletes what lands. No time bound either.
     """
     public = public if isinstance(public, PublicViewStore) else PublicViewStore(public)
     assert_separate(private, public)
@@ -1554,11 +1627,13 @@ def withdraw(private, public, clock, *, lease_holder=None, break_stale_lease=Fal
         state["committed"] = None
         state["in_progress"] = None
         _write_state(private, state)
+        unsettled = sorted(i for i, e in head["incarnations"].items() if _unsettled_uploads(e))
         _receipt(private, clock, report, {"note": WITHDRAW_NOTE, "withdrawal_unconfirmed": not confirmed,
-                                          "tombstone_attempts": rounds})
+                                          "tombstone_attempts": rounds, "uploads_unsettled": unsettled})
         return {"withdrawn_gen_id": gen, "deleted": len(deleted), "snapshots_kept": snapshot_ids(private),
                 "withdrawal_unconfirmed": not confirmed, "tombstone_attempts": rounds,
-                "open_commits": sorted(_open_commits(head)), "note": WITHDRAW_NOTE if confirmed else UNCONFIRMED_NOTE}
+                "open_commits": sorted(_open_commits(head)), "note": WITHDRAW_NOTE if confirmed else UNCONFIRMED_NOTE,
+                "uploads_unsettled": unsettled, "uploads_note": UPLOADS_UNSETTLED_NOTE if unsettled else None}
 
 
 # --- operating status -------------------------------------------------------------
@@ -1613,7 +1688,8 @@ def status(private, public, clock, *, interval_s: int = config.INTERVAL_S,
     waiting_on_clock_bound = False
     for inc, info in classes.items():
         entry = head["incarnations"].get(inc)
-        item = dict(info, pages=len(listed.get(inc, [])), reserved=int(entry["pages"]) if entry else 0)
+        item = dict(info, pages=len(listed.get(inc, [])), reserved=int(entry["pages"]) if entry else 0,
+                    uploads_unsettled=_unsettled_uploads(entry))
         epoch = _epoch(entry) if entry else None
         if epoch is not None and epoch["kind"] == "ceased" and inc in listed:
             earliest = parse_iso(epoch["producer_at"]) + timedelta(seconds=policy.delete_after_s)
@@ -1625,6 +1701,8 @@ def status(private, public, clock, *, interval_s: int = config.INTERVAL_S,
         problems.append("expiry_blocked_clock_bound_unverified")
     if any(c["class"] == "unknown" for c in classes.values()):
         problems.append("unknown_public_generations")
+    if any(_unsettled_uploads(e) for e in head["incarnations"].values()):
+        problems.append("page_uploads_unsettled")
     leases = {}
     for name, key in (("writer", LEASE_KEY), ("publish", PUBLISH_LEASE_KEY)):
         lease = _read_json(private, key)

@@ -366,13 +366,17 @@ class Interruption(Base):
         self.assertEqual(self.public_files(), self.gen1, "the live generation is untouched")
         st = pub.status(self.private, self.public, self.clock)
         self.assertFalse(st["healthy"])
-        self.assertEqual(sorted(st["problems"]), ["last_publication_failed", "publication_interrupted"])
+        self.assertEqual(sorted(st["problems"]),
+                         ["last_publication_failed", "page_uploads_unsettled", "publication_interrupted"])
         self.assertEqual(st["last_failure"]["stage"], "pages")
         # Recovery: the next attempt completes and says what it recovered from.
         report = pub.publish(self.private, self.public, self.gen2, self.clock)
         self.assertEqual(report.recovered_from, generation_name(self.gen2))
         self.assertEqual(self.public_files(), qualified(self.gen2))
-        self.assertTrue(pub.status(self.private, self.public, self.clock)["healthy"])
+        # G6 r1: the crashed PUT got no answer, so the first upload attempt stays recorded: the publisher
+        # cannot know it will not land. The incarnation is live and keeps its reservation; nothing in
+        # code clears the flag.
+        self.assertEqual(pub.status(self.private, self.public, self.clock)["problems"], ["page_uploads_unsettled"])
 
     def test_failed_index_write_leaves_the_previous_generation_live_and_its_commit_open(self):
         self.raw_public.fail = ("put", lambda k: k == INDEX, 0)       # no outcome reaches the publisher
@@ -409,10 +413,12 @@ class Interruption(Base):
         self.assertEqual(self.pages_of(gen, 1), [], "the abandoned namespace was cleaned up")
 
     def test_crash_during_cleanup_is_finished_by_the_next_run(self):
-        # An orphan: gen2's pages written, its index write never attempted (crash on the third page).
-        self.raw_public.fail = ("put", lambda k: k != INDEX, 2)
-        with self.assertRaises(RuntimeError):
-            pub.publish(self.private, self.public, self.gen2, self.clock)
+        # An orphan: gen2's pages written and every PUT answered, its commit never prepared. (G6 r1: a
+        # crash ON a page PUT would leave the upload unanswered and quarantine gen2.1 instead.)
+        from unittest import mock
+        with mock.patch.object(pub, "_prepare", side_effect=RuntimeError("simulated crash before prepare")):
+            with self.assertRaises(RuntimeError):
+                pub.publish(self.private, self.public, self.gen2, self.clock)
         orphan = generation_name(self.gen2)
         self.assertTrue(self.pages_of(orphan))
         later = self.generation("2026-11-10T10:05:00Z")

@@ -39,6 +39,8 @@ class Scripted(RecordingStore):
       "reject"   rejected (412) without evaluating
     before_cas[key] is called once, just before the next conditional write on that key is evaluated
     (another actor acting first). hold_delete(key) -> True makes one delete fail with no outcome.
+    hold_put(key) -> True makes one create-if-absent time out with no answer; the request is kept in
+    `held_puts` and land_put() applies it later (a page PUT that lands after its caller gave up).
     """
 
     def __init__(self, root, log=None, store_clock=None):
@@ -49,6 +51,8 @@ class Scripted(RecordingStore):
         self.before_cas = {}
         self.hold_delete = None
         self.held_deletes = []
+        self.hold_put = None
+        self.held_puts = []
 
     def last_modified(self, key):
         if self.store_clock is None:
@@ -78,6 +82,18 @@ class Scripted(RecordingStore):
         """A held request reaches the store now: its condition is evaluated against the current object."""
         key, data, etag, content_type, cache_control = self.held.pop(i)
         return LocalObjectStore.put_if_match(self, key, data, etag, content_type, cache_control=cache_control)
+
+    def put_if_absent(self, key, data, content_type="application/octet-stream", cache_control=None):
+        if self.hold_put is not None and self.hold_put(key):
+            self.hold_put = None
+            self.held_puts.append((key, data, content_type, cache_control))
+            raise TimeoutError(f"scripted: put of {key} timed out; it may still land")
+        return super().put_if_absent(key, data, content_type=content_type, cache_control=cache_control)
+
+    def land_put(self, i=0) -> bool:
+        """A held page PUT reaches the store now: create-if-absent, evaluated against the key as it is."""
+        key, data, content_type, cache_control = self.held_puts.pop(i)
+        return LocalObjectStore.put_if_absent(self, key, data, content_type=content_type, cache_control=cache_control)
 
     def delete(self, key):
         if self.hold_delete is not None and self.hold_delete(key):
@@ -295,9 +311,13 @@ class Orphans(Gen):
     def test_a_never_offered_incarnation_is_retired_by_the_next_run(self):
         files = self.build("2026-11-09T10:20:00Z")
         B = generation_name(files)
-        self.raw_public.fail = ("put", lambda k: k != INDEX, 2)       # crash on the third page
+        # G6 r1: every page PUT was answered and read back; the run stops at its commit record. A crash
+        # on a page PUT instead leaves the upload unanswered and quarantines B.1 (Uploads.* in
+        # test_news_settlement.py).
+        self.private.fail = ("put", lambda k: k.startswith(pub.COMMIT_PREFIX), 0)
         with self.assertRaises(RuntimeError):
             self.publish(files)
+        self.assertNotIn("uploads", self.head()["incarnations"][B + ".1"], "the upload attempt was answered")
         self.assertEqual(self.klass(B + ".1"), "orphan")
         self.assertTrue(self.pages_of(B))
         self.publish(self.build("2026-11-09T10:35:00Z"))
@@ -314,6 +334,8 @@ class Orphans(Gen):
         self.assertEqual(report.incarnation, B + ".1")
         self.assertEqual(report.unchanged, 2, "the two pages already written are reused")
         self.assertEqual(self.public_files(), qualified(files))
+        # G6 r1: the identical re-upload does not settle the first attempt (its third PUT had no answer).
+        self.assertEqual(len(pub._unsettled_uploads(self.head()["incarnations"][B + ".1"])), 1)
 
 
 class Blocked(Gen):

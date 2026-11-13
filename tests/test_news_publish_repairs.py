@@ -182,6 +182,9 @@ class Navigation(Small):
                     self.assertEqual(self.live_index(), qualified(old)[INDEX])
                     navigate(self.raw_public)
                     continue
+                # The next cycle reuses the pinned incarnation. G6 r1: a crash on a page PUT leaves that
+                # attempt unanswered, so the incarnation stays quarantined (page_uploads_unsettled) after
+                # it goes live; navigation and the public files are unaffected.
                 pub.publish(self.private, self.public, new, self.clock)      # the next cycle
                 final = navigate(self.raw_public)
                 build = json.loads(new[BUILD_INDEX])["build_as_of"]
