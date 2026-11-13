@@ -23,12 +23,14 @@ export function publicReadAllowed(url) {
   // removed 2026-11-11 stays removed; only the exact News view keys below.)
   if (key.includes('..') || /%2e/i.test(key) || key.includes('\\') || key.includes('\0')) return false;
   if (PUBLIC_KEYS.has(key)) return true;
-  // MediaFlow News views (G3): exactly the index, or one immutable generation
-  // g/<YYYYMMDDTHHMMSSZ-16hex> (a real UTC instant) / mode / stream / real
-  // calendar date / page 0001-0020. Mirrors isPublicNewsViewKey in
-  // backend/browser-data.js and the News panel's own key check.
-  if (key === 'news/v1/views/index.json') return true;
-  const n = /^news\/v1\/views\/g\/(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z-[0-9a-f]{16}\/(?:collector|archive|publication)\/(?:all|ai_buildout|oil)\/(\d{4})-(\d{2})-(\d{2})\/page-(\d{4})\.json$/.exec(key);
+  // MediaFlow News views (G3; G6 fresh namespaces): exactly the index
+  // news/v2/views/index.json, or one immutable incarnation
+  // p/<YYYYMMDDTHHMMSSZ-16hex>.<n> (a real UTC instant; n = 1..9999, no leading
+  // zero) / mode / stream / real calendar date / page 0001-0020. Mirrors
+  // isPublicNewsViewKey in backend/browser-data.js and the News panel's own key
+  // check. Legacy news/v1/views keys are no longer allowed.
+  if (key === 'news/v2/views/index.json') return true;
+  const n = /^news\/v2\/views\/p\/(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z-[0-9a-f]{16}\.[1-9][0-9]{0,3}\/(?:collector|archive|publication)\/(?:all|ai_buildout|oil)\/(\d{4})-(\d{2})-(\d{2})\/page-(\d{4})\.json$/.exec(key);
   if (n) {
     const real = (y, mo, d) => {
       const day = `${y}-${mo}-${d}`;

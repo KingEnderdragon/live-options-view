@@ -11,7 +11,7 @@ and temporary stores.
 import json
 import unittest
 
-from test_news_publish import INDEX, Base, qualified
+from test_news_publish import BUILD_INDEX, INDEX, Base, qualified
 from test_news_publish_contract import probe, render_failed
 from test_news_publish_repairs import DATE, Small, navigate
 from market_data.news import publish as pub
@@ -45,7 +45,7 @@ class Cases:
     def prepare(self):
         self.views = PER_DATE * len(self.DATES)
         self.full = self.build()
-        self.full_index = json.loads(self.full[INDEX])
+        self.full_index = json.loads(self.full[BUILD_INDEX])
         self.order = [view_id(v) for v in self.full_index["views"]]
         self.assertEqual(len(self.order), self.views)
         self.assertEqual(sorted({v["date"] for v in self.full_index["views"]}), sorted(self.DATES))
@@ -59,7 +59,7 @@ class Cases:
 
     def assert_truthful_generation(self, files, *, kept, reasons):
         """Index counts match what was built; exactly the retained views' pages are present, all of them."""
-        index = json.loads(files[INDEX])
+        index = json.loads(files[BUILD_INDEX])
         listed = index["views"]
         self.assertEqual([view_id(v) for v in listed], self.retained(kept), "newest dates retained first")
         self.assertEqual(index["views_total"], self.views, "views_total counts every view built")
@@ -69,10 +69,10 @@ class Cases:
         by_id = {view_id(v): v for v in self.full_index["views"]}
         for v in listed:
             self.assertEqual(v, by_id[view_id(v)], "listed entries are unchanged by the cut")
-        expected = {INDEX} | {page_key(v["mode"], v["stream"], v["date"], n)
+        expected = {BUILD_INDEX} | {page_key(v["mode"], v["stream"], v["date"], n)
                               for v in listed for n in range(1, v["page_count"] + 1)}
         self.assertEqual(set(files), expected, "no orphan pages and no missing pages")
-        for key in expected - {INDEX}:
+        for key in expected - {BUILD_INDEX}:
             page, uncut = json.loads(files[key]), json.loads(self.full[key])
             self.assertEqual(page.pop("limits"), index["limits"], "pages state the build's limits")
             uncut.pop("limits")
@@ -80,7 +80,7 @@ class Cases:
         omitted = [v for v in self.full_index["views"] if view_id(v) not in set(self.retained(kept))]
         self.assertEqual(len(omitted), self.views - kept)
         self.assertFalse([k for k in files for v in omitted if k.startswith(view_prefix(v))])
-        self.assertLessEqual(len(files[INDEX]), LIMITS.index_bytes)
+        self.assertLessEqual(len(files[BUILD_INDEX]), LIMITS.index_bytes)
         return index
 
     def assert_publishes_navigates_and_renders(self, files):
@@ -88,7 +88,7 @@ class Cases:
         pub.publish(self.private, self.public, files, self.clock)
         self.assertEqual(self.public_files(), qualified(files), "the live generation is exactly this build")
         chains = navigate(self.raw_public)
-        index = json.loads(files[INDEX])
+        index = json.loads(files[BUILD_INDEX])
         self.assertEqual(list(chains), [view_id(v) for v in index["views"]])
         for v in index["views"]:
             self.assertEqual(len(chains[view_id(v)]), v["page_count"])
@@ -110,7 +110,7 @@ class Cases:
         while lo < hi:
             mid = (lo + hi) // 2
             try:
-                ok = len(json.loads(self.build(index_bytes=mid)[INDEX])["views"]) >= n
+                ok = len(json.loads(self.build(index_bytes=mid)[BUILD_INDEX])["views"]) >= n
             except BuildError:
                 ok = False
             lo, hi = (lo, mid) if ok else (mid + 1, hi)
@@ -130,14 +130,14 @@ class Cases:
 
     def test_byte_cap_at_and_around_its_boundary(self):
         complete_at = self.smallest_cap_listing(self.views)
-        actual = len(self.full[INDEX])
+        actual = len(self.full[BUILD_INDEX])
         self.assertGreaterEqual(complete_at, actual, "checked with the counters at their widest")
         print(f"\n{len(self.DATES)} date(s): index {actual} bytes when complete; smallest index_bytes keeping all "
               f"{self.views} views: {complete_at} (headroom {complete_at - actual})", flush=True)
         self.assert_truthful_generation(self.build(index_bytes=complete_at), kept=self.views, reasons=set())
         one_short = self.build(index_bytes=complete_at - 1)
         self.assert_truthful_generation(one_short, kept=self.views - 1, reasons={"index_bytes"})
-        self.assertLessEqual(len(one_short[INDEX]), complete_at - 1)
+        self.assertLessEqual(len(one_short[BUILD_INDEX]), complete_at - 1)
         self.assert_publishes_navigates_and_renders(one_short)
         for n in sorted({PER_DATE, 1} - {self.views}):
             at = self.smallest_cap_listing(n)
@@ -160,7 +160,7 @@ class Cases:
         before_private = {k: self.private.get(k) for k in self.private.list("")}
         empty_cut = self.build(index_bytes=self.smallest_cap_listing(1) - 1)
         index = self.assert_truthful_generation(empty_cut, kept=0, reasons={"index_bytes"})
-        self.assertEqual((index["views"], set(empty_cut)), ([], {INDEX}), "the builder still says what happened")
+        self.assertEqual((index["views"], set(empty_cut)), ([], {BUILD_INDEX}), "the builder still says what happened")
         self.log.clear()
         with self.assertRaisesRegex(pub.PublishError, f"lists no views although {self.views} were built"):
             pub.publish(self.private, self.public, empty_cut, self.clock)
@@ -181,15 +181,15 @@ class Cases:
         publish and render; an index with no views built (views_total 0) stays valid too."""
         empty = load_archive(LocalObjectStore(self.tmp / "empty-private"))
         files = build_views(empty, pub.unavailable_prices(), as_of=self.AS_OF, tolerance_s=120, data_label=LABEL)
-        index = json.loads(files[INDEX])
+        index = json.loads(files[BUILD_INDEX])
         self.assertEqual((len(index["views"]), index["views_omitted"], index["complete"]), (PER_DATE, 0, True))
         self.assertEqual({v["rows_total"] for v in index["views"]}, {0})
         self.views = PER_DATE
         self.assert_publishes_navigates_and_renders(files)
         nothing = build_views(empty, pub.unavailable_prices(), as_of=self.AS_OF, tolerance_s=120, data_label=LABEL,
                               streams=())
-        index = json.loads(nothing[INDEX])
-        self.assertEqual((index["views"], index["views_total"], index["complete"], set(nothing)), ([], 0, True, {INDEX}))
+        index = json.loads(nothing[BUILD_INDEX])
+        self.assertEqual((index["views"], index["views_total"], index["complete"], set(nothing)), ([], 0, True, {BUILD_INDEX}))
         self.assertEqual(pub.validate_generation(nothing)["views_total"], 0)
 
     # ── publication across cuts and invalid input ──────────────────────────────
@@ -208,7 +208,7 @@ class Cases:
         good = self.build(index_views=3)
         pub.publish(self.private, self.public, good, self.clock)
         before_private = {k: self.private.get(k) for k in self.private.list("")}
-        index = json.loads(good[INDEX])
+        index = json.loads(good[BUILD_INDEX])
         omitted = next(v for v in self.full_index["views"] if view_id(v) not in set(self.retained(3)))
         orphan = page_key(omitted["mode"], omitted["stream"], omitted["date"], 1)
         first = index["views"][0]
@@ -216,14 +216,14 @@ class Cases:
             "an omitted view's page left in": dict(good, **{orphan: self.full[orphan]}),
             "a listed view's page missing": {k: b for k, b in good.items()
                                              if k != page_key(first["mode"], first["stream"], first["date"], 1)},
-            "omitted count understated": dict(good, **{INDEX: encode(dict(index, views_omitted=0))}),
-            "cut index claiming complete": dict(good, **{INDEX: encode(dict(index, complete=True))}),
-            "cut index without its reason": dict(good, **{INDEX: encode(dict(index, overflow_reasons=[]))}),
-            "cut index with a page-level reason": dict(good, **{INDEX: encode(dict(index,
+            "omitted count understated": dict(good, **{BUILD_INDEX: encode(dict(index, views_omitted=0))}),
+            "cut index claiming complete": dict(good, **{BUILD_INDEX: encode(dict(index, complete=True))}),
+            "cut index without its reason": dict(good, **{BUILD_INDEX: encode(dict(index, overflow_reasons=[]))}),
+            "cut index with a page-level reason": dict(good, **{BUILD_INDEX: encode(dict(index,
                                                                 overflow_reasons=["rows_beyond_max_pages"]))}),
-            "index reason with nothing omitted": dict(good, **{INDEX: encode(dict(index, views_omitted=0,
+            "index reason with nothing omitted": dict(good, **{BUILD_INDEX: encode(dict(index, views_omitted=0,
                                                                views_total=len(index["views"])))}),
-            "every view removed by hand": {INDEX: encode(dict(index, views=[], views_omitted=index["views_total"]))},
+            "every view removed by hand": {BUILD_INDEX: encode(dict(index, views=[], views_omitted=index["views_total"]))},
         }
         for name, files in bad.items():
             with self.subTest(name):
@@ -263,8 +263,8 @@ class OneDate(Cases, Small):
                              (self.views, self.views - 4, False))
             written = sorted(p.relative_to(Path(tmp) / "v").as_posix() for p in (Path(tmp) / "v").rglob("*.json"))
             self.assertEqual(len(written), report["files"])
-            index = json.loads((Path(tmp) / "v" / INDEX).read_bytes())
-            self.assertEqual(set(written), {INDEX} | {page_key(v["mode"], v["stream"], v["date"], n)
+            index = json.loads((Path(tmp) / "v" / BUILD_INDEX).read_bytes())
+            self.assertEqual(set(written), {BUILD_INDEX} | {page_key(v["mode"], v["stream"], v["date"], n)
                                                       for v in index["views"] for n in range(1, v["page_count"] + 1)})
 
 
@@ -292,12 +292,12 @@ class TwoDates(Cases, Small):
         self.assert_publishes_navigates_and_renders(files)
 
     def test_one_more_view_than_a_date_adds_the_older_dates_first_view(self):
-        index = json.loads(self.build(index_views=PER_DATE + 1)[INDEX])
+        index = json.loads(self.build(index_views=PER_DATE + 1)[BUILD_INDEX])
         self.assertEqual([view_id(v) for v in index["views"]],
                          [self.order[0]] + [i for i in self.order if i.endswith("2026-11-09")])
 
     def test_the_byte_cap_also_drops_the_oldest_date_first(self):
-        index = json.loads(self.build(index_bytes=self.smallest_cap_listing(PER_DATE))[INDEX])
+        index = json.loads(self.build(index_bytes=self.smallest_cap_listing(PER_DATE))[BUILD_INDEX])
         self.assertEqual({v["date"] for v in index["views"]}, {"2026-11-09"})
         self.assertEqual(index["overflow_reasons"], ["index_bytes"])
 

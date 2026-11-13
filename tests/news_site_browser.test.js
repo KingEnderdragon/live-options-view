@@ -35,7 +35,7 @@ const OTHER = 'http://news-site.test';
 const R2 = 'https://pub-4d5c916b8cb74ffb8c0abd7dfadb02cf.r2.dev';
 const EVIDENCE = process.env.NEWS_SITE_EVIDENCE || null;
 const VIEWPORTS = { desktop: { width: 1280, height: 900 }, narrow: { width: 390, height: 844 } };
-const INDEX_KEY = 'news/v1/views/index.json';
+const INDEX_KEY = 'news/v2/views/index.json';
 // G3 (NOT RUN when written): the bucket holds the published form of the fixture (the fixed index plus
 // one immutable generation), produced by the tests-only views.qualify_generation mirror.
 const Q = require('./news_panel/qualify.js').loadQualified(VIEWS);

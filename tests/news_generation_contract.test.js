@@ -1,5 +1,6 @@
-// G3 generation contract across the panel, the backend proxy, the gateway and the Python publisher.
-// NOT RUN: written for static review (Chej's G3 brief: no test execution).
+// G3 generation contract across the panel, the backend proxy, the gateway and the Python publisher,
+// ported to the G6 contract (news/v2/views/index.json, news/v2/views/p/<gen>.<n>/..., tombstones).
+// NOT RUN: written and ported for static review only (no test execution).
 //   node tests/news_generation_contract.test.js
 // Covers: one exact key grammar in four places; the reader lease (sleep, clock changes, disagreement);
 // refresh-required instead of mixing (lease end on visibility recheck, generation mismatch, page 404,
@@ -43,22 +44,29 @@ const load = key => JSON.parse(JSON.stringify(Q.byKey(key)));
 const FIRST = Q.index.views[0].first_page;
 
 const KEYS = [
-  ['news/v1/views/index.json', true],
-  [`news/v1/views/g/${G}/collector/oil/2026-11-09/page-0001.json`, true],
-  [`news/v1/views/g/${G}/publication/ai_buildout/2024-02-29/page-0020.json`, true],
-  [`news/v1/views/g/${G}/archive/all/2026-11-09/page-0021.json`, false],
-  [`news/v1/views/g/${G}/archive/all/2026-11-09/page-0000.json`, false],
-  [`news/v1/views/g/${G}/archive/all/2026-02-30/page-0001.json`, false],
-  [`news/v1/views/g/${G}/archive/fed/2026-11-09/page-0001.json`, false],
-  ['news/v1/views/g/20261109T100500Z-0123456789ABCDEF/archive/all/2026-11-09/page-0001.json', false],
-  ['news/v1/views/g/20261109T100500Z-0123456789abcde/archive/all/2026-11-09/page-0001.json', false],
-  ['news/v1/views/g/20261109T100500Z-0123456789abcdef0/archive/all/2026-11-09/page-0001.json', false],
-  ['news/v1/views/g/20261131T100500Z-0123456789abcdef/archive/all/2026-11-09/page-0001.json', false],
-  ['news/v1/views/g/20261109T240000Z-0123456789abcdef/archive/all/2026-11-09/page-0001.json', false],
-  ['news/v1/views/g/20261109T235960Z-0123456789abcdef/archive/all/2026-11-09/page-0001.json', false],
-  ['news/v1/views/g/20240229T235959Z-0123456789abcdef/archive/all/2024-02-29/page-0001.json', true],
+  ['news/v2/views/index.json', true],
+  ['news/v1/views/index.json', false],                                  // legacy index: no longer served
+  ['news/v1/views/g/20261109T100500Z-0123456789abcdef/collector/oil/2026-11-09/page-0001.json', false],   // legacy page
+  ['news/v2/views/p/20261109T100500Z-0123456789abcdef/collector/oil/2026-11-09/page-0001.json', false],   // no incarnation
+  ['news/v2/views/p/20261109T100500Z-0123456789abcdef.0/collector/oil/2026-11-09/page-0001.json', false],
+  ['news/v2/views/p/20261109T100500Z-0123456789abcdef.01/collector/oil/2026-11-09/page-0001.json', false],
+  ['news/v2/views/p/20261109T100500Z-0123456789abcdef.9999/collector/oil/2026-11-09/page-0001.json', true],
+  ['news/v2/views/p/20261109T100500Z-0123456789abcdef.10000/collector/oil/2026-11-09/page-0001.json', false],
+  [`news/v2/views/p/${G}/collector/oil/2026-11-09/page-0001.json`, true],
+  [`news/v2/views/p/${G}/publication/ai_buildout/2024-02-29/page-0020.json`, true],
+  [`news/v2/views/p/${G}/archive/all/2026-11-09/page-0021.json`, false],
+  [`news/v2/views/p/${G}/archive/all/2026-11-09/page-0000.json`, false],
+  [`news/v2/views/p/${G}/archive/all/2026-02-30/page-0001.json`, false],
+  [`news/v2/views/p/${G}/archive/fed/2026-11-09/page-0001.json`, false],
+  ['news/v2/views/p/20261109T100500Z-0123456789ABCDEF.1/archive/all/2026-11-09/page-0001.json', false],
+  ['news/v2/views/p/20261109T100500Z-0123456789abcde.1/archive/all/2026-11-09/page-0001.json', false],
+  ['news/v2/views/p/20261109T100500Z-0123456789abcdef0.1/archive/all/2026-11-09/page-0001.json', false],
+  ['news/v2/views/p/20261131T100500Z-0123456789abcdef.1/archive/all/2026-11-09/page-0001.json', false],
+  ['news/v2/views/p/20261109T240000Z-0123456789abcdef.1/archive/all/2026-11-09/page-0001.json', false],
+  ['news/v2/views/p/20261109T235960Z-0123456789abcdef.1/archive/all/2026-11-09/page-0001.json', false],
+  ['news/v2/views/p/20240229T235959Z-0123456789abcdef.1/archive/all/2024-02-29/page-0001.json', true],
   ['news/v1/views/collector/oil/2026-11-09/page-0001.json', false],   // unqualified: builder output only
-  [`news/v1/views/g/${G}/index.json`, false], [`news/v1/views/g/${G}/`, false], ['news/v1/views/g/', false],
+  [`news/v2/views/p/${G}/index.json`, false], [`news/v2/views/p/${G}/`, false], ['news/v2/views/p/', false],
   ['news/v1/views/today.json', false], ['news/v1/latest.json', false],
 ];
 
@@ -117,7 +125,7 @@ test('an ended lease, rechecked on visibility, asks for a refresh and requests n
 
 test('a page from another generation is never shown', async () => {
   const other = load(FIRST);
-  other.gen = '20990101T000000Z-0000000000000000';
+  other.gen = '20990101T000000Z-0000000000000000.1';
   const { root, done } = mountWith({ [FIRST]: other }, { clocks: clocks() });
   await done;
   assert.equal(root.getAttribute('data-state'), 'refresh-required');
@@ -126,7 +134,7 @@ test('a page from another generation is never shown', async () => {
 
 test('Reload starts again from the fixed index', async () => {
   const other = load(FIRST);
-  other.gen = '20990101T000000Z-0000000000000000';
+  other.gen = '20990101T000000Z-0000000000000000.1';
   let served = other;
   const { root, fetched, done } = mountWith({ [FIRST]: () => Promise.resolve(served) }, { clocks: clocks() });
   await done;
@@ -178,7 +186,7 @@ test('backend: the index is never cacheable, News upstream has a deadline, other
   };
   const request = key => worker.fetch(new Request(APP + '/browser-data/' + key), env);
   try {
-    const index = await request('news/v1/views/index.json');
+    const index = await request('news/v2/views/index.json');
     assert.equal(index.headers.get('cache-control'), 'no-store');
     const page = await request(FIRST);
     assert.equal(page.headers.get('cache-control'), 'public, max-age=600', 'immutable pages keep their caching');
@@ -196,6 +204,74 @@ test('backend: the index is never cacheable, News upstream has a deadline, other
     global.fetch = original.fetch;
     global.setTimeout = original.setTimeout;
   }
+});
+
+// --- G6: tombstones and the v2 index (NOT RUN) -----------------------------------------------------
+const { tombstone, INDEX_KEY: PUBLISHED_INDEX } = require('./news_panel/qualify.js');
+
+function mountIndex(index) {
+  const root = new Node('div');
+  const asked = [];
+  const fetchJson = key => { asked.push(key); return key === PUBLISHED_INDEX ? Promise.resolve(index) : Promise.reject(new Error('unexpected ' + key)); };
+  return { root, asked, done: panel.mount(doc, root, fetchJson, PUBLISHED_INDEX, { clocks: clocks() }) };
+}
+
+test('G6: a withdrawn tombstone shows "not currently published" and requests no page', async () => {
+  const { root, asked, done } = mountIndex(tombstone('withdrawn'));
+  await done;
+  assert.equal(root.getAttribute('data-state'), 'withdrawn');
+  assert.ok(root.textContent.includes('News views are not currently published'), root.textContent);
+  assert.ok(!root.textContent.includes('Could not load'));
+  assert.deepEqual(asked, [PUBLISHED_INDEX], 'only the index was requested');
+});
+
+test('G6: an unpublished tombstone shows the same state as a 404 on the index', async () => {
+  const { root, asked, done } = mountIndex(tombstone('unpublished'));
+  await done;
+  assert.equal(root.getAttribute('data-state'), 'absent');
+  assert.ok(root.textContent.includes('No news views published yet'));
+  assert.deepEqual(asked, [PUBLISHED_INDEX]);
+});
+
+test('G6: only an exact tombstone counts; anything else is a visible failure, never an empty panel', async () => {
+  assert.equal(panel.tombstoneState(tombstone('withdrawn')), 'withdrawn');
+  assert.equal(panel.tombstoneState(tombstone('unpublished')), 'unpublished');
+  const bad = [
+    Object.assign(tombstone(), { state: 'published' }),
+    Object.assign(tombstone(), { schema_version: 'news-view-index/v1' }),
+    Object.assign(tombstone(), { commit: { nonce: 'short' } }),
+    Object.assign(tombstone(), { commit: null }),
+    Object.assign(tombstone(), { gen: G }),
+    Object.assign(tombstone(), { views: [] }),
+    null, [], 'withdrawn',
+  ];
+  for (const index of bad) {
+    assert.equal(panel.tombstoneState(index), null, JSON.stringify(index));
+    const { root, done } = mountIndex(index);
+    await done;
+    assert.equal(root.getAttribute('data-state'), 'failed', JSON.stringify(index));
+  }
+});
+
+test('G6: the published index must be v2, published, nonced and consistent with its incarnation', () => {
+  assert.deepEqual(panel.validateIndex(load(PUBLISHED_INDEX)), []);
+  const broken = {
+    'v1 schema': i => { i.schema_version = 'news-view-index/v1'; },
+    'no state': i => { delete i.state; },
+    'no commit': i => { delete i.commit; },
+    'bad nonce': i => { i.commit = { nonce: 'ABC' }; },
+    'logical generation as gen': i => { i.gen = i.logical_gen; },
+    'another logical_gen': i => { i.logical_gen = '20990101T000000Z-0000000000000000'; },
+    'gen with a leading zero': i => { i.gen = i.logical_gen + '.01'; },
+  };
+  for (const [name, change] of Object.entries(broken)) {
+    const index = load(PUBLISHED_INDEX);
+    change(index);
+    assert.notDeepEqual(panel.validateIndex(index), [], name);
+  }
+  assert.equal(panel.isGen(G), true);
+  assert.equal(panel.isGen(Q.logicalGen), false, 'a generation without an incarnation number is not accepted');
+  assert.equal(panel.genOf(FIRST), G);
 });
 
 (async () => {

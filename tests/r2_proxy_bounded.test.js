@@ -18,10 +18,10 @@ const POSITIVE_KEYS = [
   'squeeze-scanner/v1/scheduled/latest-attempt.json',
   'squeeze-scanner/v1/scheduled/latest-schedule.json',
   // MediaFlow News views (G3): the fixed index and exact generation-qualified pages, not a prefix.
-  'news/v1/views/index.json',
-  'news/v1/views/g/20261109T100500Z-0123456789abcdef/collector/oil/2026-11-09/page-0001.json',
-  'news/v1/views/g/20261109T100500Z-0123456789abcdef/archive/ai_buildout/2024-02-29/page-0020.json',
-  'news/v1/views/g/20261109T100500Z-0123456789abcdef/publication/all/2026-11-09/page-0002.json',
+  'news/v2/views/index.json',
+  'news/v2/views/p/20261109T100500Z-0123456789abcdef.1/collector/oil/2026-11-09/page-0001.json',
+  'news/v2/views/p/20261109T100500Z-0123456789abcdef.1/archive/ai_buildout/2024-02-29/page-0020.json',
+  'news/v2/views/p/20261109T100500Z-0123456789abcdef.1/publication/all/2026-11-09/page-0002.json',
 ];
 const NEGATIVE_KEYS = [
   '', 'system/bot-membership-v1.json', 'paper-trades/requests/x.json',
@@ -36,7 +36,10 @@ const NEGATIVE_KEYS = [
   'news/v1/views/today.json', 'intraday/%2e%2e/latest.json',
   'intraday%2e/latest.json', 'manifest.json%2e',
   // The News grant is exact keys only: every other shape stays 404.
-  'news/v1/views/', 'news/v1/views/index.json/', 'news/v1/views/index.json.bak',
+  'news/v1/views/', 'news/v1/views/index.json', 'news/v1/views/index.json/', 'news/v1/views/index.json.bak',
+  'news/v2/views/', 'news/v2/views/index.json/', 'news/v2/views/index.json.bak',
+  'news/v2/views/p/20261109T100500Z-0123456789abcdef/collector/oil/2026-11-09/page-0001.json',
+  'news/v2/views/p/20261109T100500Z-0123456789abcdef.0/collector/oil/2026-11-09/page-0001.json',
   'news/v1/views/collector/oil/2026-11-09/page-0000.json',
   'news/v1/views/collector/oil/2026-11-09/page-0021.json',
   'news/v1/views/collector/oil/2026-02-30/page-0001.json',
@@ -48,12 +51,12 @@ const NEGATIVE_KEYS = [
   'news/v1/runs/2026-11-09/run/manifest.json', 'news/v1/latest.json',
   // G3: unqualified pages are refused; the generation segment is exact (16 lowercase hex, real instant).
   'news/v1/views/publication/all/2026-11-09/page-0002.json',
-  'news/v1/views/g/20261109T100500Z-0123456789ABCDEF/collector/oil/2026-11-09/page-0001.json',
-  'news/v1/views/g/20261109T100500Z-0123456789abcde/collector/oil/2026-11-09/page-0001.json',
-  'news/v1/views/g/20260230T100500Z-0123456789abcdef/collector/oil/2026-11-09/page-0001.json',
-  'news/v1/views/g/20261109T246000Z-0123456789abcdef/collector/oil/2026-11-09/page-0001.json',
-  'news/v1/views/g/20261109T100500Z-0123456789abcdef/collector/oil/2026-11-09/page-0021.json',
-  'news/v1/views/g/20261109T100500Z-0123456789abcdef/', 'news/v1/views/g/',
+  'news/v2/views/p/20261109T100500Z-0123456789ABCDEF.1/collector/oil/2026-11-09/page-0001.json',
+  'news/v2/views/p/20261109T100500Z-0123456789abcde.1/collector/oil/2026-11-09/page-0001.json',
+  'news/v2/views/p/20260230T100500Z-0123456789abcdef.1/collector/oil/2026-11-09/page-0001.json',
+  'news/v2/views/p/20261109T246000Z-0123456789abcdef.1/collector/oil/2026-11-09/page-0001.json',
+  'news/v2/views/p/20261109T100500Z-0123456789abcdef.1/collector/oil/2026-11-09/page-0021.json',
+  'news/v2/views/p/20261109T100500Z-0123456789abcdef.1/', 'news/v2/views/p/',
 ];
 const BAD_QUERIES = [
   '?url=x', '?_=abc', '?_=', '?_=1&_=2', '?_=' + '1'.repeat(21),

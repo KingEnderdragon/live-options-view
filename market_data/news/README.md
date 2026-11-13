@@ -361,13 +361,19 @@ All fixtures are synthetic (see `tests/fixtures/news/README.md`).
 
 ## M5: publisher and inactive pilot (local preparation)
 
-`publish.py` publishes sanitized views from the private archive to a separate public store (pages, then index.json, then stale deletions), with stop/restore/withdraw and `publish-status`. `pilot-cycle` runs one 15-minute pilot cycle (four sources, prices unavailable). The config `deploy/news-pilot.json` is inactive and `--live` is refused. Operating plan and open storage decisions: [PUBLISHING.md](PUBLISHING.md). Tests: `tests/test_news_publish.py`, `tests/news_publish_browser.test.js`.
+`publish.py` publishes sanitized views from the private archive to a separate public store (cleanup, then pages, then index.json), with stop/restore/reseal/withdraw and `publish-status`. `pilot-cycle` runs one 15-minute pilot cycle (four sources, prices unavailable). The config `deploy/news-pilot.json` is inactive and `--live` is refused. Operating plan and open storage decisions: [PUBLISHING.md](PUBLISHING.md). Tests: `tests/test_news_publish.py`, `tests/news_publish_browser.test.js`.
 
-## Publication generations (G3)
+## Publication generations and settlement (G3 + G6, never run)
 
-Published views are immutable generations: `news/v1/views/g/<gen>/...` pages behind the fixed
-`news/v1/views/index.json`. `views.qualify_generation` turns a build into that form; `publish.py`
-keeps a lifecycle ledger, reconciles before every run, cleans up orphans and expired generations
-before admitting a new one, and never deletes a replaced generation before its reader grace on two
-clocks (refused entirely until the store-clock bound is verified). See `PUBLISHING.md`
-("Generations") for the contract, the defaults and the operator commands.
+Published views are immutable incarnations of a generation: `news/v2/views/p/<gen>.<n>/...` pages
+behind the fixed `news/v2/views/index.json`. `views.qualify_generation` turns a build into that
+form and `views.commit_index` adds a fresh nonce to every index write. `publish.py` keeps one
+compare-and-swapped head record (`news/v1/publish/head.json`) and a commit record per index write,
+writes the index only by compare-and-swap on the expected ETag, leaves an index write with an
+unknown outcome open until a later landed write closes it, never reuses a page namespace once a
+delete has started in it, and withdraws by tombstone (the index key is never deleted). A replaced
+generation is never deleted before its reader grace on two clocks (refused entirely until the
+store-clock bound is verified). Legacy `news/v1/views` keys are untouched. See `PUBLISHING.md`
+("Generations and settlement") for the contract, the provider assumptions, the operator commands
+and what activation still needs. Tests (authored, NOT RUN): `tests/test_news_generations.py`,
+`tests/test_news_settlement.py`.

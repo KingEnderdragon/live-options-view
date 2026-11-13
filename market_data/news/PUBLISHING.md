@@ -1,4 +1,4 @@
-# MediaFlow news pilot: publishing and operating plan (M5 + G3 generations, prepared, inactive)
+# MediaFlow news pilot: publishing and operating plan (M5 + G3 generations + G6 settlement, prepared, inactive)
 
 This describes the prepared pilot. It is not active. `deploy/news-pilot.json` has `active: false`.
 While it is false, `pilot-cycle --live` refuses to start, and so does every `publish-*` command
@@ -42,60 +42,165 @@ start".
      with `Cache-Control: no-store` (the commit point), then reconciles again. Nothing is deleted at
      the commit: the replaced generation stays public for the reader grace.
 
-## Generations (G3: implemented locally, inactive)
+## Generations and settlement (G3 + G6: implemented locally, inactive, never run)
 
-The accepted G2 v2 design with Chej's corrections and Owen's approved defaults (2026-11-12).
+The accepted G2 v2 design (G3) with the accepted G5 settlement design and lifecycle addendum (G6).
+**Nothing in this section has been executed**: no test, no fixture generation, no provider or bucket.
+What the provider documents and what this code assumes are listed separately at the end.
+
+### Contract
 
 - **Identity.** `gen = <build_as_of as YYYYMMDDTHHMMSSZ>-<first 16 hex of SHA-256 over the unqualified
-  build>`, fixed before any key is qualified, so no key contains a digest of itself. Final integrity is
-  separate: `pages_sha256` (in the index, over the qualified pages), plus `index_sha256` and
-  `generation_sha256` in the private ledger and snapshot.
-- **Keys.** `news/v1/views/index.json` (fixed, the only commit point) and
-  `news/v1/views/g/<gen>/<mode>/<stream>/<YYYY-MM-DD>/page-NNNN.json` (immutable, written once).
-  `<gen>` must be a real UTC instant and exactly 16 lowercase hex. The same exact rule is enforced
-  by `publish.py`, `site/js/news-panel.js`, `backend/browser-data.js` and
-  `frontend/preview-policy.mjs`. Unqualified page keys are builder output only and are never public.
-- **Readers.** The panel follows only links of the generation its index names. Every request has a
+  build>`, fixed before any key is qualified. An **incarnation** `<gen>.<n>` (n = 1..9999, no leading
+  zero) is one page namespace of that generation. Final integrity is separate: `pages_sha256` in the
+  index, over the qualified pages.
+- **Keys (fresh namespaces).** `news/v2/views/index.json` (fixed, the only commit point) and
+  `news/v2/views/p/<gen>.<n>/<mode>/<stream>/<YYYY-MM-DD>/page-NNNN.json` (immutable, written once).
+  The same exact rule is enforced by `publish.py`, `site/js/news-panel.js`,
+  `backend/browser-data.js` and `frontend/preview-policy.mjs`. Legacy keys
+  (`news/v1/views/index.json`, `news/v1/views/g/...`) are never read, written or deleted, and are no
+  longer served. Unqualified page keys are builder output only.
+- **Index body.** Schema `news-view-index/v2`, `state: "published"`, `gen` (the incarnation id, which
+  pages also carry), `logical_gen`, `pages_sha256`, and `commit.nonce`: a fresh 128-bit nonce for
+  every index write. No two index bodies are ever byte-identical, so an ETag never repeats.
+- **Tombstone.** The same key and schema with `state: "withdrawn"` (withdrawal) or `"unpublished"`
+  (before the first publication), a nonce, and no generation or views. The index key is created once
+  and **never deleted**.
+- **Readers.** The panel follows only links of the incarnation its index names. Every request has a
   20 s deadline (late bodies discarded) and asks for no cached copy. The index lease is 30 min from
   the index request's start, checked on a monotonic and a wall clock (and again on visibilitychange,
-  pageshow and online), so sleep and clock changes end it. A page 404, a request past its deadline, a
-  generation mismatch or an ended lease shows **refresh required** (reload the fixed index), never a
-  page of another generation. The Worker gives News keys a 15 s upstream deadline (504) and serves the
-  index with `Cache-Control: no-store` whatever upstream says.
-- **Ledger.** `news/v1/publish/generations/<gen>.json` records the digests, the page set and events:
-  `candidate`, `index_put_attempted`, `published`, `restored`, `ceased`, `pages_deleted`.
-  Protection follows the latest `published`/`restored`/`ceased` epoch.
-- **Reconciliation first.** Every run matches the live index against the ledger in full (index hash,
-  gen, `pages_sha256`, every page hash). The match is current; every other generation recorded as
-  current is ceased, stamped from a fresh paired clock reading taken **after** the match succeeds
-  (never the reading from the start of the run), for publication, restore and recovery alike. An unmatched or unreadable live index, or an unreadable ledger, **blocks** the
-  run: nothing written or deleted, `publish-status` reports `publication_blocked`.
-- **Uncertain index writes.** If the index write fails or does not read back, the candidate is
-  uncertain. A later run that sees the old index does not treat it as an orphan (the write may still
-  land); it pauses publication instead. It is settled by a run that finds the live index matching
-  it in full (the attempted write landed). Nothing else releases it: there is no timer, no
-  operator override and no retry, because none of them can establish that the attempted write can
-  no longer land. Until then its pages are retained and **every** index write stays paused,
-  including a republication or restore of that same generation. An unresolved attempt also takes
-  precedence over an older lifecycle record: a failed restore of a previously published generation
-  is uncertain, not protected or expired.
-- **Cleanup before admission.** Each run first deletes orphan pages (written, never offered) and
-  expired pages, then admits the new generation only if no index write is unsettled and present
-  pages + its missing pages ≤ `page_cap` (6,300). Otherwise publication pauses (visible); cleanup
-  keeps running every run. Current, protected, uncertain and unknown pages are never evicted.
-  Restore counts its missing pages the same way.
+  pageshow and online), so sleep and clock changes end it. A page 404, a request past its deadline, an
+  incarnation mismatch or an ended lease shows **refresh required** (reload the fixed index), never a
+  page of another incarnation. A tombstone shows "News views are not currently published"
+  (withdrawn) or "No news views published yet" (unpublished, the same as a 404) and requests no page.
+  The Worker gives News keys a 15 s upstream deadline (504) and serves the index with
+  `Cache-Control: no-store` whatever upstream says.
+
+### Records
+
+- **Head** (`news/v1/publish/head.json`, private). The one shared record, changed only by
+  compare-and-swap with a fresh nonce in its body: the live commit, every incarnation (`pinned` or
+  `retiring`, its reserved page count, its lifecycle events), prepared commits, per-generation
+  high-water marks, and `withdrawing`. Every operation changes the head **before** it touches the
+  public store.
+- **Commit record** (`news/v1/publish/commits/<nonce>.json`, private, create-if-absent). One per
+  index write: kind (`genesis`, `publish`, `restore`, `reseal`, `tombstone`), incarnation, the
+  expected ETag and nonce of the index it replaces, the body hash and the page set. Written, then
+  registered in the head, **before** the index write is sent.
+- `state.json` is informational (clock high-water marks, last failure, blocked/paused notes, a
+  summary of what is live). No decision reads it.
+
+### Index writes
+
+- **Compare-and-swap.** Every index write is one request with `If-Match` on the ETag read from the
+  live index (the very first is `If-None-Match: *` and writes an "unpublished" tombstone). The store
+  wrapper has no unconditional index put and no index delete. No hidden retries: the bucket client
+  used for these calls sends one request per call.
+- **Explicit outcomes.** *Applied*: the commit must then be observed live. *Rejected* (412 only):
+  known not applied and unable to apply later; the commit is closed at once and the run reports a
+  conflict. *Ambiguous* (anything else, or no answer): **the commit stays open in the head.**
+- **An open commit** can land only while the index it was conditioned on is still live. Any later
+  landed index write ends that for good. Nothing else closes it: no timer, no retry, no operator
+  note. It does not pause publication: whichever open commit lands, the live index is a recorded
+  commit whose pages are present, because an incarnation named by an open commit is never retired.
+- **Observation first.** Every run reads the live index in full (bytes against the prepared body, the
+  commit nonce, every page hash) and records what that proves. An index with an unknown nonce, other
+  bytes, or a missing page **blocks** the run: nothing written or deleted.
+- **Landed is not ceased.** A commit has landed if it is live, or if a later commit was conditioned
+  on it. A generation **ceases** only when a later full observation finds a different committed
+  incarnation, or a tombstone, live. That event is stamped from a paired clock reading taken
+  **after** the observation, never from a commit's preparation time and never from run start.
+- **Reseal.** `publish-reseal` rewrites the live generation's index with a fresh nonce. Readers see no
+  change. Once it lands, every open commit is known dead: it is how an operator cancels an unwanted
+  open restore.
+
+### Pages and incarnations
+
+- **Never reuse a namespace after a delete starts.** Before the first page delete in an incarnation,
+  the head marks it `retiring` (permanent). Page deletes are unconditional and may land late; a
+  retiring or retired incarnation is never written again, so a late delete can only hit pages that
+  were to be deleted anyway.
+- **Restore and republication** reuse an incarnation of that generation that is still `pinned` (no
+  delete ever started in it; only a new index is written). Otherwise the build is re-qualified from
+  its snapshot under `<gen>.<n+1>`. Without a usable snapshot the restore is refused and the pause
+  stays. Snapshots hold the unqualified build for this reason.
+- **A mismatching page** of a never-offered incarnation is not deleted and rewritten: the
+  incarnation is abandoned (retiring) and the next run uses a fresh one.
+- **Cleanup before admission.** Orphan (pinned, never offered, no open commit) and expired
+  incarnations are marked retiring by one head compare-and-swap, which revalidates on the document
+  it replaces that no commit names them. Only then are pages deleted; namespaces a fresh listing
+  shows empty are recorded retired. Current, protected, open and unknown pages are never deleted.
+- **Capacity.** `page_cap` (6,300) is counted as pages **reserved in the head** (every pinned or
+  retiring incarnation, written or not, with or without an open commit) plus public pages with no
+  head record. The reservation is taken in the same compare-and-swap that pins the incarnation, so
+  two admissions cannot both fit into the last free room. At the cap publication pauses (visible);
+  nothing protected is evicted; cleanup keeps running.
 - **Retirement.** A replaced generation stays public for at least `reader_grace_s` (45 min). Its pages
   are deleted only when the producer clock and the store clock (the private heartbeat's
   LastModified) both show 45 min + `clock_epsilon_s` + `clock_skew_s` = 49 min since it ceased, they
   agree within the skew, neither went backwards, and the deployment has verified the store-clock
   bound. **`clock_bound_verified` is false in the inactive config: the 2-minute store-clock bound is
   an assumption that has not been verified for any provider, so expiry deletion is refused and
-  `publish-status` reports `expiry_blocked_clock_bound_unverified`.** Deletion then happens at the
-  first run after that time (earliest 49 min plus the run delay), not at exactly 49 min.
-- **Capacity.** With cleanup before admission and an exact serialized 15-minute cadence, peak
-  occupancy is 5 generations (6,300 pages at the pilot maximum of 1,260 per generation). That is an
-  ideal-cadence bound, not an availability promise: bursts, uncertain history or a clock refusal can
-  pause publication.
+  `publish-status` reports `expiry_blocked_clock_bound_unverified`.**
+
+### Withdrawal
+
+Explicit withdrawal is immediate. `publish-withdraw`:
+
+1. records `withdrawing` in the head and marks every incarnation retiring. From then nothing is
+   admitted and no commit naming a generation is prepared;
+2. writes a tombstone over the index by compare-and-swap (a 412 means a prepared commit landed
+   first: the index is re-read and the next tombstone is conditioned on it; at most 3 attempts per
+   call, each with a recorded result; an ambiguous attempt is not resent blindly);
+3. deletes every public page at once, whatever the tombstone's outcome;
+4. is **confirmed** only when a tombstone is read back live.
+
+Until then the command exits 1 and `publish-status` reports **`withdrawal_unconfirmed`**. In that
+interval the public index may still be the old index, or an index from a commit prepared before the
+withdrawal that lands late. Either names pages that no longer exist: a reader loading it sees
+"refresh required" on every page. **This dangling-reference interval has no time bound.** It ends
+when a tombstone is confirmed; run `publish-withdraw` again to send another. Cached copies and
+downloads cannot be recalled in any case.
+
+### Migration and recovery
+
+- **Fresh namespaces.** The new code writes only `news/v2/views/index.json` and
+  `news/v2/views/p/...`. The claim that makes this a boundary is an **assumption to be established
+  by the owner, not verified here**: no unconditional request (index put, index delete, page delete)
+  has ever targeted those keys. Conditions on future requests do not fence requests already sent to
+  the legacy keys; those can still land there, where nothing reads them.
+- **Legacy state is not migrated.** A G3 `state.json` (schema v2), ledger files or snapshots (schema
+  v1) are refused, not converted. No G3 state was ever deployed.
+- **Blocked run.** `publish-status` names the reason. A foreign index (unknown nonce) is not repaired
+  by the publisher: the owner decides. An unreadable head blocks everything.
+- **Conflict (`PublishConflict`).** A head or index compare-and-swap lost, or a head write could not
+  be verified as the committed head. Nothing further was done for that intent. Run again.
+- **Open commits.** Listed in `publish-status` (`open_commits`). They close when the next index
+  write lands (the next cycle, or `publish-reseal`).
+- **After an interrupted cleanup.** The incarnation stays `retiring`; the next run deletes what is
+  left and records it retired.
+
+### Provider and SDK: documented, and assumed
+
+Documented by the provider (R2 conditional-operations and consistency pages, read 2026-11-12):
+`PutObject` accepts `If-Match` / `If-None-Match`; a failed condition returns 412; the condition is
+evaluated when the write commits and competing conditional writes are serialized; `If-Match` fails
+on an absent key; a timed-out write may still commit and a 404 read does not prove it failed;
+identical content gives an identical ETag; reads are strongly consistent after a write; a listing
+reflects all objects at that point in time.
+
+**Assumed, not verified by any run of this code:**
+
+1. two different bodies never share an ETag;
+2. `put_object` accepts `IfMatch` / `IfNoneMatch`, returns the new ETag, and surfaces a 412 as
+   `PreconditionFailed` or `412`;
+3. the no-retry client (`total_max_attempts = 1`) sends exactly one request per call;
+4. a `GetObject` response's body and ETag describe the same object version;
+5. the private store gives the same conditional-write behavior;
+6. an unanswered page delete may land later with no bound (the safe reading);
+7. only this publisher writes the v2 keys.
+
+The tests use scripted local stores. They model this contract; they are not evidence about it.
 
 **Truncated index.** If the builder cuts the index (over `index_views`, 500, or the 256 KB
 `index_bytes` cap), it retains whole views newest date first. Within a date it keeps the build order
@@ -117,8 +222,8 @@ remains valid. The pilot's 7 days × 9 views = 63 views is far below either cap.
 
 | Store | Holds | Readers |
 |---|---|---|
-| private | `news/v1/runs/**` (immutable raw history), `news/v1/index/**`, `news/v1/latest.json`, `news/v1/_writer/lease.json`, `news/v1/publish/**` (state, stop marker, publish lease, snapshots, receipts) | the collector/publisher only |
-| public | `news/v1/views/index.json`, `news/v1/views/<mode>/<stream>/<date>/page-NNNN.json` | the site: same-origin `/browser-data/` proxy and direct public-R2 path |
+| private | `news/v1/runs/**` (immutable raw history), `news/v1/index/**`, `news/v1/latest.json`, `news/v1/_writer/lease.json`, `news/v1/publish/**` (head, commit records, state, stop marker, publish lease, snapshots, receipts) | the collector/publisher only |
+| public | `news/v2/views/index.json`, `news/v2/views/p/<gen>.<n>/<mode>/<stream>/<date>/page-NNNN.json` (legacy `news/v1/views/**` objects, if any exist, are left untouched and unread) | the site: same-origin `/browser-data/` proxy and direct public-R2 path |
 
 The public store wrapper refuses every key except the exact view-key rule the panel and proxy use.
 A test pins that the Python rule matches the panel's `isNewsViewKey`. The two stores must be
@@ -179,14 +284,17 @@ present:
 - `published_views_stale`: the last publication is older than 2 × 15 min + 180 s and the pilot is not stopped.
 - `public_index_differs_from_state`: the live index is not the one the publisher committed.
 - `never_published`: no generation has ever been committed, and the pilot is neither stopped nor withdrawn.
-- `publication_blocked`: the live index or the generation ledger could not be matched; nothing was
-  written or deleted. An operator settles it.
-- `publication_paused`: an unsettled index write or the page cap stopped admission (cleanup still runs).
-- `uncertain_index_write`: an index write was attempted and never settled (see "Generations").
+- `publication_blocked`: the live index could not be matched to a prepared commit, or the head is
+  unreadable; nothing was written or deleted. An operator settles it.
+- `publication_paused`: the page cap, or a withdrawal in progress, stopped admission (cleanup still runs).
+- `open_index_commits`: one or more prepared index writes have an unknown outcome and may still land
+  (listed in `open_commits`). Not a pause. They close when the next index write lands.
+- `withdrawal_unconfirmed`: pages are deleted but no tombstone is confirmed live (see "Withdrawal").
+- `head_unreadable`: `head.json` is not a readable head record.
 - `expiry_blocked_clock_bound_unverified`: a replaced generation is past its grace on the producer
   clock, but expiry deletion is refused until the store-clock bound is verified.
-- `unknown_public_generations`: public generation pages with no ledger record (retained, never deleted).
-- `live_index_unmatched`: the live index matches no recorded generation in full.
+- `unknown_public_generations`: public pages with no head record (retained, never deleted, counted against the cap).
+- `live_index_unmatched`: the live index matches no prepared commit in full (nonce, bytes, every page).
 - `stale_writer_lease` / `stale_publish_lease`: an expired lease left by a process that did not exit
   cleanly. The `leases` field shows the holder and expiry. An unexpired lease is listed but is not a
   problem by itself, because a cycle may be running.
@@ -202,8 +310,9 @@ Readers can see failures too. Every page shows `build_as_of`, and collection fai
 the published coverage: failed sources, missed intervals and partial runs (accepted M3/M4a semantics).
 
 A failed publication never leaves the live index pointing at a missing page, and never mixes builds:
-pages of the new generation are unreachable until its index is written, and pages are never
-rewritten in place. Leftover pages of a never-offered candidate are deleted by the next run.
+pages of the new incarnation are unreachable until its index is written, and pages are never
+rewritten in place. Leftover pages of a never-offered incarnation are deleted by the next run. The one
+exception is stated under "Withdrawal": an unconfirmed withdrawal can leave an index naming deleted pages.
 
 ## Stop, restore, roll back
 
@@ -211,9 +320,9 @@ rewritten in place. Leftover pages of a never-offered candidate are deleted by t
 |---|---|---|
 | Stop | `publish-stop --reason "..."` | Cycles no-op (exit 0). Views stay as last published and age visibly. |
 | Resume | `publish-resume` | The next tick collects and publishes normally. |
-| Roll back views | `publish-stop`, then `publish-restore --gen <gen_id>` | Republishes a retained snapshot byte-for-byte through the same safe order, counting its missing pages against the cap. The displaced generation's retirement starts now. It stays in place until resume. |
-| Uncertain index write | None. `publish-status` shows `uncertain_index_write` and `publication_paused` | The candidate is settled only when a run finds the live index matching it in full. There is no time-based release, no override and no retry (not even of the same generation); until then its pages are retained and all publication and restore stays paused. |
-| Take views down | `publish-stop`, then `publish-withdraw` | Deletes `index.json` first, so the panel shows "No news views published yet", then every generation's pages at once (no grace). Copies already cached by browsers or intermediaries, and downloads, cannot be recalled. Snapshots and the raw archive are kept. |
+| Roll back views | `publish-stop`, then `publish-restore --gen <gen_id>` | `<gen_id>` is the logical generation. Reuses its still-pinned incarnation (only a new index, fresh nonce) or writes a fresh incarnation from the snapshot, counted against the cap. The displaced generation's retirement starts when the restore is observed live. It stays in place until resume. |
+| Open index commit | Usually none: the next cycle's index write closes it. To close it on demand: `publish-reseal` | An index write with an unknown outcome stays open and may land while the index it was conditioned on is live. There is no timer and no override. `publish-reseal` rewrites the live index with a fresh nonce; when that lands, every open commit is dead. |
+| Take views down | `publish-stop`, then `publish-withdraw` (repeat while it reports `withdrawal_unconfirmed`) | Writes a tombstone over `index.json` (the key is never deleted), so the panel shows "News views are not currently published", and deletes every page at once (no grace). Unconfirmed until a tombstone is read back live; until then an index naming deleted pages may be served, with no time bound. Copies already cached by browsers or intermediaries, and downloads, cannot be recalled. Snapshots and the raw archive are kept. |
 | Code rollback | redeploy the previous revision | The raw archive is append-only and versioned. Views are rebuilt on the next cycle. |
 
 `gen_id` values are listed in `publish-status` (`snapshots`) and in receipts.
@@ -254,5 +363,18 @@ reports `stale_writer_lease` or `stale_publish_lease`. Leases are never taken ov
 
 ## Generation-specific page keys
 
-Implemented locally in G3 (see "Generations"); inactive like the rest of the pilot. The fixed-key
-mixed-build limit no longer applies: a reader following one index sees one build.
+Implemented locally in G3 and re-keyed in G6 (see "Generations and settlement"); inactive like the rest
+of the pilot and never run. The fixed-key mixed-build limit no longer applies: a reader following one
+index sees one build.
+
+## Not changed by G6, and needed before activation
+
+- `deploy/news-pilot.json` is unchanged and **no longer validates**: `storage.public.prefix` must
+  become `news/v2/views/`. Its descriptive text (`holds`, `public_views`, the credential-scope note)
+  still names `news/v1/views/` and `g/<gen>/`. Every `pilot-cycle` / `publish-*` command therefore
+  fails closed on the shipped file until the owner edits it; it stays inactive either way.
+- `site/index.html` still loads `js/news-panel.js` with its previous `?v=` stamp. Until that stamp is
+  bumped, browsers holding the cached script keep requesting `news/v1/views/index.json`, which the
+  proxy now refuses: they see a load failure, not stale views.
+- The committed view fixtures are builder output (unqualified `news/v1` keys) and remain valid.
+- Provider checks for the assumptions above, and a first execution of every test source.

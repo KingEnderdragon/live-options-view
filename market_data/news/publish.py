@@ -1,47 +1,62 @@
-"""Publish sanitized news views (M5, local preparation; G3 generations): private archive -> public views.
+"""Publish sanitized news views (M5 local preparation; G3 generations; G6 settlement): private -> public.
 
 Two stores, never the same one:
 
   private   the raw archive (news/v1/runs/, indexes, latest.json, writer lease)
             plus the publisher's own state under news/v1/publish/:
-              state.json                  committed generation, in-progress target, uncertain/blocked/paused,
-                                          last failure, clock high-water marks
+              head.json                   THE shared record, changed only by compare-and-swap: live commit,
+                                          incarnations (pinned / retiring, their reserved pages and
+                                          lifecycle events), prepared commits, high-water marks, withdrawing
+              commits/<nonce>.json        one durable record per index write, written before it is sent
+              state.json                  informational: clock high-water marks, last failure, blocked /
+                                          paused notes, a summary of what is live (no decision reads it)
               heartbeat.json              rewritten every run; its store modification time is the store clock
-              generations/<gen>.json      the lifecycle ledger: digests, page set and events
               stop.json                   operator stop marker (cycles and publication no-op)
-              lease.json                  single-publisher lease
-              snapshots/<gen>/...         exact bytes of recent published generations (restore)
-              receipts/<time>-<gen>.json  one per publication / restore / withdrawal
-  public    only the exact view keys the panel and proxy accept:
-              news/v1/views/index.json                                            the commit point
-              news/v1/views/g/<gen>/<mode>/<stream>/<YYYY-MM-DD>/page-NNNN.json  immutable
+              lease.json                  single-publisher lease (avoids wasted work; safety is the head)
+              snapshots/<gen>/...         the exact unqualified build of recent generations (restore)
+              receipts/<time>-<gen>.json  one per publication / restore / reseal / withdrawal
+  public    only the exact view keys the panel and proxy accept (fresh namespaces, G6):
+              news/v2/views/index.json                                                the commit point
+              news/v2/views/p/<gen>.<n>/<mode>/<stream>/<YYYY-MM-DD>/page-NNNN.json  immutable
+            Legacy keys (news/v1/views/index.json, news/v1/views/g/...) are never read, written or deleted.
 
-A generation (G3, the accepted G2 v2 design) is the qualified form of one build (views.qualify_generation):
-gen = <build_as_of>-<16 hex of the unqualified build's digest>, every page under g/<gen>/ with links that
-stay in that generation, and an index naming gen and pages_sha256. Each run:
+Settlement (the accepted G5 design and its lifecycle addendum):
 
-  1. reads the clock (a heartbeat: producer time and the store's own time) and the ledger;
-  2. reconciles: the live index must match one recorded generation in full (index hash, gen,
-     pages_sha256, every page hash); that one is current, every other one recorded as current is
-     ceased now. Anything unmatched or unreadable blocks the run (nothing written or deleted);
-  3. cleans up: deletes orphan pages (written, never offered) and expired pages (ceased, both clocks
-     past reader grace + epsilon + skew, clocks agreeing, and only once the clock bound is verified);
-     never current, protected, uncertain or unknown pages; needs no new commit;
-  4. admits: an unsettled index write anywhere pauses publication; so does the page cap
-     (present + missing pages > cap). Nothing protected is evicted;
-  5. writes the generation's pages create-if-absent (immutable; different bytes at an existing key stop
-     the run), then the index, then reconciles again. An index write that fails or does not read back
-     leaves the candidate uncertain until a later run sees it live in full. Neither elapsed time nor a
-     retry of the same generation releases it, and an older lifecycle record cannot settle it.
+  - Every index write is a compare-and-swap on the ETag of the index it replaces (the first one is
+    create-only), sent once, with a fresh 128-bit nonce in its body, so no two index bodies are equal.
+  - Durable intent comes first: the commit record, then the commit in the head, then the index write.
+  - Outcomes are explicit. 412 is a known rejection. Anything else is ambiguous: the commit stays open
+    in the head. It can land only while the index it was conditioned on is live; any later landed write
+    ends that. No timer, no retry and no operator note settles it; observation does.
+  - Landed evidence and cessation are separate. A generation ceases only when a later full observation
+    finds a different committed incarnation, or a tombstone, live; the stamp is a clock reading taken
+    after that observation, never a commit's preparation time.
+  - A page namespace (incarnation <gen>.<n>) in which a delete has been started is never written again.
+    Restore and republication reuse a still-pinned incarnation or take <gen>.<n+1>; without a snapshot
+    the restore is refused.
+  - The index key is never deleted. Withdrawal writes a tombstone over it and deletes every page at once;
+    it is unconfirmed until a tombstone is read back live.
+  - Admission, commit preparation, cleanup and withdrawal each change the head before touching the
+    public store, so a pin and a retirement of the same incarnation cannot both win, and the page cap
+    is reserved in the same compare-and-swap that pins.
 
-Withdrawal deletes the index and every generation's pages at once; cached copies cannot be recalled.
+Each run: read the clock and the head; observe the live index in full (index bytes, commit nonce, every
+page hash) and record what that proves; clean up (mark orphan/expired incarnations retiring, delete
+their pages, record empties); pin an incarnation within the cap; write its pages create-if-absent;
+prepare the commit; send the index; observe again.
+
+PROVIDER / SDK ASSUMPTIONS (documented or assumed in archive.py; none verified by this module): atomic
+conditional PutObject, 412 on a failed condition, one request per call on the no-retry client, a returned
+ETag, distinct bodies never sharing an ETag, and the same behaviour on the private store.
 Nothing here contacts a network or a bucket unless a caller passes such a store.
 """
 
 from __future__ import annotations
 
+import copy
 import json
 import re
+import secrets
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -52,36 +67,44 @@ from .archive import (LEASE_KEY, ArchiveError, LocalObjectStore, R2ObjectStore, 
 from .normalize import iso, parse_iso, sha256_hex
 from .prices import PriceFile
 from .reader import MODES, load_archive
-from .views import (GEN_PATTERN, INDEX_REASONS, LIMITS, ROOT, STREAM_KEYS, build_views, files_digest,
-                    generation_name, generation_page_key, is_gen, page_key, pages_digest, qualified_limits,
-                    qualify_generation)
+from .views import (INCARNATION_MAX, INCARNATION_PATTERN, INDEX_KEY as BUILDER_INDEX, INDEX_REASONS, LIMITS,
+                    PAGES_ROOT, PUBLISHED_INDEX_KEY, PUBLISHED_INDEX_SCHEMA, PUBLISHED_ROOT, STREAM_KEYS, build_views,
+                    commit_index, commit_nonce_of, files_digest, generation_name, generation_page_key, is_gen,
+                    is_incarnation, page_key, pages_digest, qualified_limits, qualify_generation, split_incarnation,
+                    tombstone_index)
 
-PUBLIC_PREFIX = f"{ROOT}/"
-PUBLIC_INDEX = f"{ROOT}/index.json"
-GENERATION_PREFIX = f"{ROOT}/g/"
+PUBLIC_PREFIX = f"{PUBLISHED_ROOT}/"                 # news/v2/views/ : the fresh public namespace (G6)
+PUBLIC_INDEX = PUBLISHED_INDEX_KEY                  # news/v2/views/index.json : the only commit point
+PAGES_PREFIX = f"{PAGES_ROOT}/"                     # news/v2/views/p/<gen>.<n>/...
+BUILDER_INDEX_SCHEMA = "news-view-index/v1"         # the builder's unqualified index (in memory only)
 PUBLISH_PREFIX = f"{config.NAMESPACE}/publish/"
 STATE_KEY = PUBLISH_PREFIX + "state.json"
 STOP_KEY = PUBLISH_PREFIX + "stop.json"
 PUBLISH_LEASE_KEY = PUBLISH_PREFIX + "lease.json"
 SNAPSHOT_PREFIX = PUBLISH_PREFIX + "snapshots/"
 RECEIPT_PREFIX = PUBLISH_PREFIX + "receipts/"
-LEDGER_PREFIX = PUBLISH_PREFIX + "generations/"
+HEAD_KEY = PUBLISH_PREFIX + "head.json"
+COMMIT_PREFIX = PUBLISH_PREFIX + "commits/"
 HEARTBEAT_KEY = PUBLISH_PREFIX + "heartbeat.json"
-STATE_SCHEMA = "news-publish-state/v2"            # v2: generations (no deployed v1 state exists)
+STATE_SCHEMA = "news-publish-state/v3"            # v3: informational only; the head is the record (G6)
 RECEIPT_SCHEMA = "news-publish-receipt/v1"
-SNAPSHOT_SCHEMA = "news-publish-snapshot/v1"
-LEDGER_SCHEMA = "news-publish-generation/v1"
+SNAPSHOT_SCHEMA = "news-publish-snapshot/v2"      # v2: the unqualified build (re-qualified on restore)
+HEAD_SCHEMA = "news-publish-head/v1"
+COMMIT_SCHEMA = "news-publish-commit/v1"
 PILOT_SCHEMA = "news-pilot-config/v1"
 INDEX_CACHE_CONTROL = "no-store"
 PAGE_CACHE_CONTROL = "public, max-age=31536000, immutable"
-WITHDRAW_NOTE = ("origin objects deleted; copies already cached by browsers or intermediaries, and downloads, "
-                 "cannot be recalled")
+WITHDRAW_NOTE = ("tombstone confirmed live and origin pages deleted; copies already cached by browsers or "
+                 "intermediaries, and downloads, cannot be recalled")
+UNCONFIRMED_NOTE = ("origin pages deleted, but no tombstone is confirmed live: the public index may still be the old "
+                    "index, or one from an earlier commit that lands late, naming pages that no longer exist. This "
+                    "has no time bound. Run publish-withdraw again. Cached copies cannot be recalled")
 
 # Builder output (unqualified) and published generation pages (qualified).
 _PAGE_RE = re.compile(r"^news/v1/views/(collector|archive|publication)/(all|ai_buildout|oil)/"
                       r"([0-9]{4})-([0-9]{2})-([0-9]{2})/page-([0-9]{4})\.json$")
-_GEN_PAGE_RE = re.compile(rf"^news/v1/views/g/({GEN_PATTERN})/(collector|archive|publication)/(all|ai_buildout|oil)/"
-                          r"([0-9]{4})-([0-9]{2})-([0-9]{2})/page-([0-9]{4})\.json$")
+_INC_PAGE_RE = re.compile(rf"^news/v2/views/p/({INCARNATION_PATTERN})/(collector|archive|publication)/"
+                          r"(all|ai_buildout|oil)/([0-9]{4})-([0-9]{2})-([0-9]{2})/page-([0-9]{4})\.json$")
 
 
 class PublishError(ArchiveError):
@@ -101,7 +124,12 @@ class PublishBlocked(PublishError):
 
 
 class PublishPaused(PublishError):
-    """Cleanup ran, but a new generation was not admitted (unsettled index write or the page cap)."""
+    """Cleanup ran, but a new generation was not admitted (the page cap, or a withdrawal in progress)."""
+
+
+class PublishConflict(PublishError):
+    """A compare-and-swap of the head or the index was rejected, or a head write could not be verified
+    as the committed head. Nothing further was done for that intent; a later run re-reads and decides."""
 
 
 def _real_date(y: str, m: str, d: str) -> bool:
@@ -114,16 +142,16 @@ def _real_date(y: str, m: str, d: str) -> bool:
 
 def is_builder_view_key(key: str) -> bool:
     """The builder's unqualified keys (index, or mode/stream/real date/page 0001..pages_per_view)."""
-    if key == PUBLIC_INDEX:
+    if key == BUILDER_INDEX:
         return True
     m = _PAGE_RE.match(key)
     return bool(m) and 1 <= int(m.group(6)) <= LIMITS.pages_per_view and _real_date(m.group(3), m.group(4), m.group(5))
 
 
-def generation_of(key: str) -> str | None:
-    """The generation of a published page key, or None if key is not one."""
-    m = _GEN_PAGE_RE.match(key)
-    if not m or not is_gen(m.group(1)):
+def incarnation_of(key: str) -> str | None:
+    """The incarnation (<gen>.<n>) of a published page key, or None if key is not one."""
+    m = _INC_PAGE_RE.match(key)
+    if not m or not is_incarnation(m.group(1)):
         return None
     if not 1 <= int(m.group(7)) <= LIMITS.pages_per_view or not _real_date(m.group(4), m.group(5), m.group(6)):
         return None
@@ -132,13 +160,15 @@ def generation_of(key: str) -> str | None:
 
 def is_public_view_key(key: str) -> bool:
     """The same exact rule as the panel (isNewsViewKey), the proxy (isPublicNewsViewKey) and the gateway."""
-    return key == PUBLIC_INDEX or generation_of(key) is not None
+    return key == PUBLIC_INDEX or incarnation_of(key) is not None
 
 
 # --- the two stores ---------------------------------------------------------------
 
 class PublicViewStore:
-    """The public side: refuses any key that is not an exact view key."""
+    """The public side: refuses any key that is not an exact view key, and offers only the writes the
+    settlement design allows. Pages: create-if-absent and delete. The index: compare-and-swap only;
+    there is no unconditional index put and no index delete on this store."""
 
     def __init__(self, inner):
         self.inner = inner
@@ -148,28 +178,43 @@ class PublicViewStore:
             raise PublishError(f"refusing non-view key on the public store: {key!r}")
         return key
 
-    def put(self, key, data, content_type="application/json", cache_control=None):
-        self.inner.put(self._check(key), data, content_type, cache_control=cache_control)
+    def _page(self, key):
+        if self._check(key) == PUBLIC_INDEX:
+            raise PublishError("the index is written only by compare-and-swap and is never deleted")
+        return key
 
     def put_if_absent(self, key, data, content_type="application/json", cache_control=None) -> bool:
-        return self.inner.put_if_absent(self._check(key), data, content_type=content_type, cache_control=cache_control)
+        return self.inner.put_if_absent(self._page(key), data, content_type=content_type, cache_control=cache_control)
 
     def get(self, key):
         return self.inner.get(self._check(key))
 
+    def get_versioned(self, key=PUBLIC_INDEX):
+        """(bytes, ETag) of the index, or None. Only the index is read with its version."""
+        if key != PUBLIC_INDEX:
+            raise PublishError(f"only the index is read with its ETag, not {key!r}")
+        return self.inner.get_versioned(key)
+
+    def put_if_match(self, key, data, etag, content_type="application/json", cache_control=None, write_id=None):
+        """The one way the index is written: If-Match on the expected ETag (None: create-only)."""
+        if key != PUBLIC_INDEX:
+            raise PublishError(f"only the index is written by compare-and-swap, not {key!r}")
+        return self.inner.put_if_match(key, data, etag, content_type=content_type, cache_control=cache_control,
+                                       write_id=write_id)
+
     def delete(self, key):
-        self.inner.delete(self._check(key))
+        self.inner.delete(self._page(key))
 
     def list_views(self) -> list[str]:
         """Every view key present (other keys under the prefix are reported, never touched)."""
         return [k for k in self.inner.list(PUBLIC_PREFIX) if is_public_view_key(k)]
 
-    def pages_by_gen(self) -> dict[str, list[str]]:
+    def pages_by_incarnation(self) -> dict[str, list[str]]:
         out: dict[str, list[str]] = {}
-        for key in self.inner.list(GENERATION_PREFIX):
-            gen = generation_of(key)
-            if gen is not None:
-                out.setdefault(gen, []).append(key)
+        for key in self.inner.list(PAGES_PREFIX):
+            inc = incarnation_of(key)
+            if inc is not None:
+                out.setdefault(inc, []).append(key)
         return {g: sorted(v) for g, v in sorted(out.items())}
 
     def foreign_keys(self) -> list[str]:
@@ -224,7 +269,7 @@ def read_state(private) -> dict:
     state = _read_json(private, STATE_KEY)
     if state is None:
         return {"schema_version": STATE_SCHEMA, "committed": None, "in_progress": None, "last_failure": None,
-                "withdrawn": None, "uncertain": None, "blocked": None, "paused": None, "clock": None}
+                "withdrawn": None, "blocked": None, "paused": None, "clock": None}
     if state.get("schema_version") != STATE_SCHEMA:
         raise PublishError(f"{STATE_KEY} has schema {state.get('schema_version')!r}")
     return state
@@ -412,10 +457,10 @@ def page_contract_problems(page) -> list[str]:
     return out
 
 
-def index_contract_problems(index) -> list[str]:
+def index_contract_problems(index, schema: str = BUILDER_INDEX_SCHEMA) -> list[str]:
     """Every index field the panel and the publisher read, with its counts consistent."""
-    if not isinstance(index, dict) or index.get("schema_version") != "news-view-index/v1":
-        return ["index.json is not a news-view-index/v1 document"]
+    if not isinstance(index, dict) or index.get("schema_version") != schema:
+        return [f"index.json is not a {schema} document"]
     out: list[str] = []
     _shape(index, INDEX_SPEC, "index", out)
     if out:
@@ -447,7 +492,7 @@ def _page_key(mode, stream, date, n):
     return page_key(mode, stream, date, n)
 
 
-def _check_views(files: dict[str, bytes], index: dict, key_of, limits, gen: str | None) -> None:
+def _check_views(files: dict[str, bytes], index: dict, key_of, limits, gen: str | None, index_key: str) -> None:
     """Every page the index names: present, renderable, agreeing with its key, entry and page chain."""
     named, seen_views = set(), set()
     for v in index["views"]:
@@ -483,25 +528,25 @@ def _check_views(files: dict[str, bytes], index: dict, key_of, limits, gen: str 
                 raise PublishError(f"{key} disagrees with its key, index entry or page chain: {wrong}")
             if page["view"].get("rows_total") != v.get("rows_total") or page["complete"] != v.get("complete"):
                 raise PublishError(f"{key}: rows_total/complete differ from its index entry")
-    orphans = sorted(set(files) - named - {PUBLIC_INDEX})
+    orphans = sorted(set(files) - named - {index_key})
     if orphans:
         raise PublishError(f"pages the index does not name: {orphans[:5]}")
 
 
-def _load_index(files: dict[str, bytes]) -> dict:
+def _load_index(files: dict[str, bytes], index_key: str, schema: str) -> dict:
     try:
-        index = json.loads(files[PUBLIC_INDEX])
+        index = json.loads(files[index_key])
     except ValueError as exc:
         raise PublishError(f"index.json is not JSON: {exc}") from exc
-    problems = index_contract_problems(index)
+    problems = index_contract_problems(index, schema)
     if problems:
         raise PublishError(f"index.json would not render or publish: {'; '.join(problems[:5])}")
     return index
 
 
-def _check_caps(files: dict[str, bytes], limits) -> None:
+def _check_caps(files: dict[str, bytes], limits, index_key: str) -> None:
     for key, body in files.items():
-        cap = limits.index_bytes if key == PUBLIC_INDEX else limits.page_bytes
+        cap = limits.index_bytes if key == index_key else limits.page_bytes
         if len(body) > cap:
             raise PublishError(f"{key} is {len(body)} bytes, over its {cap}-byte cap")
 
@@ -514,34 +559,39 @@ def validate_generation(files: dict[str, bytes], limits=LIMITS) -> dict:
     renderer (page_contract_problems) and agreeing with its key and its index entry; first/previous/
     next links forming exactly the chain page-0001 .. page-<page_count>; no page the index does not name.
     """
-    if PUBLIC_INDEX not in files:
+    if BUILDER_INDEX not in files:
         raise PublishError("generation has no index.json")
     bad = sorted(k for k in files if not is_builder_view_key(k))
     if bad:
         raise PublishError(f"generation has non-view keys: {bad[:5]}")
-    _check_caps(files, limits)
-    index = _load_index(files)
-    _check_views(files, index, _page_key, limits, None)
+    _check_caps(files, limits, BUILDER_INDEX)
+    index = _load_index(files, BUILDER_INDEX, BUILDER_INDEX_SCHEMA)
+    _check_views(files, index, _page_key, limits, None, BUILDER_INDEX)
     return index
 
 
-def validate_qualified(gen: str, files: dict[str, bytes], limits=LIMITS) -> dict:
-    """A published-form generation: every key under g/<gen>/, every page and link of that generation,
-    index.gen == gen, index.pages_sha256 == the pages' digest, and all of validate_generation's checks."""
-    if not is_gen(gen):
-        raise PublishError(f"{gen!r} is not a generation id")
+def validate_qualified(inc: str, files: dict[str, bytes], limits=LIMITS) -> dict:
+    """A published-form incarnation (views.qualify_generation, before its commit nonce is added): every
+    page key under p/<inc>/, every page and link of that incarnation, a news-view-index/v2 index with
+    state "published", gen == inc, logical_gen == its generation and pages_sha256 == the pages' digest,
+    and all of validate_generation's checks."""
+    parts = split_incarnation(inc)
+    if parts is None:
+        raise PublishError(f"{inc!r} is not a generation incarnation")
     if PUBLIC_INDEX not in files:
         raise PublishError("generation has no index.json")
-    bad = sorted(k for k in files if k != PUBLIC_INDEX and generation_of(k) != gen)
+    bad = sorted(k for k in files if k != PUBLIC_INDEX and incarnation_of(k) != inc)
     if bad:
-        raise PublishError(f"generation {gen} has keys outside news/v1/views/g/{gen}/: {bad[:5]}")
-    _check_caps(files, limits)
-    index = _load_index(files)
-    if index.get("gen") != gen:
-        raise PublishError(f"index.gen {index.get('gen')!r} is not {gen}")
+        raise PublishError(f"incarnation {inc} has keys outside {PAGES_PREFIX}{inc}/: {bad[:5]}")
+    _check_caps(files, limits, PUBLIC_INDEX)
+    index = _load_index(files, PUBLIC_INDEX, PUBLISHED_INDEX_SCHEMA)
+    if index.get("state") != "published":
+        raise PublishError(f"index.state {index.get('state')!r} is not 'published'")
+    if index.get("gen") != inc or index.get("logical_gen") != parts[0]:
+        raise PublishError(f"index.gen {index.get('gen')!r} / logical_gen {index.get('logical_gen')!r} is not {inc}")
     if index.get("pages_sha256") != pages_digest(files):
-        raise PublishError("index.pages_sha256 does not match the generation's pages")
-    _check_views(files, index, lambda m, s, d, n: generation_page_key(gen, m, s, d, n), limits, gen)
+        raise PublishError("index.pages_sha256 does not match the incarnation's pages")
+    _check_views(files, index, lambda m, s, d, n: generation_page_key(inc, m, s, d, n), limits, inc, PUBLIC_INDEX)
     return index
 
 
@@ -557,19 +607,22 @@ def generation_id(files: dict[str, bytes], index: dict | None = None) -> str:
 def page_write_order(files: dict[str, bytes]) -> list[str]:
     """Pages only, in key order. Generation pages are immutable and unreachable until the index names
     them, so the order no longer matters to readers; it is fixed only to keep runs reproducible."""
-    return sorted(k for k in files if k != PUBLIC_INDEX)
+    return sorted(k for k in files if k not in (PUBLIC_INDEX, BUILDER_INDEX))
 
 
 # --- snapshots, receipts, failures --------------------------------------------------
 
 def _snapshot(private, gen_id: str, files: dict[str, bytes], clock) -> None:
+    """Keep the exact *unqualified* build of a generation (G6). Restore re-qualifies it under whichever
+    incarnation is safe to write, so a snapshot must not be tied to one page namespace."""
     prefix = f"{SNAPSHOT_PREFIX}{gen_id}/"
     manifest_key = prefix + "snapshot.json"
     wanted = {k: {"bytes": len(b), "sha256": sha256_hex(b)} for k, b in sorted(files.items())}
     existing = _read_json(private, manifest_key)
     if existing is not None:
         # The id binds every key and byte, so a match is the same generation; anything else is refused.
-        if existing.get("files") != wanted or existing.get("generation_sha256") != generation_digest(files):
+        if (existing.get("schema_version") != SNAPSHOT_SCHEMA or existing.get("files") != wanted
+                or existing.get("generation_sha256") != generation_digest(files)):
             raise PublishError(f"snapshot {gen_id} exists with different content; refusing to reuse it")
         return
     for key, body in sorted(files.items()):
@@ -589,24 +642,25 @@ def snapshot_ids(private) -> list[str]:
 
 
 def load_snapshot(private, gen_id: str) -> dict[str, bytes]:
+    """The unqualified build of gen_id, verified against its manifest and against the id itself."""
     check_key(f"{SNAPSHOT_PREFIX}{gen_id}/snapshot.json")
     meta = _read_json(private, f"{SNAPSHOT_PREFIX}{gen_id}/snapshot.json")
     if meta is None:
         raise PublishError(f"no snapshot {gen_id}; have {snapshot_ids(private)}")
+    if meta.get("schema_version") != SNAPSHOT_SCHEMA:
+        raise PublishError(f"snapshot {gen_id} has schema {meta.get('schema_version')!r}: it holds one page namespace's "
+                           "bytes, not the build, so it cannot be restored into a fresh incarnation")
     files = {}
     for key, info in meta["files"].items():
         body = private.get(f"{SNAPSHOT_PREFIX}{gen_id}/{key}")
         if body is None or len(body) != info["bytes"] or sha256_hex(body) != info["sha256"]:
             raise PublishError(f"snapshot {gen_id}: {key} is missing or altered")
         files[key] = body
-    # The id's hash part is the logical digest of the unqualified build, so it cannot be recomputed from
-    # the published files; the snapshot binds them by generation_sha256 and by the index's own gen.
-    digest = generation_digest(files)
     try:
-        index_gen = json.loads(files[PUBLIC_INDEX]).get("gen")
-    except (KeyError, ValueError, AttributeError):
-        index_gen = None
-    if meta.get("generation_sha256") != digest or index_gen != gen_id:
+        name = generation_name(files)
+    except (KeyError, ValueError, TypeError, AttributeError):
+        name = None
+    if meta.get("generation_sha256") != generation_digest(files) or name != gen_id:
         raise PublishError(f"snapshot {gen_id}: its files do not match the generation id")
     return files
 
@@ -640,8 +694,7 @@ def _record_failure(private, state, stage: str, exc: BaseException, clock) -> No
         pass
 
 
-
-# --- publication: generation lifecycle (G3) ---------------------------------------------------------
+# --- publication: head record, commits and settlement (G6, the accepted G5 design and addendum) ------
 
 @dataclass
 class PublishReport:
@@ -653,14 +706,17 @@ class PublishReport:
     recovered_from: str | None = None
     foreign_keys: list[str] = field(default_factory=list)
     snapshots_pruned: list[str] = field(default_factory=list)
-    retired: dict = field(default_factory=dict)        # gen -> why its pages were deleted (orphan / expired)
+    retired: dict = field(default_factory=dict)        # incarnation -> why its pages were deleted
     public_pages: int = 0
+    incarnation: str | None = None
+    commit: str | None = None
 
     def summary(self) -> dict:
         return {"gen_id": self.gen_id, "action": self.action, "written": len(self.written),
                 "unchanged": self.unchanged, "deleted": len(self.deleted), "recovered_from": self.recovered_from,
                 "foreign_keys": self.foreign_keys, "snapshots_pruned": self.snapshots_pruned,
-                "retired": self.retired, "public_pages": self.public_pages}
+                "retired": self.retired, "public_pages": self.public_pages, "incarnation": self.incarnation,
+                "commit": self.commit}
 
 
 @dataclass(frozen=True)
@@ -681,36 +737,66 @@ class GenerationPolicy:
 
 DEFAULT_POLICY = GenerationPolicy()
 LIFECYCLE_EVENTS = ("published", "restored", "ceased")
+INDEX_KINDS = ("publish", "restore", "reseal")          # commits whose body is an index naming an incarnation
+TOMBSTONE_KINDS = ("genesis", "tombstone")              # commits whose body names no incarnation
+WITHDRAW_ROUNDS = config.GEN_WITHDRAW_TOMBSTONE_ATTEMPTS   # per withdraw call; each has a recorded result
 
 
-def _ledger_key(gen: str) -> str:
-    return f"{LEDGER_PREFIX}{gen}.json"
+def _new_nonce() -> str:
+    """128 bits from the OS random source. One per index write and per head write, never reused."""
+    return secrets.token_hex(16)
 
 
-def read_ledger(private) -> tuple[dict[str, dict], list[str]]:
-    """(gen -> record, problems). Any problem makes history uncertain: callers retain and stop."""
-    records, problems = {}, []
-    for key in private.list(LEDGER_PREFIX):
-        name = key[len(LEDGER_PREFIX):]
-        gen = name[:-5] if name.endswith(".json") else ""
-        if not is_gen(gen):
-            problems.append(f"{key}: not a generation record")
-            continue
-        try:
-            rec = json.loads(private.get(key))
-        except (TypeError, ValueError):
-            problems.append(f"{key}: unreadable")
-            continue
-        if (not isinstance(rec, dict) or rec.get("schema_version") != LEDGER_SCHEMA or rec.get("gen") != gen
-                or not isinstance(rec.get("events"), list) or not isinstance(rec.get("page_set"), dict)):
-            problems.append(f"{key}: wrong schema, gen or shape")
-            continue
-        records[gen] = rec
-    return records, problems
+def _empty_head() -> dict:
+    return {"schema_version": HEAD_SCHEMA, "nonce": None, "seq": 0, "intent": None, "withdrawing": None,
+            "withdrawn": None, "live": None, "incarnations": {}, "commits": {}, "high": {}}
 
 
-def _write_ledger(private, rec: dict) -> None:
-    private.put(_ledger_key(rec["gen"]), encode_json(rec), "application/json")
+def read_head(private) -> tuple[dict, str | None]:
+    """(head, its ETag). An absent head is the empty head with ETag None (its first write is create-only).
+    An unreadable head makes history uncertain: PublishBlocked, nothing written or deleted."""
+    got = private.get_versioned(HEAD_KEY)
+    if got is None:
+        return _empty_head(), None
+    body, etag = got
+    try:
+        head = json.loads(body)
+    except ValueError:
+        head = None
+    ok = (isinstance(head, dict) and head.get("schema_version") == HEAD_SCHEMA
+          and all(isinstance(head.get(k), dict) for k in ("incarnations", "commits", "high"))
+          and isinstance(head.get("seq"), int))
+    if not ok:
+        raise PublishBlocked(f"{HEAD_KEY} is unreadable or has the wrong shape; nothing written or deleted until "
+                             "an operator settles it")
+    return head, etag
+
+
+def _write_head(private, head: dict, etag: str | None, intent: str) -> tuple[dict, str]:
+    """One compare-and-swap of the head, sent once, with a fresh nonce in the body.
+
+    Returns (the committed head, its ETag) only when a read after the write returns exactly these
+    bytes. Otherwise PublishConflict, and the caller takes no public action for this intent:
+      rejected   another actor changed the head first (412);
+      ambiguous  the outcome is unknown and the committed head is not this document. The write may
+                 still land later; the intents here are all safe to find in the head with no actor
+                 behind them (a pin is an orphan, a prepared commit that was never sent stays open
+                 until the index moves on, a retiring mark is finished by the next cleanup).
+    """
+    doc = copy.deepcopy(head)
+    doc["nonce"] = _new_nonce()
+    doc["seq"] = int(head.get("seq") or 0) + 1
+    doc["intent"] = intent
+    body = encode_json(doc)
+    outcome = private.put_if_match(HEAD_KEY, body, etag, content_type="application/json", write_id=doc["nonce"])
+    if outcome.rejected:
+        raise PublishConflict(f"the head was changed by another actor before '{intent}' could be recorded (412); "
+                              "nothing was done for it. Run again: the next run re-reads the head")
+    got = private.get_versioned(HEAD_KEY)
+    if got is None or got[0] != body:
+        raise PublishConflict(f"the head write for '{intent}' was {outcome.status} and the committed head is not "
+                              "that exact document; no public action is taken for it. Run again")
+    return doc, got[1]
 
 
 def _at(reading: dict) -> dict:
@@ -722,47 +808,20 @@ def _at(reading: dict) -> dict:
             "storage_at": iso(stamp["storage"]) if stamp["storage"] is not None else None}
 
 
-def _event(private, rec: dict, kind: str, reading: dict, **extra) -> None:
-    rec["events"].append({"kind": kind, **_at(reading), **extra})
-    _write_ledger(private, rec)
-
-
-def _kinds(rec: dict) -> list[str]:
-    return [e["kind"] for e in rec["events"]]
-
-
-def _epoch(rec: dict) -> dict | None:
-    """The latest published/restored/ceased event. Protection follows the latest epoch, so an old
-    restore is not a permanent exemption: a later cease starts a new retirement."""
-    for e in reversed(rec["events"]):
+def _epoch(entry: dict) -> dict | None:
+    """The latest published/restored/ceased event of an incarnation. Protection follows the latest
+    epoch, so an old restore is not a permanent exemption: a later cease starts a new retirement."""
+    for e in reversed(entry["events"]):
         if e["kind"] in LIFECYCLE_EVENTS:
             return e
     return None
 
 
-def _unsettled_attempt(rec: dict) -> bool:
-    """True while the latest index write attempted for this generation has no later published/restored
-    event. An older lifecycle event (a cease before a failed restore, say) cannot settle a newer attempt."""
-    for e in reversed(rec["events"]):
-        if e["kind"] in ("published", "restored"):
-            return False
-        if e["kind"] == "index_put_attempted":
-            return True
-    return False
-
-
-def _new_record(gen: str, files: dict[str, bytes], logical_sha256: str | None) -> dict:
-    return {"schema_version": LEDGER_SCHEMA, "gen": gen, "logical_sha256": logical_sha256,
-            "pages_sha256": pages_digest(files), "index_sha256": sha256_hex(files[PUBLIC_INDEX]),
-            "generation_sha256": files_digest(files),
-            "page_set": {k: sha256_hex(b) for k, b in sorted(files.items()) if k != PUBLIC_INDEX},
-            "events": []}
-
-
 def _clock_reading(private, clock, state: dict) -> dict:
     """A paired reading: the producer's time and the store's own time for a heartbeat written now.
-    Taken at the start of a run and again after each successful reconciliation that records lifecycle
-    events, so a retirement is stamped after the replacement is confirmed live, never at run start.
+    Taken at the start of a run and again after each full observation that records lifecycle events,
+    so a retirement is stamped after the replacement was seen live, never at run start and never
+    from the time a commit was prepared.
 
     A clock that reads earlier than its recorded high-water mark, or a store that reports no
     modification time, is recorded as refused: no expiry deletion this run (retention only grows)."""
@@ -818,259 +877,540 @@ def _time_passed(event: dict, reading: dict, need_s: float, policy: GenerationPo
     return True, ""
 
 
-def classify(records: dict[str, dict], live_gen: str | None, listed: dict[str, list[str]], reading: dict,
-             policy: GenerationPolicy) -> dict[str, dict]:
-    """gen -> {"class": current|protected|expired|orphan|uncertain|unknown|gone, "why": ...}.
+def _open_commits(head: dict) -> dict[str, dict]:
+    """Prepared commits other than the live one. Each may still land, at any time, while the live
+    ETag is the one it was conditioned on. A commit that can no longer land is removed by _settle."""
+    live = (head.get("live") or {}).get("nonce")
+    return {n: c for n, c in head["commits"].items() if n != live}
 
-    Only orphan and expired pages may be deleted. Unknown (public pages with no ledger record) and
-    uncertain generations are always retained."""
+
+def classify(head: dict, listed: dict[str, list[str]], reading: dict, policy: GenerationPolicy) -> dict[str, dict]:
+    """incarnation -> {"class", "why"} from the head and a listing of public pages.
+
+      current    named by the live index
+      open       a prepared index write naming it may still land: retained
+      protected  ceased, inside the reader grace (or the clocks cannot show it has passed)
+      expired    ceased and past the grace on both clocks: may be retired
+      orphan     pinned, never offered, no open commit: may be retired
+      retiring   a delete has been started in it: never written again; pages are deleted
+      retired    no head entry and n <= the generation's high-water mark: stray pages are deleted
+      uncertain  recorded current but not live (reconciliation ceases these first)
+      unknown    public pages this publisher has no record of: retained
+    Only orphan and expired incarnations are marked retiring; only retiring and retired pages are deleted."""
+    live_inc = (head.get("live") or {}).get("inc")
+    open_incs = {c.get("inc") for c in _open_commits(head).values() if c.get("inc")}
     out = {}
-    for gen in sorted(set(records) | set(listed)):
-        rec = records.get(gen)
-        if rec is None:
-            out[gen] = {"class": "unknown", "why": "public pages with no ledger record: retained"}
+    for inc in sorted(set(head["incarnations"]) | set(listed)):
+        entry = head["incarnations"].get(inc)
+        if entry is None:
+            parts = split_incarnation(inc)
+            if parts is not None and parts[1] <= int(head["high"].get(parts[0], 0)):
+                out[inc] = {"class": "retired", "why": "stray pages in a retired namespace: deleted, never reused"}
+            else:
+                out[inc] = {"class": "unknown", "why": "public pages with no head record: retained"}
             continue
-        if gen == live_gen:
-            out[gen] = {"class": "current", "why": "named by the live index"}
+        if entry["state"] == "retiring":
+            out[inc] = {"class": "retiring", "why": "a delete was started in this namespace: never written again"}
             continue
-        if _unsettled_attempt(rec):
-            # Checked before anything else about this generation: an older ceased epoch, a missing page
-            # set, elapsed time or an operator note cannot settle a newer attempt. Nothing here can
-            # establish that the attempted index write can no longer land.
-            out[gen] = {"class": "uncertain",
-                        "why": "an index write was attempted and never settled: neither the old index, an older "
-                               "lifecycle record nor elapsed time proves it cannot still land; retained, and "
-                               "every index write is blocked, until the live index matches it in full"}
+        if inc == live_inc:
+            out[inc] = {"class": "current", "why": "named by the live index"}
             continue
-        if gen not in listed:
-            out[gen] = {"class": "gone", "why": "no public pages"}
+        if inc in open_incs:
+            out[inc] = {"class": "open", "why": "a prepared index write naming it may still land (it is conditioned "
+                                                "on the live index); retained until the index moves on"}
             continue
-        epoch = _epoch(rec)
-        if epoch is not None and epoch["kind"] == "ceased":
+        epoch = _epoch(entry)
+        if epoch is None:
+            out[inc] = {"class": "orphan", "why": "pinned, never offered to readers, no open index write"}
+            continue
+        if epoch["kind"] == "ceased":
             ok, why = _time_passed(epoch, reading, policy.delete_after_s, policy)
             if ok and not policy.clock_bound_verified:
                 ok, why = False, "clock bound unverified: expiry deletion refused"
-            out[gen] = {"class": "expired" if ok else "protected", "why": why or "past the reader grace"}
+            out[inc] = {"class": "expired" if ok else "protected", "why": why or "past the reader grace"}
             continue
-        if epoch is not None:
-            # Recorded current but not the live index: reconciliation ceases these before classify runs.
-            out[gen] = {"class": "uncertain", "why": f"ledger says {epoch['kind']} but the live index differs"}
-            continue
-        # No lifecycle epoch and no index write ever attempted (an attempt is handled above).
-        out[gen] = {"class": "orphan", "why": "written, never offered to readers (no index write attempted)"}
+        out[inc] = {"class": "uncertain", "why": f"head says {epoch['kind']} but the live index differs"}
     return out
 
 
-def _live_match(public: "PublicViewStore", records: dict[str, dict]) -> tuple[str | None, str | None, bytes | None]:
-    """(gen the live index matches in full, problem, live index bytes). Read-only."""
-    live = public.get(PUBLIC_INDEX)
-    if live is None:
-        return None, None, None
-    live_sha = sha256_hex(live)
-    try:
-        parsed = json.loads(live)
-    except ValueError:
-        return None, "the live index is not JSON", live
-    matches = []
-    for rec in records.values():
-        if rec["index_sha256"] != live_sha:
+def reserved_pages(head: dict, listed: dict[str, list[str]]) -> int:
+    """Page-cap usage: the pages reserved by every incarnation in the head (pinned or retiring, written
+    or not, with or without an open commit) plus public pages that have no head entry. The reservation
+    is part of the head document, so it is taken and released only by a head compare-and-swap."""
+    known = sum(int(e["pages"]) for e in head["incarnations"].values())
+    strays = sum(len(keys) for inc, keys in listed.items() if inc not in head["incarnations"])
+    return known + strays
+
+
+def _commit_key(nonce: str) -> str:
+    return f"{COMMIT_PREFIX}{nonce}.json"
+
+
+def read_commit(private, nonce: str) -> dict | None:
+    rec = _read_json(private, _commit_key(nonce))
+    if rec is None:
+        return None
+    if rec.get("schema_version") != COMMIT_SCHEMA or rec.get("nonce") != nonce or not isinstance(rec.get("page_set"), dict):
+        raise PublishBlocked(f"{_commit_key(nonce)} has the wrong schema, nonce or shape")
+    return rec
+
+
+def _observe(private, public: "PublicViewStore", head: dict) -> dict:
+    """One full, read-only observation of the live index.
+
+    state: absent | foreign | tombstone | published. "problem" is set when the object cannot be
+    matched in full to a commit this publisher prepared: its nonce is unknown, its bytes differ from
+    the prepared ones, or (published) a page of the incarnation it names is missing or altered."""
+    got = public.get_versioned(PUBLIC_INDEX)
+    if got is None:
+        return {"state": "absent", "etag": None, "nonce": None, "body": None, "commit": None, "record": None,
+                "problem": None}
+    body, etag = got
+    nonce = commit_nonce_of(body)
+    base = {"etag": etag, "nonce": nonce, "body": body, "commit": None, "record": None, "problem": None}
+    known = head["commits"].get(nonce) if nonce else None
+    if known is None:
+        return dict(base, state="foreign", problem="the live index carries no commit nonce this publisher prepared "
+                                                   "(a foreign or legacy write)")
+    if sha256_hex(body) != known["body_sha256"]:
+        return dict(base, state="foreign", commit=known,
+                    problem=f"the live index carries commit {nonce} but its bytes differ from the prepared ones")
+    if known["kind"] in TOMBSTONE_KINDS:
+        return dict(base, state="tombstone", commit=known)
+    record = read_commit(private, nonce)
+    if record is None:
+        return dict(base, state="published", commit=known, problem=f"commit record {nonce} is missing")
+    for key, digest in record["page_set"].items():
+        page = public.get(key)
+        if page is None or sha256_hex(page) != digest:
+            return dict(base, state="published", commit=known, record=record,
+                        problem=f"the live index names incarnation {known.get('inc')} but its page {key} is "
+                                "missing or altered")
+    return dict(base, state="published", commit=known, record=record)
+
+
+def _apply_observation(head: dict, obs: dict, stamp: dict) -> bool:
+    """Record in `head` (in place) what one full observation proves. True if anything changed.
+
+    Landed evidence and cessation are separate:
+      - the observed commit has landed; its incarnation becomes current if it was not;
+      - an incarnation ceases only here, because a *different* committed incarnation (or a
+        tombstone) was just observed live in full. `stamp` is a reading taken after that
+        observation. A prepared commit's own time is never used;
+      - a prepared commit whose condition can no longer hold (its expected ETag is not the live
+        one) is closed. If a later commit was conditioned on it, it did land once: its incarnation
+        is recorded as offered and ceased at this observation (longer retention, never shorter).
+    """
+    changed = False
+    nonce, etag = obs["nonce"], obs["etag"]
+    live = head["commits"][nonce]
+    seen = head.get("live") or {}
+    if seen.get("nonce") != nonce or seen.get("etag") != etag:
+        head["live"] = {"nonce": nonce, "etag": etag, "kind": live["kind"], "inc": live.get("inc")}
+        changed = True
+    if not live.get("landed"):
+        live["landed"] = stamp
+        changed = True
+    live_inc = live.get("inc")
+    entry = head["incarnations"].get(live_inc) if live_inc else None
+    if entry is not None:
+        epoch = _epoch(entry)
+        if epoch is None or epoch["kind"] == "ceased":
+            kind = "restored" if (epoch is not None or live["kind"] == "restore") else "published"
+            entry["events"].append({"kind": kind, **stamp, "commit": nonce})
+            changed = True
+    for inc in sorted(head["incarnations"]):
+        if inc == live_inc:
             continue
-        if not isinstance(parsed, dict) or parsed.get("gen") != rec["gen"] or parsed.get("pages_sha256") != rec["pages_sha256"]:
+        other = head["incarnations"][inc]
+        epoch = _epoch(other)
+        if epoch is not None and epoch["kind"] in ("published", "restored"):
+            other["events"].append({"kind": "ceased", **stamp, "observed": nonce})
+            changed = True
+    named = {c["expect"].get("nonce") for c in head["commits"].values()} - {None}
+    for other_nonce in sorted(head["commits"]):
+        if other_nonce == nonce:
             continue
-        if all((body := public.get(k)) is not None and sha256_hex(body) == h for k, h in rec["page_set"].items()):
-            matches.append(rec["gen"])
-    if len(matches) != 1:
-        return None, ("the live index matches no recorded generation in full (index hash, gen, pages_sha256 and "
-                      "every page hash)" if not matches else f"the live index matches several records: {matches}"), live
-    return matches[0], None, live
+        c = head["commits"][other_nonce]
+        if c["expect"].get("etag") == etag:
+            continue            # open: conditioned on the live ETag, it may still land
+        inc = c.get("inc")
+        if other_nonce in named and inc in head["incarnations"] and _epoch(head["incarnations"][inc]) is None:
+            events = head["incarnations"][inc]["events"]
+            events.append({"kind": "published", **stamp, "commit": other_nonce, "evidence": "named by a later commit"})
+            events.append({"kind": "ceased", **stamp, "observed": nonce})
+        del head["commits"][other_nonce]
+        changed = True
+    if live["kind"] == "tombstone" and head.get("withdrawing"):
+        head["withdrawn"] = {"requested": head["withdrawing"], "confirmed": stamp, "tombstone": nonce}
+        head["withdrawing"] = None
+        changed = True
+    if live["kind"] in INDEX_KINDS and head.get("withdrawn"):
+        head["withdrawn"] = None
+        changed = True
+    return changed
 
 
-def _reconcile(private, public, state: dict, records: dict[str, dict], reading: dict, fresh=None) -> dict:
-    """Settle the ledger against the live index before anything is started or deleted.
+def _committed_summary(obs: dict, head: dict, stamp: dict, previous: dict | None) -> dict | None:
+    """state.json's informational copy of what is live (status reads it; no decision depends on it)."""
+    if obs["state"] != "published":
+        return None
+    record, index = obs["record"], json.loads(obs["body"])
+    if previous and previous.get("commit") == obs["nonce"]:
+        return previous
+    return {"gen_id": record["gen"], "incarnation": record["inc"], "commit": obs["nonce"], "action": obs["commit"]["kind"],
+            "build_as_of": index["build_as_of"], "published_at": stamp["producer_at"],
+            "index_sha256": sha256_hex(obs["body"]), "pages": len(record["page_set"]),
+            "views_total": index["views_total"], "complete": index["complete"],
+            "previous_gen_id": (previous or {}).get("gen_id")}
 
-    The generation the live index matches (in full) is current: it gets a published/restored event if
-    its epoch was not already current, and every other generation recorded as current gets a ceased
-    event. Those events are stamped from a reading taken by fresh() AFTER the full index/page match has
-    succeeded, so a displaced generation's retirement never starts before its replacement was seen
-    live (publication, restore and recovery alike). Anything that cannot be matched blocks the run.
-    Returns the reading in force afterwards ("reading")."""
-    gen, problem, live = _live_match(public, records)
-    if problem:
-        return {"live": None, "blocked": problem, "reading": reading}
-    if live is None:
-        if state.get("committed") is not None:
-            return {"live": None, "blocked": "the live index is missing although state records a committed generation",
-                    "reading": reading}
-        return {"live": None, "blocked": None, "reading": reading}
-    rec = records[gen]
-    epoch = _epoch(rec)
-    becomes_current = epoch is None or epoch["kind"] == "ceased"
-    displaced = [o for o in records.values()
-                 if o["gen"] != gen and (_epoch(o) or {}).get("kind") in ("published", "restored")]
-    if fresh is not None and (becomes_current or displaced or (state.get("committed") or {}).get("gen_id") != gen):
-        reading = fresh()          # after the match: never earlier than the moment the index was seen live
-    if becomes_current:
-        action = (state.get("in_progress") or {}).get("action")
-        _event(private, rec, "restored" if (epoch is not None or action == "restore") else "published", reading)
-    for other in displaced:
-        _event(private, other, "ceased", reading)
-    committed = state.get("committed") or {}
-    if committed.get("gen_id") != gen:
-        index = json.loads(live)
-        state["committed"] = {"gen_id": gen, "action": (state.get("in_progress") or {}).get("action", "reconciled"),
-                              "build_as_of": index["build_as_of"], "published_at": _at(reading)["producer_at"],
-                              "index_sha256": rec["index_sha256"], "generation_sha256": rec["generation_sha256"],
-                              "pages": len(rec["page_set"]), "views_total": index["views_total"],
-                              "complete": index["complete"], "previous_gen_id": committed.get("gen_id")}
-    if (state.get("uncertain") or {}).get("gen") == gen:
-        state["uncertain"] = None
-    if (state.get("in_progress") or {}).get("gen_id") == gen:
+
+def _settle(private, public: "PublicViewStore", head: dict, hetag, state: dict, clock, reading: dict):
+    """Observe the live index in full, then record what that proves. (head, hetag, observation, reading).
+
+    An unmatched index blocks the run (nothing written or deleted). When something is recorded, the
+    clock is read again first, so every stamp is later than the observation it comes from."""
+    obs = _observe(private, public, head)
+    if obs["problem"]:
+        state["blocked"] = {"at": iso(reading["producer"]), "why": obs["problem"]}
+        _write_state(private, state)
+        raise PublishBlocked(f"{obs['problem']}; nothing written or deleted until an operator settles it")
+    if obs["state"] == "absent":
+        if head.get("live") is not None:
+            why = "the index key is absent although the head records a live commit (this publisher never deletes it)"
+            state["blocked"] = {"at": iso(reading["producer"]), "why": why}
+            _write_state(private, state)
+            raise PublishBlocked(f"{why}; nothing written or deleted until an operator settles it")
+        return head, hetag, obs, reading
+    probe = copy.deepcopy(head)
+    if _apply_observation(probe, obs, _at(reading)):
+        reading = _clock_reading(private, clock, state)       # after the full match, never before it
+        new = copy.deepcopy(head)
+        _apply_observation(new, obs, _at(reading))
+        head, hetag = _write_head(private, new, hetag, f"observed commit {obs['nonce']} live")
+    state["committed"] = _committed_summary(obs, head, _at(reading), state.get("committed"))
+    if state.get("in_progress") and (state["in_progress"].get("commit") == obs["nonce"]):
         state["in_progress"] = None
-    return {"live": gen, "blocked": None, "reading": reading}
+    state["blocked"] = None
+    _write_state(private, state)
+    return head, hetag, obs, reading
 
 
-def _cleanup(private, public: "PublicViewStore", records: dict[str, dict], live_gen: str | None, reading: dict,
-             policy: GenerationPolicy, report: PublishReport, keep: set) -> dict[str, dict]:
-    """Delete orphan and expired generations' pages (never current, protected, uncertain or unknown).
-    Runs every time, before admission, and needs no new commit."""
-    listed = public.pages_by_gen()
-    classes = classify(records, live_gen, listed, reading, policy)
-    for gen, info in classes.items():
-        if gen in keep or info["class"] not in ("orphan", "expired"):
+def _prepare(private, head: dict, hetag, *, kind: str, inc: str | None, gen: str | None, body: bytes,
+             page_set: dict, obs: dict, reading: dict) -> tuple[dict, str, str]:
+    """Durable intent before the index write: the commit record (create-if-absent), then the commit in
+    the head (one compare-and-swap). Returns (head, hetag, nonce). The index write is sent only after
+    this returns, i.e. only once the committed head is known to hold exactly this commit.
+
+    Refused, on the head document the compare-and-swap replaces:
+      - while a withdrawal is in progress (any commit that names an incarnation);
+      - if the incarnation is not pinned (a cleanup or a withdrawal marked it retiring first);
+      - if the observation the write is conditioned on is not the head's own record of what is live.
+    """
+    nonce = commit_nonce_of(body)
+    if nonce is None or nonce in head["commits"]:
+        raise PublishIntegrityError("an index write needs a fresh commit nonce in its body")
+    if len(body) > LIMITS.index_bytes:
+        raise PublishError(f"index is {len(body)} bytes with its commit nonce, over its {LIMITS.index_bytes}-byte cap")
+    expect = {"etag": obs["etag"], "nonce": obs["nonce"]}
+    new = copy.deepcopy(head)
+    if kind in INDEX_KINDS:
+        if new.get("withdrawing"):
+            raise PublishPaused("a withdrawal is in progress: no index write naming a generation is prepared until "
+                                "its tombstone is confirmed (run publish-withdraw again)")
+        entry = new["incarnations"].get(inc)
+        if entry is None or entry["state"] != "pinned":
+            raise PublishConflict(f"incarnation {inc} is no longer pinned (it was marked retiring); its index write "
+                                  "is not sent. Run again: the build is published under a fresh incarnation")
+        if (new.get("live") or {}).get("etag") != obs["etag"]:
+            raise PublishConflict("the observation this index write is conditioned on is not the head's record of "
+                                  "the live index; nothing sent. Run again")
+    record = {"schema_version": COMMIT_SCHEMA, "nonce": nonce, "kind": kind, "inc": inc, "gen": gen, "expect": expect,
+              "body_sha256": sha256_hex(body), "pages_sha256": files_digest_of_hashes(page_set), "page_set": page_set,
+              "recorded": _at(reading)}
+    data = encode_json(record)
+    if not private.put_if_absent(_commit_key(nonce), data, "application/json") or private.get(_commit_key(nonce)) != data:
+        raise PublishIntegrityError(f"commit record {nonce} could not be written as prepared")
+    new["commits"][nonce] = {"kind": kind, "inc": inc, "expect": expect, "body_sha256": record["body_sha256"],
+                             "prepared": _at(reading), "landed": None}
+    head, hetag = _write_head(private, new, hetag, f"prepare {kind} commit {nonce}")
+    return head, hetag, nonce
+
+
+def files_digest_of_hashes(page_set: dict) -> str:
+    """A digest of a page set (key -> sha256), for the commit record."""
+    return sha256_hex(encode_json({"page_set": dict(sorted(page_set.items()))}))
+
+
+def _drop_commit(private, head: dict, hetag, nonce: str, why: str) -> tuple[dict, str]:
+    """A known rejection: this request did not apply and cannot apply later. Its commit is closed now."""
+    new = copy.deepcopy(head)
+    new["commits"].pop(nonce, None)
+    return _write_head(private, new, hetag, f"commit {nonce} {why}")
+
+
+def _send_index(private, public: "PublicViewStore", head: dict, hetag, state: dict, clock, reading: dict, *,
+                nonce: str, body: bytes, expect_etag, what: str):
+    """The commit point: one conditional index write, sent once, then a full observation.
+
+      applied    observe; the commit must be live. Lifecycle events are recorded from that observation.
+      rejected   known not applied (412): the commit is closed, the index is observed to record
+                 whichever prepared commit is live, and PublishConflict is raised.
+      ambiguous  unknown: the commit stays open in the head. No retry, no timer, no override. It can
+                 land only while the index it was conditioned on is still live; a later run's
+                 observation settles it either way. PublishIntegrityError is raised.
+    """
+    outcome = public.put_if_match(PUBLIC_INDEX, body, expect_etag, "application/json", INDEX_CACHE_CONTROL,
+                                  write_id=nonce)
+    if outcome.rejected:
+        head, hetag = _drop_commit(private, head, hetag, nonce, "rejected (412)")
+        head, hetag, obs, reading = _settle(private, public, head, hetag, state, clock, reading)
+        raise PublishConflict(f"the index write for {what} (commit {nonce}) was rejected (412): the index changed "
+                              f"after it was read; commit {obs['nonce']} is live. Known not applied. Run again")
+    if outcome.ambiguous:
+        raise PublishIntegrityError(f"the index write for {what} (commit {nonce}) has an unknown outcome "
+                                    f"({outcome.detail or 'no answer'}). It stays open: it can land only while the "
+                                    "index it was conditioned on is live. A later run observes and settles it")
+    head, hetag, obs, reading = _settle(private, public, head, hetag, state, clock, reading)
+    if obs["nonce"] != nonce:
+        raise PublishIntegrityError(f"the index write for {what} (commit {nonce}) was applied but commit "
+                                    f"{obs['nonce']} is live; the next run observes again")
+    return head, hetag, obs, reading
+
+
+def _genesis(private, public: "PublicViewStore", head: dict, hetag, state: dict, clock, reading: dict):
+    """Create the index key, once, with an "unpublished" tombstone (If-None-Match: *). Every later
+    write is a compare-and-swap on an existing object, and the key is never deleted, so no create-only
+    request can succeed again. An ambiguous create is re-sent by the next run (the provider's
+    documented reconciliation): while an object exists at most one create can have applied."""
+    nonce = _new_nonce()
+    body = tombstone_index(nonce, "unpublished")
+    absent = {"etag": None, "nonce": None}
+    head, hetag, nonce = _prepare(private, head, hetag, kind="genesis", inc=None, gen=None, body=body, page_set={},
+                                  obs=absent, reading=reading)
+    outcome = public.put_if_match(PUBLIC_INDEX, body, None, "application/json", INDEX_CACHE_CONTROL, write_id=nonce)
+    if outcome.ambiguous:
+        raise PublishIntegrityError(f"creating the index key (commit {nonce}) has an unknown outcome "
+                                    f"({outcome.detail or 'no answer'}); the next run observes, and re-sends the "
+                                    "create only if the key is still absent")
+    if outcome.rejected:
+        head, hetag = _drop_commit(private, head, hetag, nonce, "rejected (412): the key already exists")
+    head, hetag, obs, reading = _settle(private, public, head, hetag, state, clock, reading)
+    if obs["state"] == "absent":
+        raise PublishIntegrityError("the index key is still absent after its create was answered; the next run observes")
+    return head, hetag, obs, reading
+
+
+def _finish_retiring(private, public: "PublicViewStore", head: dict, hetag, report: PublishReport, classes: dict):
+    """Delete the pages of every retiring namespace and every stray in a retired one, then record the
+    retiring namespaces a fresh listing shows empty. The generation's high-water mark stays, so the
+    incarnation id is never issued again; only its page reservation is released."""
+    listed = public.pages_by_incarnation()
+    for inc in sorted(listed):
+        entry = head["incarnations"].get(inc)
+        parts = split_incarnation(inc)
+        retired = entry is None and parts is not None and parts[1] <= int(head["high"].get(parts[0], 0))
+        if not ((entry is not None and entry["state"] == "retiring") or retired):
             continue
-        for key in listed.get(gen, []):
+        for key in listed[inc]:
             public.delete(key)
             report.deleted.append(key)
-        _event(private, records[gen], "pages_deleted", reading, reason=info["class"])
-        report.retired[gen] = info["class"]
-    return classes
+        report.retired[inc] = (classes.get(inc) or {}).get("class", "retiring")
+    after = public.pages_by_incarnation()
+    empty = sorted(i for i, e in head["incarnations"].items() if e["state"] == "retiring" and i not in after)
+    if empty:
+        new = copy.deepcopy(head)
+        for inc in empty:
+            del new["incarnations"][inc]
+        head, hetag = _write_head(private, new, hetag, "retired " + ",".join(empty))
+    return head, hetag
+
+
+def _retire(private, public: "PublicViewStore", head: dict, hetag, reading: dict, policy: GenerationPolicy,
+            report: PublishReport, keep: set):
+    """Cleanup, before admission; needs no new commit. Returns (head, hetag, classes).
+
+    1. Orphan and expired incarnations are marked retiring by one head compare-and-swap. The
+       protections are revalidated on the document that compare-and-swap replaces (no commit names
+       the incarnation, it is not live, it is still pinned), so they are the shared protections in
+       force when the mark commits, not an earlier read. From then the namespace is never written.
+    2. Only then are pages deleted (retiring namespaces and strays in retired ones).
+    3. Namespaces a fresh listing shows empty are recorded retired.
+    """
+    listed = public.pages_by_incarnation()
+    classes = classify(head, listed, reading, policy)
+    targets = sorted(i for i, c in classes.items() if c["class"] in ("orphan", "expired") and i not in keep)
+    if targets:
+        new = copy.deepcopy(head)
+        stamp = _at(reading)
+        protected = {c.get("inc") for c in new["commits"].values()} | {(new.get("live") or {}).get("inc")}
+        for inc in targets:
+            entry = new["incarnations"].get(inc)
+            if entry is None or entry["state"] != "pinned" or inc in protected:
+                raise PublishConflict(f"incarnation {inc} is protected in the current head; it is not retired")
+            entry["state"] = "retiring"
+            entry["events"].append({"kind": "retiring", **stamp, "reason": classes[inc]["class"]})
+        head, hetag = _write_head(private, new, hetag, "retire " + ",".join(targets))
+    head, hetag = _finish_retiring(private, public, head, hetag, report, classes)
+    return head, hetag, classes
+
+
+def _pin(private, head: dict, hetag, gen: str, files: dict[str, bytes], action: str, reading: dict,
+         policy: GenerationPolicy, listed: dict[str, list[str]]):
+    """Admission. Chooses the incarnation, qualifies the build under it, and reserves its pages against
+    the cap in the same head compare-and-swap that pins it. Returns (head, hetag, incarnation, files).
+
+    An incarnation of this generation that is still pinned (no delete was ever started in it) is
+    reused: its pages are immutable and identical. Otherwise the next number after the generation's
+    high-water mark is taken; a retiring or retired incarnation is never reused."""
+    if head.get("withdrawing"):
+        raise PublishPaused("a withdrawal is in progress: nothing is admitted until its tombstone is confirmed "
+                            "(run publish-withdraw again)")
+    pinned = sorted((e["n"], i) for i, e in head["incarnations"].items() if e["gen"] == gen and e["state"] == "pinned")
+    high = int(head["high"].get(gen, 0))
+    n = pinned[-1][0] if pinned else high + 1
+    for _ in range(2):
+        if n > INCARNATION_MAX:
+            raise PublishPaused(f"generation {gen} has used all {INCARNATION_MAX} incarnations")
+        inc, qualified = qualify_generation(files, n)
+        validate_qualified(inc, qualified)
+        entry = head["incarnations"].get(inc)
+        if entry is None or entry["pages_sha256"] == pages_digest(qualified):
+            break
+        n = high + 1            # same id, different bytes: never rewritten; take a fresh incarnation
+    else:
+        raise PublishIntegrityError(f"no incarnation of {gen} can be written consistently")
+    if entry is not None:
+        return head, hetag, inc, qualified
+    pages = len(qualified) - 1
+    used = reserved_pages(head, listed)
+    if used + pages > policy.page_cap:
+        raise PublishPaused(f"publication paused at the page cap: {used} reserved or present + {pages} needed > "
+                            f"{policy.page_cap}; protected pages are never evicted, cleanup continues every run")
+    new = copy.deepcopy(head)
+    new["incarnations"][inc] = {"gen": gen, "n": n, "state": "pinned", "pages": pages,
+                                "pages_sha256": pages_digest(qualified), "logical_sha256": files_digest(files),
+                                "events": [{"kind": "pinned", **_at(reading), "action": action}]}
+    new["high"][gen] = max(high, n)
+    head, hetag = _write_head(private, new, hetag, f"pin {inc} for {action}")
+    return head, hetag, inc, qualified
+
+
+def _abandon(private, head: dict, hetag, inc: str, reading: dict) -> None:
+    """A page of a never-offered incarnation holds other bytes. It is not deleted and rewritten (a
+    delete with an unknown outcome could land on the rewrite): the incarnation is marked retiring and
+    the next run uses a fresh one."""
+    entry = head["incarnations"].get(inc)
+    named = any(c.get("inc") == inc for c in head["commits"].values())
+    if entry is None or entry["state"] != "pinned" or named or _epoch(entry) is not None:
+        return
+    new = copy.deepcopy(head)
+    new["incarnations"][inc]["state"] = "retiring"
+    new["incarnations"][inc]["events"].append({"kind": "retiring", **_at(reading), "reason": "abandoned"})
+    _write_head(private, new, hetag, f"abandon {inc}")
+
+
+def _pause(private, state: dict, reading: dict, why: str) -> None:
+    state["paused"] = {"at": iso(reading["producer"]), "why": why}
+    _write_state(private, state)
 
 
 def _run(private, public: "PublicViewStore", gen: str, files: dict[str, bytes], clock, *, action: str,
-         policy: GenerationPolicy, keep_snapshots: int, snapshot: bool, logical_sha256: str | None,
+         policy: GenerationPolicy, keep_snapshots: int, snapshot: bool,
          lease_holder=None, break_stale_lease=False) -> PublishReport:
-    """Reconcile, clean up, admit, write the generation, commit the index, reconcile again."""
+    """Observe, clean up, pin, write pages, prepare the commit, send the index, observe again.
+    `files` is the unqualified build of generation `gen`."""
     with WriterLease(private, clock, lease_holder, break_stale=break_stale_lease, key=PUBLISH_LEASE_KEY):
         state = read_state(private)
         report = PublishReport(gen, action)
         if state.get("in_progress"):
-            report.recovered_from = state["in_progress"]["gen_id"]
+            report.recovered_from = state["in_progress"].get("incarnation") or state["in_progress"].get("gen_id")
         stage = "clock"
         try:
             reading = _clock_reading(private, clock, state)
             _write_state(private, state)
-            stage = "reconcile"
-            records, ledger_problems = read_ledger(private)
-            if ledger_problems:
-                state["blocked"] = {"at": iso(reading["producer"]), "why": "generation ledger: " + "; ".join(ledger_problems[:5])}
+            stage = "head"
+            try:
+                head, hetag = read_head(private)
+            except PublishBlocked as exc:
+                state["blocked"] = {"at": iso(reading["producer"]), "why": str(exc)}
                 _write_state(private, state)
-                raise PublishBlocked(f"history is uncertain ({state['blocked']['why']}); nothing written or deleted")
-            reread = lambda: _clock_reading(private, clock, state)   # noqa: E731
-            settled = _reconcile(private, public, state, records, reading, reread)
-            reading = settled["reading"]
-            if settled["blocked"]:
-                state["blocked"] = {"at": iso(reading["producer"]), "why": settled["blocked"]}
-                _write_state(private, state)
-                raise PublishBlocked(f"{settled['blocked']}; nothing written or deleted until an operator settles it")
-            state["blocked"] = None
-            _write_state(private, state)
+                raise
+            if head.get("withdrawing"):
+                _pause(private, state, reading, "withdrawal unconfirmed")
+                raise PublishPaused("a withdrawal is in progress and its tombstone is not confirmed: nothing is "
+                                    "published or restored. Run publish-withdraw again")
+            stage = "observe"
+            head, hetag, obs, reading = _settle(private, public, head, hetag, state, clock, reading)
+            if obs["state"] == "absent":
+                stage = "genesis"
+                head, hetag, obs, reading = _genesis(private, public, head, hetag, state, clock, reading)
             stage = "cleanup"
-            classes = _cleanup(private, public, records, settled["live"], reading, policy, report, keep={gen})
-            # No exception for the candidate's own generation: retrying it would be a second index write
-            # while the first is unresolved, and would not establish that the first has finished.
-            uncertain = sorted(g for g, c in classes.items() if c["class"] == "uncertain")
-            if uncertain:
-                state["paused"] = {"at": iso(reading["producer"]), "why": f"uncertain index write for {uncertain}"}
-                _write_state(private, state)
-                raise PublishPaused(f"publication paused: generation(s) {uncertain} are uncertain (an index write was "
-                                    "never settled); another index write, including a retry of the same "
-                                    "generation, could reorder with it. It is settled only when a run finds the "
-                                    "live index matching it in full; elapsed time and retries do not release it")
-            listed = public.pages_by_gen()
+            keep = {i for i, e in head["incarnations"].items() if e["gen"] == gen and e["state"] == "pinned"}
+            head, hetag, _classes = _retire(private, public, head, hetag, reading, policy, report, keep)
+            listed = public.pages_by_incarnation()
             report.public_pages = sum(len(v) for v in listed.values())
-            if settled["live"] == gen:
+            live_inc = (head.get("live") or {}).get("inc")
+            live_entry = head["incarnations"].get(live_inc) if live_inc else None
+            if live_entry is not None and live_entry["gen"] == gen:
                 state["paused"] = None
                 _write_state(private, state)
+                report.incarnation, report.commit = live_inc, head["live"]["nonce"]
                 report.unchanged = len(files)
                 _receipt(private, clock, report, {"note": "already current"})
                 return report
             stage = "admission"
-            present = set(k for keys in listed.values() for k in keys)
-            missing = [k for k in files if k != PUBLIC_INDEX and k not in present]
-            if report.public_pages + len(missing) > policy.page_cap:
-                state["paused"] = {"at": iso(reading["producer"]),
-                                   "why": f"page cap: {report.public_pages} present + {len(missing)} missing > {policy.page_cap}"}
-                _write_state(private, state)
-                raise PublishPaused(f"publication paused at the page cap ({state['paused']['why']}); protected pages "
-                                    "are never evicted, cleanup continues every run")
+            try:
+                head, hetag, inc, qualified = _pin(private, head, hetag, gen, files, action, reading, policy, listed)
+            except PublishPaused as exc:
+                _pause(private, state, reading, str(exc))
+                raise
+            report.incarnation = inc
             state["paused"] = None
-            state["in_progress"] = {"gen_id": gen, "action": action, "started_at": iso(reading["producer"]),
-                                    "keys": len(files)}
+            state["in_progress"] = {"gen_id": gen, "incarnation": inc, "action": action,
+                                    "started_at": iso(reading["producer"]), "keys": len(qualified), "commit": None}
             _write_state(private, state)
-            stage = "ledger"
-            rec = records.get(gen)
-            fresh = _new_record(gen, files, logical_sha256)
-            if rec is None:
-                rec = fresh
-            elif any(rec[k] != fresh[k] for k in ("pages_sha256", "index_sha256", "generation_sha256", "page_set")):
-                raise PublishIntegrityError(f"generation {gen} is recorded with different content; refusing to reuse it")
-            # Never offered to readers: no index write attempted and never current. Only then may a page of
-            # this generation that holds wrong bytes (a failed earlier attempt) be replaced.
-            offered = "index_put_attempted" in _kinds(rec) or _epoch(rec) is not None
-            _event(private, rec, "candidate", reading, action=action)
             if snapshot:
                 stage = "snapshot"
                 _snapshot(private, gen, files, clock)
             stage = "pages"
-            for key in page_write_order(files):
-                body = files[key]
+            for key in page_write_order(qualified):
+                body = qualified[key]
                 created = public.put_if_absent(key, body, "application/json", PAGE_CACHE_CONTROL)
-                if not created and not offered and public.get(key) != body:
-                    public.delete(key)          # our own never-offered leftover: no reader can hold it
-                    report.deleted.append(key)
-                    created = public.put_if_absent(key, body, "application/json", PAGE_CACHE_CONTROL)
                 if public.get(key) != body:
+                    _abandon(private, head, hetag, inc, reading)
                     raise PublishIntegrityError(f"{key} exists with different bytes" if not created
                                                 else f"{key} did not read back as written")
                 if created:
                     report.written.append(key)
                 else:
                     report.unchanged += 1
-            stage = "index"   # the commit point
-            _event(private, rec, "index_put_attempted", reading)
-            failure = None
+            stage = "prepare"   # durable intent, in the head, before the public commit
+            body = commit_index(qualified[PUBLIC_INDEX], _new_nonce())
+            page_set = {k: sha256_hex(b) for k, b in sorted(qualified.items()) if k != PUBLIC_INDEX}
             try:
-                public.put(PUBLIC_INDEX, files[PUBLIC_INDEX], "application/json", INDEX_CACHE_CONTROL)
-                ok = public.get(PUBLIC_INDEX) == files[PUBLIC_INDEX]
-            except Exception as exc:   # outcome unknown: the write may still land
-                ok, failure = False, exc
-            if not ok:
-                state["uncertain"] = {"gen": gen, "since": iso(reading["producer"]),
-                                      "why": f"{type(failure).__name__}: {failure}"[:300] if failure else "index did not read back"}
-                _write_state(private, state)
-                raise PublishIntegrityError(f"index write for {gen} is uncertain; the next run reconciles before "
-                                            "anything else")
+                head, hetag, nonce = _prepare(private, head, hetag, kind=action, inc=inc, gen=gen, body=body,
+                                              page_set=page_set, obs=obs, reading=reading)
+            except PublishPaused as exc:
+                _pause(private, state, reading, str(exc))
+                raise
+            report.commit = nonce
+            state["in_progress"]["commit"] = nonce
+            _write_state(private, state)
+            stage = "index"     # the commit point
+            head, hetag, obs, reading = _send_index(private, public, head, hetag, state, clock, reading, nonce=nonce,
+                                                    body=body, expect_etag=obs["etag"], what=f"{action} of {inc}")
             report.written.append(PUBLIC_INDEX)
-            stage = "settle"
-            records, _ = read_ledger(private)
-            # The reading from the start of the run predates the upload: the displaced generation is
-            # retired from a fresh reading taken inside _reconcile, after the full match succeeds.
-            settled = _reconcile(private, public, state, records, reading, reread)
-            reading = settled["reading"]
-            if settled["live"] != gen:
-                state["uncertain"] = {"gen": gen, "since": iso(reading["producer"]),
-                                      "why": settled["blocked"] or "the live index does not match the candidate"}
-                _write_state(private, state)
-                raise PublishIntegrityError(f"index for {gen} read back but did not reconcile: {state['uncertain']['why']}")
             state["last_failure"] = None
             state["withdrawn"] = None
+            state["in_progress"] = None
             _write_state(private, state)
             stage = "receipt"
-            report.public_pages = sum(len(v) for v in public.pages_by_gen().values())
+            report.public_pages = sum(len(v) for v in public.pages_by_incarnation().values())
             if snapshot:
-                previous = state["committed"].get("previous_gen_id")
+                previous = (state.get("committed") or {}).get("previous_gen_id")
                 report.snapshots_pruned = _prune_snapshots(private, keep_snapshots, {gen, previous} - {None})
-            _receipt(private, clock, report, {"build_as_of": state["committed"]["build_as_of"]})
+            _receipt(private, clock, report, {"build_as_of": (state.get("committed") or {}).get("build_as_of")})
         except (PublishBlocked, PublishPaused):
             raise
         except BaseException as exc:
@@ -1081,36 +1421,81 @@ def _run(private, public: "PublicViewStore", gen: str, files: dict[str, bytes], 
 
 def publish(private, public, files: dict[str, bytes], clock, *, keep_snapshots: int = 3,
             policy: GenerationPolicy = DEFAULT_POLICY, lease_holder=None, break_stale_lease=False) -> PublishReport:
-    """Publish builder output: validate, qualify into an immutable generation, then _run."""
+    """Publish builder output: validate, then _run (which qualifies it under a safe incarnation)."""
     public = public if isinstance(public, PublicViewStore) else PublicViewStore(public)
     assert_separate(private, public)
     if stopped(private) is not None:
         raise PublishStopped(f"publication is stopped ({stopped(private).get('reason', '')}); run `resume` first")
     validate_generation(files)
-    gen, qualified = qualify_generation(files)
-    validate_qualified(gen, qualified)
-    return _run(private, public, gen, qualified, clock, action="publish", policy=policy,
-                keep_snapshots=keep_snapshots, snapshot=True, logical_sha256=files_digest(files),
-                lease_holder=lease_holder, break_stale_lease=break_stale_lease)
+    return _run(private, public, generation_name(files), files, clock, action="publish", policy=policy,
+                keep_snapshots=keep_snapshots, snapshot=True, lease_holder=lease_holder,
+                break_stale_lease=break_stale_lease)
 
 
 def restore(private, public, gen_id: str, clock, *, policy: GenerationPolicy = DEFAULT_POLICY,
             lease_holder=None, break_stale_lease=False) -> PublishReport:
-    """Republish a retained snapshot byte-for-byte. Requires the stop marker. Counts missing pages
-    against the cap like a publication; the displaced generation's retirement starts now."""
+    """Republish a retained generation from its snapshot. Requires the stop marker.
+
+    If an incarnation of it is still pinned (no delete ever started in it), its pages are reused and
+    only a new index, with a fresh nonce, is written. Otherwise the build is re-qualified from the
+    snapshot under a fresh incarnation. With no usable snapshot the restore is refused (the pause
+    stays): a retiring or retired namespace is never written again. Counts against the page cap like
+    a publication; the displaced generation's retirement starts when the restore is observed live."""
     public = public if isinstance(public, PublicViewStore) else PublicViewStore(public)
     assert_separate(private, public)
     if stopped(private) is None:
         raise PublishError("restore requires `stop` first, so the next cycle does not republish over it")
+    if not is_gen(gen_id):
+        raise PublishError(f"{gen_id!r} is not a generation id")
     files = load_snapshot(private, gen_id)
-    validate_qualified(gen_id, files)
+    validate_generation(files)
     return _run(private, public, gen_id, files, clock, action="restore", policy=policy, keep_snapshots=0,
-                snapshot=False, logical_sha256=None, lease_holder=lease_holder, break_stale_lease=break_stale_lease)
+                snapshot=False, lease_holder=lease_holder, break_stale_lease=break_stale_lease)
+
+
+def reseal(private, public, clock, *, lease_holder=None, break_stale_lease=False) -> dict:
+    """Rewrite the live generation's index with a fresh nonce (same incarnation, same pages). Readers
+    see no change. Once it lands, every prepared index write conditioned on the previous index is
+    known dead: this is the operator's way to close open commits (an unwanted restore, say)."""
+    public = public if isinstance(public, PublicViewStore) else PublicViewStore(public)
+    assert_separate(private, public)
+    with WriterLease(private, clock, lease_holder, break_stale=break_stale_lease, key=PUBLISH_LEASE_KEY):
+        state = read_state(private)
+        reading = _clock_reading(private, clock, state)
+        _write_state(private, state)
+        head, hetag = read_head(private)
+        if head.get("withdrawing"):
+            raise PublishPaused("a withdrawal is in progress: run publish-withdraw again, not reseal")
+        head, hetag, obs, reading = _settle(private, public, head, hetag, state, clock, reading)
+        if obs["state"] != "published":
+            raise PublishError("nothing is published, so there is no index to reseal")
+        record, inc = obs["record"], obs["commit"]["inc"]
+        closes = sorted(_open_commits(head))
+        body = commit_index(obs["body"], _new_nonce())
+        head, hetag, nonce = _prepare(private, head, hetag, kind="reseal", inc=inc, gen=record["gen"], body=body,
+                                      page_set=record["page_set"], obs=obs, reading=reading)
+        head, hetag, obs, reading = _send_index(private, public, head, hetag, state, clock, reading, nonce=nonce,
+                                                body=body, expect_etag=obs["etag"], what=f"reseal of {inc}")
+        report = PublishReport(record["gen"], "reseal", written=[PUBLIC_INDEX], incarnation=inc, commit=nonce)
+        _receipt(private, clock, report, {"closed_commits": closes})
+        return {"resealed": inc, "commit": nonce, "closed_commits": closes, "open_commits": sorted(_open_commits(head))}
 
 
 def withdraw(private, public, clock, *, lease_holder=None, break_stale_lease=False) -> dict:
-    """Explicit withdrawal: delete the origin index, then every generation's pages, at once (no grace).
-    Cached copies and downloads made before this cannot be recalled."""
+    """Explicit withdrawal: immediate, no grace. Cached copies and downloads cannot be recalled.
+
+    1. The head records `withdrawing` and marks every incarnation retiring (durable intent, one
+       compare-and-swap, before any public action). From then nothing is admitted or prepared.
+    2. A tombstone is written over the index by compare-and-swap. The key is never deleted. A 412
+       means a prepared commit landed first: the index is read again and the next tombstone is
+       conditioned on it (at most WITHDRAW_ROUNDS attempts, each with a recorded result).
+    3. Every public page is deleted at once, whatever the tombstone's outcome.
+    4. The withdrawal is confirmed only when a tombstone is read back live. Until then the result and
+       `publish-status` say withdrawal_unconfirmed, and the public index may be the old index or an
+       index from a commit prepared earlier that lands late; either names pages that no longer
+       exist (readers see "refresh required"). That interval has no time bound: it ends when a
+       tombstone is confirmed. Run withdraw again to send another tombstone.
+    """
     public = public if isinstance(public, PublicViewStore) else PublicViewStore(public)
     assert_separate(private, public)
     if stopped(private) is None:
@@ -1118,36 +1503,70 @@ def withdraw(private, public, clock, *, lease_holder=None, break_stale_lease=Fal
     with WriterLease(private, clock, lease_holder, break_stale=break_stale_lease, key=PUBLISH_LEASE_KEY):
         state = read_state(private)
         reading = _clock_reading(private, clock, state)
-        records, _problems = read_ledger(private)   # withdrawal deletes everything public regardless
+        _write_state(private, state)
+        head, hetag = read_head(private)
+        stamp = _at(reading)
+        gen = (state.get("committed") or {}).get("gen_id")
+        new = copy.deepcopy(head)
+        if not new.get("withdrawing"):
+            new["withdrawing"] = dict(stamp)
+        new["withdrawn"] = None
+        for entry in new["incarnations"].values():
+            if entry["state"] != "retiring":
+                entry["state"] = "retiring"
+                entry["events"].append({"kind": "retiring", **stamp, "reason": "withdrawn"})
+        head, hetag = _write_head(private, new, hetag, "withdraw")
+
+        def live_tombstone():
+            got = public.get_versioned(PUBLIC_INDEX)
+            nonce = commit_nonce_of(got[0]) if got else None
+            mine = nonce is not None and (head["commits"].get(nonce) or {}).get("kind") == "tombstone"
+            return got, nonce, mine
+
+        rounds = []
+        for _ in range(WITHDRAW_ROUNDS):
+            got, live_nonce, confirmed = live_tombstone()
+            if confirmed:
+                break
+            body = tombstone_index(_new_nonce(), "withdrawn")
+            seen = {"etag": got[1] if got else None, "nonce": live_nonce}
+            head, hetag, nonce = _prepare(private, head, hetag, kind="tombstone", inc=None, gen=None, body=body,
+                                          page_set={}, obs=seen, reading=reading)
+            outcome = public.put_if_match(PUBLIC_INDEX, body, seen["etag"], "application/json", INDEX_CACHE_CONTROL,
+                                          write_id=nonce)
+            rounds.append(outcome.status)
+            if outcome.rejected:
+                head, hetag = _drop_commit(private, head, hetag, nonce, "rejected (412)")
+            elif outcome.ambiguous:
+                break               # unknown: it stays open; no blind resend in this call
         deleted = []
-        if public.get(PUBLIC_INDEX) is not None:
-            public.delete(PUBLIC_INDEX)
-            deleted.append(PUBLIC_INDEX)
-        for gen, keys in sorted(public.pages_by_gen().items()):
+        for inc, keys in sorted(public.pages_by_incarnation().items()):
             for key in keys:
                 public.delete(key)
                 deleted.append(key)
-            rec = records.get(gen)
-            if rec is not None:
-                if (_epoch(rec) or {}).get("kind") in ("published", "restored"):
-                    _event(private, rec, "ceased", reading, reason="withdrawn")
-                _event(private, rec, "pages_deleted", reading, reason="withdrawn")
-        gen = (state.get("committed") or {}).get("gen_id")
-        state["withdrawn"] = {"at": iso(clock()), "gen_id": gen, "deleted": len(deleted)}
+        _got, _nonce, confirmed = live_tombstone()
+        if confirmed:
+            # The tombstone is observed live: record it (cessation stamped after this observation).
+            head, hetag, _obs, reading = _settle(private, public, head, hetag, state, clock, reading)
+        report = PublishReport(gen or "none", "withdraw", deleted=deleted)
+        head, hetag = _finish_retiring(private, public, head, hetag, report, {})
+        state["withdrawn"] = {"at": iso(clock()), "gen_id": gen, "deleted": len(deleted), "confirmed": confirmed}
         state["committed"] = None
         state["in_progress"] = None
         _write_state(private, state)
-        report = PublishReport(gen or "none", "withdraw", deleted=deleted)
-        _receipt(private, clock, report, {"note": WITHDRAW_NOTE})
+        _receipt(private, clock, report, {"note": WITHDRAW_NOTE, "withdrawal_unconfirmed": not confirmed,
+                                          "tombstone_attempts": rounds})
         return {"withdrawn_gen_id": gen, "deleted": len(deleted), "snapshots_kept": snapshot_ids(private),
-                "uncertain": state.get("uncertain"), "note": WITHDRAW_NOTE}
+                "withdrawal_unconfirmed": not confirmed, "tombstone_attempts": rounds,
+                "open_commits": sorted(_open_commits(head)), "note": WITHDRAW_NOTE if confirmed else UNCONFIRMED_NOTE}
 
 
 # --- operating status -------------------------------------------------------------
 
 def status(private, public, clock, *, interval_s: int = config.INTERVAL_S,
            budget_s: int = config.CYCLE_BUDGET_S, policy: GenerationPolicy = DEFAULT_POLICY) -> dict:
-    """What an operator checks. Read-only: no heartbeat, so expiry is shown on the producer clock only."""
+    """What an operator checks. Read-only: no heartbeat and no head write, so expiry is shown on the
+    producer clock only and nothing an observation proves is recorded here."""
     public = public if isinstance(public, PublicViewStore) else PublicViewStore(public)
     state = read_state(private)
     now = clock()
@@ -1156,8 +1575,12 @@ def status(private, public, clock, *, interval_s: int = config.INTERVAL_S,
     if committed:
         age = (now - parse_iso(committed["published_at"])).total_seconds()
     stale_after = 2 * interval_s + budget_s
-    live_index = public.get(PUBLIC_INDEX)
     problems = []
+    try:
+        head, _etag = read_head(private)
+    except PublishBlocked:
+        head = _empty_head()
+        problems.append("head_unreadable")
     if state.get("last_failure"):
         problems.append("last_publication_failed")
     if state.get("in_progress"):
@@ -1166,38 +1589,42 @@ def status(private, public, clock, *, interval_s: int = config.INTERVAL_S,
         problems.append("publication_blocked")
     if state.get("paused"):
         problems.append("publication_paused")
-    if state.get("uncertain"):
-        problems.append("uncertain_index_write")
+    open_commits = _open_commits(head)
+    if open_commits:
+        problems.append("open_index_commits")
+    if head.get("withdrawing"):
+        problems.append("withdrawal_unconfirmed")
+    try:
+        obs = _observe(private, public, head)
+    except PublishBlocked as exc:
+        obs = {"state": "foreign", "nonce": None, "commit": None, "problem": str(exc)}
+    if obs["problem"]:
+        problems.append("live_index_unmatched")
     if committed and age is not None and age > stale_after and not stopped(private):
         problems.append("published_views_stale")
-    if committed and (live_index is None or sha256_hex(live_index) != committed["index_sha256"]):
+    if committed and obs.get("nonce") != committed.get("commit"):
         problems.append("public_index_differs_from_state")
-    if committed is None and not state.get("withdrawn") and not stopped(private):
+    if head.get("live") is None and not head.get("withdrawn") and not head.get("withdrawing") and not stopped(private):
         problems.append("never_published")
-    records, ledger_problems = read_ledger(private)
-    if ledger_problems:
-        problems.append("ledger_unreadable")
-    live_gen, live_problem, _ = _live_match(public, records)
-    listed = public.pages_by_gen()
+    listed = public.pages_by_incarnation()
     reading = {"producer": now, "storage": None, "refused": ["status is read-only (no store time)"]}
-    classes = classify(records, live_gen, listed, reading, policy)
-    generations = {}
+    classes = classify(head, listed, reading, policy)
+    incarnations = {}
     waiting_on_clock_bound = False
-    for gen, info in classes.items():
-        entry = dict(info, pages=len(listed.get(gen, [])))
-        epoch = _epoch(records[gen]) if gen in records else None
-        if epoch is not None and epoch["kind"] == "ceased" and gen in listed:
+    for inc, info in classes.items():
+        entry = head["incarnations"].get(inc)
+        item = dict(info, pages=len(listed.get(inc, [])), reserved=int(entry["pages"]) if entry else 0)
+        epoch = _epoch(entry) if entry else None
+        if epoch is not None and epoch["kind"] == "ceased" and inc in listed:
             earliest = parse_iso(epoch["producer_at"]) + timedelta(seconds=policy.delete_after_s)
-            entry["earliest_deletion_producer_clock"] = iso(earliest)
+            item["earliest_deletion_producer_clock"] = iso(earliest)
             if now >= earliest and not policy.clock_bound_verified:
                 waiting_on_clock_bound = True
-        generations[gen] = entry
+        incarnations[inc] = item
     if waiting_on_clock_bound:
         problems.append("expiry_blocked_clock_bound_unverified")
     if any(c["class"] == "unknown" for c in classes.values()):
         problems.append("unknown_public_generations")
-    if live_problem:
-        problems.append("live_index_unmatched")
     leases = {}
     for name, key in (("writer", LEASE_KEY), ("publish", PUBLISH_LEASE_KEY)):
         lease = _read_json(private, key)
@@ -1211,13 +1638,19 @@ def status(private, public, clock, *, interval_s: int = config.INTERVAL_S,
             # Left behind by a process that did not exit cleanly. Never taken over automatically: the
             # operator confirms no writer or publisher runs, then passes --break-stale-lease.
             problems.append(f"stale_{name}_lease")
+    live = head.get("live") or {}
     public_pages = sum(len(v) for v in listed.values())
     return {"now": iso(now), "stopped": stopped(private), "committed": committed, "leases": leases,
             "published_age_s": age, "stale_after_s": stale_after, "in_progress": state.get("in_progress"),
-            "last_failure": state.get("last_failure"), "withdrawn": state.get("withdrawn"),
-            "blocked": state.get("blocked"), "paused": state.get("paused"), "uncertain": state.get("uncertain"),
-            "clock": state.get("clock"), "live_generation": live_gen, "generations": generations,
-            "public_pages": public_pages, "page_cap": policy.page_cap,
+            "last_failure": state.get("last_failure"), "withdrawn": head.get("withdrawn") or state.get("withdrawn"),
+            "withdrawing": head.get("withdrawing"), "withdrawal_unconfirmed": bool(head.get("withdrawing")),
+            "blocked": state.get("blocked"), "paused": state.get("paused"),
+            "clock": state.get("clock"), "head_seq": head.get("seq"), "live_index": obs["state"],
+            "live_commit": obs.get("nonce"), "live_generation": live.get("inc"),
+            "open_commits": {n: {"kind": c["kind"], "inc": c.get("inc"), "prepared": c.get("prepared")}
+                             for n, c in sorted(open_commits.items())},
+            "generations": incarnations, "public_pages": public_pages,
+            "reserved_pages": reserved_pages(head, listed), "page_cap": policy.page_cap,
             "policy": {"reader_grace_s": policy.reader_grace_s, "delete_after_s": policy.delete_after_s,
                        "clock_bound_verified": policy.clock_bound_verified},
             "snapshots": snapshot_ids(private), "public_foreign_keys": public.foreign_keys(),
@@ -1338,7 +1771,8 @@ def pilot_cycle(private, public, spool, fetch, clock, cfg: PilotConfig, *, commi
 
 
 __all__ = ["DEFAULT_POLICY", "GenerationPolicy", "MODES", "STREAM_KEYS", "PublicViewStore", "PublishBlocked",
-           "PublishError", "PublishIntegrityError", "PublishPaused", "PublishStopped", "assert_separate", "classify",
-           "generation_of", "is_builder_view_key", "is_public_view_key", "load_pilot_config", "pilot_cycle",
-           "policy_from", "publish", "read_ledger", "read_state", "restore", "resume", "status", "stop",
-           "unavailable_prices", "validate_generation", "validate_qualified", "withdraw"]
+           "PublishConflict", "PublishError", "PublishIntegrityError", "PublishPaused", "PublishStopped",
+           "assert_separate", "classify", "incarnation_of", "is_builder_view_key", "is_public_view_key",
+           "load_pilot_config", "pilot_cycle", "policy_from", "publish", "read_commit", "read_head", "read_state",
+           "reseal", "reserved_pages", "restore", "resume", "status", "stop", "unavailable_prices",
+           "validate_generation", "validate_qualified", "withdraw"]

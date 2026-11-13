@@ -1,7 +1,8 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-// G3: News pages are generation-qualified (news/v1/views/g/<gen>/...). NOT RUN when G3 was written.
+// G3/G6: News pages are qualified by an incarnation (news/v2/views/p/<gen>.<n>/...); the index is
+// news/v2/views/index.json and legacy news/v1/views keys are refused. NOT RUN when written or ported.
 const GEN = '20261109T100500Z-0123456789abcdef';
 const KEYS = [
   'intraday/latest.json', 'intraday/spy/latest.json', 'intraday/ibit/latest.json', 'intraday/prices.json',
@@ -13,10 +14,10 @@ const KEYS = [
   'squeeze-scanner/v1/scheduled/latest-attempt.json',
   'squeeze-scanner/v1/scheduled/latest-schedule.json',
   // MediaFlow news views (G3): the fixed index and generation/mode/stream/date/page keys.
-  'news/v1/views/index.json',
-  `news/v1/views/g/${GEN}/collector/all/2026-11-09/page-0001.json`,
-  `news/v1/views/g/${GEN}/archive/oil/2026-11-09/page-0002.json`,
-  `news/v1/views/g/${GEN}/publication/ai_buildout/2024-02-29/page-0020.json`,
+  'news/v2/views/index.json',
+  `news/v2/views/p/${GEN}.1/collector/all/2026-11-09/page-0001.json`,
+  `news/v2/views/p/${GEN}.1/archive/oil/2026-11-09/page-0002.json`,
+  `news/v2/views/p/${GEN}.1/publication/ai_buildout/2024-02-29/page-0020.json`,
 ];
 // The panel applies the same key rule before every request (both bases); the two must agree.
 const newsPanel = require('../site/js/news-panel.js');
@@ -29,21 +30,25 @@ const NEWS_REJECTED = [
   'news/v1/views/Collector/oil/2026-11-09/page-0001.json', 'news/v1/views/collector/oil/20261109/page-0001.json',
   'news/v1/views/collector/oil/2026-11-09/page-0001.json/', 'news/v1/views/collector/oil/2026-11-09/page-0001.json.bak',
   'news/v1/views/collector/oil/2026-11-09/', 'news/v1/views/collector/oil/2026-11-09/index.json',
-  'news/v1/views/', 'news/v1/views/index.json/', 'news/v1/views//index.json', 'news/v1/views/%69ndex.json',
+  'news/v1/views/', 'news/v1/views/index.json', 'news/v1/views/index.json/',
+  `news/v1/views/${'g'}/${GEN}/collector/all/2026-11-09/page-0001.json`,   // legacy published page
+  'news/v2/views/', 'news/v2/views/index.json/', 'news/v2/views/index.json.bak',
+  `news/v2/views/p/${GEN}/collector/all/2026-11-09/page-0001.json`, `news/v2/views/p/${GEN}.0/collector/all/2026-11-09/page-0001.json`,
+  `news/v2/views/p/${GEN}.01/collector/all/2026-11-09/page-0001.json`, `news/v2/views/p/${GEN}.10000/collector/all/2026-11-09/page-0001.json`, 'news/v1/views//index.json', 'news/v1/views/%69ndex.json',
   'news/v1/views/index.json%00', 'news/v1/views/collector/oil/2026-11-09/..%2f..%2f..%2findex.json',
   'news/v1/views/collector/%6fil/2026-11-09/page-0001.json', 'news%2fv1%2fviews%2findex.json',
   'news/v1/index.json', 'news/oil/v1/latest.json', 'news/v1/raw/observations.jsonl', 'news/', 'news',
   'news/v2/views/index.json', 'NEWS/v1/views/index.json',
   // G3: unqualified pages are no longer public, and the generation segment is exact.
   'news/v1/views/collector/all/2026-11-09/page-0001.json',
-  `news/v1/views/g/${GEN.toUpperCase()}/collector/all/2026-11-09/page-0001.json`,
-  'news/v1/views/g/20261109T100500Z-0123456789abcde/collector/all/2026-11-09/page-0001.json',
-  'news/v1/views/g/20261109T100500Z-0123456789abcdef0/collector/all/2026-11-09/page-0001.json',
-  'news/v1/views/g/20261309T100500Z-0123456789abcdef/collector/all/2026-11-09/page-0001.json',
-  'news/v1/views/g/20261109T250000Z-0123456789abcdef/collector/all/2026-11-09/page-0001.json',
-  'news/v1/views/g/20261109T100500-0123456789abcdef/collector/all/2026-11-09/page-0001.json',
-  `news/v1/views/g/${GEN}/collector/all/2026-11-09/`, `news/v1/views/g/${GEN}/index.json`, `news/v1/views/g/${GEN}/`,
-  `news/v1/views/g/${GEN}/collector/all/2026-11-09/%2e%2e/page-0001.json`,
+  `news/v2/views/p/${GEN.toUpperCase()}.1/collector/all/2026-11-09/page-0001.json`,
+  'news/v2/views/p/20261109T100500Z-0123456789abcde.1/collector/all/2026-11-09/page-0001.json',
+  'news/v2/views/p/20261109T100500Z-0123456789abcdef0.1/collector/all/2026-11-09/page-0001.json',
+  'news/v2/views/p/20261309T100500Z-0123456789abcdef.1/collector/all/2026-11-09/page-0001.json',
+  'news/v2/views/p/20261109T250000Z-0123456789abcdef.1/collector/all/2026-11-09/page-0001.json',
+  'news/v2/views/p/20261109T100500-0123456789abcdef.1/collector/all/2026-11-09/page-0001.json',
+  `news/v2/views/p/${GEN}.1/collector/all/2026-11-09/`, `news/v2/views/p/${GEN}.1/index.json`, `news/v2/views/p/${GEN}.1/`,
+  `news/v2/views/p/${GEN}.1/collector/all/2026-11-09/%2e%2e/page-0001.json`,
 ];
 const ORIGIN = 'https://pub-4d5c916b8cb74ffb8c0abd7dfadb02cf.r2.dev';
 const APP = 'https://live-options-view.otmooper12.workers.dev';
@@ -155,10 +160,10 @@ const APP = 'https://live-options-view.otmooper12.workers.dev';
     status = 200;
     const dates = ['2026-11-09', '2024-02-29', '2026-02-30', '2026-13-01'];
     const pages = [0, 1, 2, 19, 20, 21].map(n => 'page-' + String(n).padStart(4, '0') + '.json');
-    const keys = [...NEWS_REJECTED, 'news/v1/views/index.json'];
+    const keys = [...NEWS_REJECTED, 'news/v2/views/index.json'];
     for (const mode of [...newsPanel.MODES, 'other']) {
       for (const stream of [...newsPanel.STREAMS, 'other']) {
-        for (const date of dates) for (const page of pages) keys.push(`news/v1/views/g/${GEN}/${mode}/${stream}/${date}/${page}`);
+        for (const date of dates) for (const page of pages) keys.push(`news/v2/views/p/${GEN}.1/${mode}/${stream}/${date}/${page}`);
       }
     }
     let accepted = 0;

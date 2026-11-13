@@ -59,7 +59,7 @@ function render(page, opts) {
 const tests = [];
 function test(name, fn) { tests.push([name, fn]); }
 
-const index = load('news/v1/views/index.json');
+const index = load('news/v2/views/index.json');
 const pageKeys = index.views.map(v => v.first_page);
 const pages = Object.fromEntries(pageKeys.map(k => [k, load(k)]));
 const oil = pages[q('news/v1/views/collector/oil/2026-11-09/page-0001.json')];
@@ -249,9 +249,10 @@ test('an index cut before its first entry still shows INCOMPLETE with its omissi
     { cwd: path.join(__dirname, '..') });
   const truncated = JSON.parse(body.toString('utf8'));
   assert.deepEqual([truncated.views.length, truncated.views_omitted, truncated.views_total, truncated.complete], [0, 9, 9, false]);
-  Object.assign(truncated, { gen: Q.gen, pages_sha256: '0'.repeat(64) });   // the published form names its generation
+  Object.assign(truncated, { schema_version: 'news-view-index/v2', state: 'published', gen: Q.gen, logical_gen: Q.logicalGen,
+    commit: { nonce: '0'.repeat(32) }, pages_sha256: '0'.repeat(64) });   // the published form names its generation
   const root = new Node('div');
-  await panel.mount(doc, root, () => Promise.resolve(truncated), 'news/v1/views/index.json');
+  await panel.mount(doc, root, () => Promise.resolve(truncated), 'news/v2/views/index.json');
   const [banner] = root.byClass('np-incomplete');
   assert.ok(banner, 'banner present');
   assert.equal(banner.getAttribute('role'), 'alert');
@@ -260,7 +261,7 @@ test('an index cut before its first entry still shows INCOMPLETE with its omissi
   assert.ok(!root.textContent.includes('No views in this index'));
   const complete = new Node('div');
   await panel.mount(doc, complete, () => Promise.resolve(Object.assign({}, truncated, { complete: true, views_omitted: 0,
-    views_total: 0, overflow_reasons: [] })), 'news/v1/views/index.json');
+    views_total: 0, overflow_reasons: [] })), 'news/v2/views/index.json');
   assert.equal(complete.byClass('np-incomplete').length, 0);
   assert.ok(complete.textContent.includes('No views in this index'));
 });
@@ -273,7 +274,7 @@ test('the latest view choice wins when responses arrive in reverse order', async
     ? Promise.resolve(load(key))
     : new Promise((resolve, reject) => { pending[key] = { resolve: () => resolve(load(key)), reject }; });
   const root = new Node('div');
-  await panel.mount(doc, root, fetchJson, 'news/v1/views/index.json');
+  await panel.mount(doc, root, fetchJson, 'news/v2/views/index.json');
   const pick = key => { const [picker] = root.byTag('select'); picker.value = key; picker.fire('change'); };
   pick(COLL);
   pick(PUB);
@@ -304,7 +305,7 @@ test('mount loads the index, renders the first view and switches views', async (
   const root = new Node('div');
   const fetched = [];
   const fetchJson = key => { fetched.push(key); return Promise.resolve(load(key)); };
-  await panel.mount(doc, root, fetchJson, 'news/v1/views/index.json');
+  await panel.mount(doc, root, fetchJson, 'news/v2/views/index.json');
   assert.equal(root.getAttribute('data-page'), index.views[0].first_page);
   const [picker] = root.byTag('select');
   picker.value = q('news/v1/views/publication/all/2026-11-09/page-0001.json');
@@ -312,14 +313,14 @@ test('mount loads the index, renders the first view and switches views', async (
   await new Promise(r => setImmediate(r));
   assert.equal(root.getAttribute('data-page'), picker.value);
   assert.ok(root.textContent.includes('RETROSPECTIVE'));
-  assert.deepEqual(fetched.slice(0, 2), ['news/v1/views/index.json', index.views[0].first_page]);
+  assert.deepEqual(fetched.slice(0, 2), ['news/v2/views/index.json', index.views[0].first_page]);
   const failed = new Node('div');
-  await panel.mount(doc, failed, () => Promise.resolve({ schema_version: 'x' }), 'news/v1/views/index.json');
+  await panel.mount(doc, failed, () => Promise.resolve({ schema_version: 'x' }), 'news/v2/views/index.json');
   assert.ok(failed.textContent.includes('Could not load news views'));
 });
 
 // --- M4b: view keys, the checked fetcher, and the site wiring ---------------------
-const INDEX_KEY = 'news/v1/views/index.json';
+const INDEX_KEY = 'news/v2/views/index.json';
 const BAD_KEYS = [
   'news/v1/views/collector/oil/2026-02-30/page-0001.json',   // not a calendar date
   'news/v1/views/collector/oil/2026-13-01/page-0001.json',
@@ -337,14 +338,18 @@ const BAD_KEYS = [
   'https://example.com/news/v1/views/index.json', '//example.com/x', '../../../secret', '',
   'news/v1/views/collector/oil/2026-11-09/page-0001.json\n', 'news/v1/views/collector/oil/２０２６-11-09/page-0001.json',
   null, undefined, 7, {},
-  // G3: unqualified pages are builder output, never published; the generation segment is exact.
+  // G3/G6: unqualified pages are builder output, never published; the incarnation segment is exact;
+  // legacy news/v1 published keys are refused.
+  'news/v1/views/index.json',
+  'news/v2/views/p/20261109T100500Z-0123456789abcdef/collector/oil/2026-11-09/page-0001.json',
+  'news/v2/views/p/20261109T100500Z-0123456789abcdef.0/collector/oil/2026-11-09/page-0001.json',
   'news/v1/views/collector/oil/2026-11-09/page-0001.json',
-  'news/v1/views/g/20261109T100500Z-0123456789ABCDEF/collector/oil/2026-11-09/page-0001.json',
-  'news/v1/views/g/20261109T100500Z-0123456789abcde/collector/oil/2026-11-09/page-0001.json',
-  'news/v1/views/g/20261131T100500Z-0123456789abcdef/collector/oil/2026-11-09/page-0001.json',
-  'news/v1/views/g/20261109T240000Z-0123456789abcdef/collector/oil/2026-11-09/page-0001.json',
-  'news/v1/views/g/20261109T100500Z-0123456789abcdef/collector/oil/2026-11-09/page-0021.json',
-  'news/v1/views/g/20261109T100500Z-0123456789abcdef/index.json',
+  'news/v2/views/p/20261109T100500Z-0123456789ABCDEF.1/collector/oil/2026-11-09/page-0001.json',
+  'news/v2/views/p/20261109T100500Z-0123456789abcde.1/collector/oil/2026-11-09/page-0001.json',
+  'news/v2/views/p/20261131T100500Z-0123456789abcdef.1/collector/oil/2026-11-09/page-0001.json',
+  'news/v2/views/p/20261109T240000Z-0123456789abcdef.1/collector/oil/2026-11-09/page-0001.json',
+  'news/v2/views/p/20261109T100500Z-0123456789abcdef.1/collector/oil/2026-11-09/page-0021.json',
+  'news/v2/views/p/20261109T100500Z-0123456789abcdef.1/index.json',
 ];
 const resp = (status, body) => ({ status, ok: status >= 200 && status < 300, text: async () => body });
 function fixtureFetch(calls, overrides = {}) {
@@ -384,7 +389,7 @@ test('the fetcher checks the key before every request', async () => {
   const got = await fetchJson(INDEX_KEY);
   assert.equal(got.schema_version, 'news-view-index/v1');
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].url, '/browser-data/news/v1/views/index.json?_=1762686900123');
+  assert.equal(calls[0].url, '/browser-data/news/v2/views/index.json?_=1762686900123');
   assert.equal(calls[0].opts.credentials, 'omit');
   assert.equal(calls[0].opts.cache, 'no-store', 'G3: no cached index or page');
   assert.ok(typeof AbortController !== 'function' || calls[0].opts.signal, 'G3: every request can be aborted at its deadline');
@@ -444,7 +449,7 @@ test('keys taken from the index, the picker and prev/next are refused before any
   const BAD = 'news/v1/views/collector/oil/2026-02-30/page-0001.json';
   for (const [label, change] of [['first_page', i => { i.views[0].first_page = BAD; }],
     ['picker option', i => { i.views[1].first_page = 'https://example.com/x.json'; }],
-    ['other generation', i => { i.views[0].first_page = i.views[0].first_page.replace(Q.gen, '20990101T000000Z-0000000000000000'); }]]) {
+    ['other generation', i => { i.views[0].first_page = i.views[0].first_page.replace(Q.gen, '20990101T000000Z-0000000000000000.1'); }]]) {
     const calls = [];
     const tampered = clone(index);
     change(tampered);
@@ -460,7 +465,7 @@ test('keys taken from the index, the picker and prev/next are refused before any
   const FIRST = index.views[0].first_page;
   for (const [label, field, key] of [['older →', 'next_page', '../../../../secret.json'],
     ['← newer', 'prev_page', FIRST.replace('page-0001', 'page-0021')],
-    ['older →', 'next_page', FIRST.replace(Q.gen, '20990101T000000Z-0000000000000000').replace('page-0001', 'page-0002')]]) {
+    ['older →', 'next_page', FIRST.replace(Q.gen, '20990101T000000Z-0000000000000000.1').replace('page-0001', 'page-0002')]]) {
     const calls = [];
     const page = clone(load(FIRST));
     page[field] = key;

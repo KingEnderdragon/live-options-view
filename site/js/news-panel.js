@@ -1,5 +1,5 @@
-// News panel (MediaFlow M4b): renders the sanitized news/v1/views/ pages built
-// by market_data/news/views.py. Classic script, loaded by index.html between
+// News panel (MediaFlow M4b; G6 contract): renders the sanitized news/v2/views/
+// pages published from market_data/news/views.py builds. Classic script, loaded by index.html between
 // squeeze-panel.js and tab-switching.js; the News tab mounts it once, on first
 // open (tab-switching.js calls loadNewsPanel). This is the only copy: the
 // tests-only harness (tests/news_panel/harness.html) loads this file.
@@ -13,27 +13,32 @@
 // fetching, on both the /browser-data proxy and the direct public-R2 path, so
 // a key taken from a page (first_page, the picker, prev/next) that fails is
 // shown as a failure and never requested. "No news views published yet" is
-// shown only for a 404 on index.json. G3: pages live in immutable generations
-// (news/v1/views/g/<gen>/...); a reader follows only links of the generation
-// its index names, for at most LEASE_MS from the index request; a page 404, a
-// request past its deadline, a generation mismatch or an ended lease shows
-// "refresh required" (reload the fixed index), never another generation's
-// pages. Every other problem is a failure.
+// shown for a 404 on index.json and for an "unpublished" tombstone; a
+// "withdrawn" tombstone shows "News views are not currently published". Neither
+// requests a page. G3/G6: pages live in immutable incarnations of a generation
+// (news/v2/views/p/<gen>.<n>/...); a reader follows only links of the
+// incarnation its index names, for at most LEASE_MS from the index request; a
+// page 404, a request past its deadline, an incarnation mismatch or an ended
+// lease shows "refresh required" (reload the fixed index), never another
+// incarnation's pages. Every other problem is a failure.
 (function (root) {
   'use strict';
 
   var VIEW_SCHEMA = 'news-view/v1';
-  var INDEX_SCHEMA = 'news-view-index/v1';
-  var INDEX_KEY = 'news/v1/views/index.json';
+  var INDEX_SCHEMA = 'news-view-index/v2';
+  var INDEX_KEY = 'news/v2/views/index.json';
   // Mirrors views.py: MODES, STREAM_KEYS and Limits.pages_per_view (the index records all three).
   var MODES = ['collector', 'archive', 'publication'];
   var STREAMS = ['all', 'ai_buildout', 'oil'];
   var MAX_PAGES = 20;
-  // G3: pages are immutable and generation-qualified (news/v1/views/g/<gen>/...); index.json is the fixed
-  // commit point. <gen> = YYYYMMDDTHHMMSSZ-<16 hex>. Same rule as publish.py, backend/browser-data.js and
-  // frontend/preview-policy.mjs.
-  var GEN = /^([0-9]{4})([0-9]{2})([0-9]{2})T([0-9]{2})([0-9]{2})([0-9]{2})Z-[0-9a-f]{16}$/;
-  var VIEW_KEY = /^news\/v1\/views\/g\/([0-9]{8}T[0-9]{6}Z-[0-9a-f]{16})\/(collector|archive|publication)\/(all|ai_buildout|oil)\/([0-9]{4})-([0-9]{2})-([0-9]{2})\/page-([0-9]{4})\.json$/;
+  // G6: pages are immutable and qualified by an incarnation of a generation
+  // (news/v2/views/p/<gen>.<n>/...); index.json is the fixed commit point.
+  // <gen> = YYYYMMDDTHHMMSSZ-<16 hex>, <n> = 1..9999 with no leading zero. The index's "gen" and every
+  // page's "gen" carry the incarnation id <gen>.<n>. Same rule as publish.py, backend/browser-data.js
+  // and frontend/preview-policy.mjs. Legacy news/v1/views keys are refused.
+  var GEN = /^([0-9]{4})([0-9]{2})([0-9]{2})T([0-9]{2})([0-9]{2})([0-9]{2})Z-[0-9a-f]{16}\.[1-9][0-9]{0,3}$/;
+  var VIEW_KEY = /^news\/v2\/views\/p\/([0-9]{8}T[0-9]{6}Z-[0-9a-f]{16}\.[1-9][0-9]{0,3})\/(collector|archive|publication)\/(all|ai_buildout|oil)\/([0-9]{4})-([0-9]{2})-([0-9]{2})\/page-([0-9]{4})\.json$/;
+  var NONCE = /^[0-9a-f]{32}$/;
   // Owner-approved defaults (config.GEN_*): a reader follows one index for at most LEASE_MS from the
   // moment its request started; every request has a DEADLINE_MS deadline.
   var LEASE_MS = 30 * 60 * 1000;
@@ -71,7 +76,7 @@
     return isFinite(t.getTime()) && t.toISOString().slice(0, 10) === date;
   }
 
-  // A generation id with a real UTC instant.
+  // An incarnation id (<gen>.<n>) whose generation has a real UTC instant.
   function isGen(value) {
     if (typeof value !== 'string') return false;
     var m = GEN.exec(value);
@@ -79,7 +84,7 @@
     return Number(m[4]) < 24 && Number(m[5]) < 60 && Number(m[6]) < 60;
   }
 
-  // The generation a published page key belongs to, or null.
+  // The incarnation a published page key belongs to, or null.
   function genOf(key) {
     if (typeof key !== 'string') return null;
     var m = VIEW_KEY.exec(key);
@@ -89,7 +94,7 @@
     return m[1];
   }
 
-  // The index, or one generation / mode / stream, a real calendar date and page 0001-0020. Nothing else.
+  // The index, or one incarnation / mode / stream, a real calendar date and page 0001-0020. Nothing else.
   function isNewsViewKey(key) {
     return key === INDEX_KEY || genOf(key) !== null;
   }
@@ -183,11 +188,29 @@
     return problems;
   }
 
+  // A tombstone: the index key holds no publication. 'withdrawn' (explicit withdrawal) or
+  // 'unpublished' (before the first publication), else null. It must be exactly a tombstone: the v2
+  // schema, that state, a commit nonce, and no generation or views.
+  function tombstoneState(index) {
+    if (!isObj(index) || index.schema_version !== INDEX_SCHEMA) return null;
+    if (index.state !== 'withdrawn' && index.state !== 'unpublished') return null;
+    if (!isObj(index.commit) || typeof index.commit.nonce !== 'string' || !NONCE.test(index.commit.nonce)) return null;
+    if ('gen' in index || 'views' in index) return null;
+    return index.state;
+  }
+
   function validateIndex(index) {
     var problems = [];
     if (!index || index.schema_version !== INDEX_SCHEMA) problems.push('schema_version is not ' + INDEX_SCHEMA);
+    if (!index || index.state !== 'published') problems.push('state is not published');
+    if (!index || !isObj(index.commit) || typeof index.commit.nonce !== 'string' || !NONCE.test(index.commit.nonce)) {
+      problems.push('commit.nonce is not a 128-bit hex nonce');
+    }
     if (!index || !Array.isArray(index.views)) problems.push('views is not a list');
-    if (!index || !isGen(index.gen)) problems.push('gen is not a generation id');
+    if (!index || !isGen(index.gen)) problems.push('gen is not a generation incarnation id');
+    if (index && isGen(index.gen) && index.logical_gen !== index.gen.slice(0, index.gen.lastIndexOf('.'))) {
+      problems.push('logical_gen is not the generation of gen');
+    }
     if (!index || typeof index.pages_sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(index.pages_sha256)) {
       problems.push('pages_sha256 is not a SHA-256');
     }
@@ -526,6 +549,18 @@
     }
 
     return fetchJson(indexKey).then(function (index) {
+      var tomb = tombstoneState(index);
+      if (tomb) {
+        // Nothing is published: no page is requested and nothing from an earlier mount is kept.
+        clear(pickerSlot);
+        clear(pageSlot);
+        add(pageSlot, el(doc, 'p', 'np-empty np-absent', tomb === 'withdrawn' ?
+          'News views are not currently published' : 'No news views published yet'));
+        container.removeAttribute('data-pending');
+        container.setAttribute('data-page', '');
+        container.setAttribute('data-state', tomb === 'withdrawn' ? 'withdrawn' : 'absent');
+        return null;
+      }
       var problems = validateIndex(index);
       if (problems.length) throw new Error(problems.join('; '));
       var latest = 0;
@@ -596,8 +631,8 @@
 
   var api = { safeUrl: safeUrl, validatePage: validatePage, validateIndex: validateIndex, renderPage: renderPage,
     mount: mount, segmentText: segmentText, isNewsViewKey: isNewsViewKey, makeFetcher: makeFetcher,
-    isGen: isGen, genOf: genOf, startLease: startLease,
-    VIEW_SCHEMA: VIEW_SCHEMA, INDEX_KEY: INDEX_KEY, MODES: MODES, STREAMS: STREAMS, MAX_PAGES: MAX_PAGES,
+    isGen: isGen, genOf: genOf, startLease: startLease, tombstoneState: tombstoneState,
+    VIEW_SCHEMA: VIEW_SCHEMA, INDEX_SCHEMA: INDEX_SCHEMA, INDEX_KEY: INDEX_KEY, MODES: MODES, STREAMS: STREAMS, MAX_PAGES: MAX_PAGES,
     LEASE_MS: LEASE_MS, DEADLINE_MS: DEADLINE_MS, CLOCK_AGREE_MS: CLOCK_AGREE_MS };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.NewsPanel = api;

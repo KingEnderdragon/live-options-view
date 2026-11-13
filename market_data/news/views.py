@@ -317,31 +317,48 @@ def _trim_coverage_to_budget(cov: dict, omitted: dict, measure, budget: int) -> 
 # --- views ----------------------------------------------------------------------
 
 def page_key(mode: str, stream: str, date: str, n: int) -> str:
-    """The builder's unqualified page key. Generations publish under generation_page_key (G3)."""
+    """The builder's unqualified page key (in memory only). Publication uses generation_page_key (G6)."""
     return f"{ROOT}/{mode}/{stream}/{date}/page-{n:04d}.json"
 
 
-# --- generations (G3: generation-qualified, immutable page keys) ----------------------------------
+# --- generations and incarnations (G3 generations; G6 fresh namespaces and settlement) -------------
 #
-# The builder emits an unqualified generation (fixed keys, as before). qualify_generation turns it into
-# the published form:
-#   gen        <build_as_of as YYYYMMDDTHHMMSSZ>-<first 16 hex of logical_digest(unqualified files)>,
-#              fixed before any key is qualified, so no key ever contains a digest of itself;
-#   pages      news/v1/views/g/<gen>/<mode>/<stream>/<date>/page-NNNN.json, each with "gen" and with
-#              prev_page/next_page rewritten to keys of the same generation;
-#   index      the fixed news/v1/views/index.json (still the only commit point) with "gen",
-#              views[].first_page rewritten, and "pages_sha256" (final integrity of the qualified
-#              pages; pages never contain the index's digest, so this is not circular).
+# The builder emits an unqualified build (fixed news/v1 keys, in memory only; never published).
+# qualify_generation turns it into the published form of one *incarnation* of that build:
+#   gen          <build_as_of as YYYYMMDDTHHMMSSZ>-<first 16 hex of files_digest(unqualified files)>:
+#                the logical generation, fixed before any key is qualified;
+#   incarnation  <gen>.<n>, n = 1..9999: one page namespace of that generation. A namespace in which
+#                a page delete has been started is never written again; the same build is then
+#                published under n + 1 (publish.py's head record decides n);
+#   pages        news/v2/views/p/<gen>.<n>/<mode>/<stream>/<date>/page-NNNN.json, each with
+#                "gen": "<gen>.<n>" and prev_page/next_page rewritten to keys of the same incarnation;
+#   index        the fixed news/v2/views/index.json (the only commit point): schema news-view-index/v2,
+#                "state": "published", "gen": "<gen>.<n>", "logical_gen", views[].first_page rewritten,
+#                "pages_sha256", and, added per write by commit_index, "commit": {"nonce": <32 hex>}.
+#                Every index write carries a fresh nonce, so no two index bodies are ever identical.
+#   tombstone    the same key and schema with "state": "withdrawn" (or "unpublished" before the first
+#                publication), a commit nonce and no views: readers show "no news published".
+# Legacy keys (news/v1/views/index.json, news/v1/views/g/...) are never read, written or deleted.
 
-INDEX_KEY = f"{ROOT}/index.json"
-GENERATION_ROOT = f"{ROOT}/g"
+INDEX_KEY = f"{ROOT}/index.json"                       # the builder's unqualified index (in memory only)
+PUBLISHED_ROOT = "news/v2/views"
+PUBLISHED_INDEX_KEY = f"{PUBLISHED_ROOT}/index.json"
+PUBLISHED_INDEX_SCHEMA = "news-view-index/v2"
+PAGES_ROOT = f"{PUBLISHED_ROOT}/p"
 GEN_PATTERN = r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{16}"
+INCARNATION_MAX = 9999
+INCARNATION_PATTERN = GEN_PATTERN + r"\.[1-9][0-9]{0,3}"
+NONCE_PATTERN = r"[0-9a-f]{32}"
+INDEX_STATES = ("published", "withdrawn", "unpublished")
 _GEN_RE = re.compile(rf"^{GEN_PATTERN}$")
+_INCARNATION_RE = re.compile(rf"^({GEN_PATTERN})\.([1-9][0-9]{{0,3}})$")
+_NONCE_RE = re.compile(rf"^{NONCE_PATTERN}$")
 _UNQUALIFIED_RE = re.compile(r"^news/v1/views/(collector|archive|publication)/(all|ai_buildout|oil)/"
                              r"([0-9]{4}-[0-9]{2}-[0-9]{2})/page-([0-9]{4})\.json$")
 # Headroom the pilot build reserves so that qualified pages and the index stay within their caps:
-# each link gains "g/<gen>/" (26 bytes) and pages/index gain a few fields.
-QUALIFY_SEGMENT = len("g/") + 23 + 1
+# each link gains "p/<gen>.<n>/" (2 + 33 + 1 + up to 4 + 1 = 41 bytes) and pages/index gain a few fields
+# (gen, logical_gen, state, commit). The G3 value (26) undercounted the 33-character gen.
+QUALIFY_SEGMENT = len("p/") + 33 + len(".") + 4 + len("/")
 QUALIFY_PAGE_RESERVE = 512
 QUALIFY_INDEX_RESERVE = 512
 
@@ -356,8 +373,33 @@ def is_gen(value) -> bool:
         return False
 
 
-def generation_page_key(gen: str, mode: str, stream: str, date: str, n: int) -> str:
-    return f"{GENERATION_ROOT}/{gen}/{mode}/{stream}/{date}/page-{n:04d}.json"
+def incarnation_id(gen: str, n: int) -> str:
+    if not is_gen(gen) or not isinstance(n, int) or isinstance(n, bool) or not 1 <= n <= INCARNATION_MAX:
+        raise BuildError(f"not a generation incarnation: {gen!r}.{n!r}")
+    return f"{gen}.{n}"
+
+
+def split_incarnation(value) -> tuple[str, int] | None:
+    """(gen, n) of an incarnation id, or None."""
+    if not isinstance(value, str):
+        return None
+    m = _INCARNATION_RE.match(value)
+    if not m or not is_gen(m.group(1)):
+        return None
+    return m.group(1), int(m.group(2))
+
+
+def is_incarnation(value) -> bool:
+    return split_incarnation(value) is not None
+
+
+def is_nonce(value) -> bool:
+    return isinstance(value, str) and bool(_NONCE_RE.match(value))
+
+
+def generation_page_key(inc: str, mode: str, stream: str, date: str, n: int) -> str:
+    """A published page key: inc is the incarnation id <gen>.<n>."""
+    return f"{PAGES_ROOT}/{inc}/{mode}/{stream}/{date}/page-{n:04d}.json"
 
 
 def files_digest(files: dict[str, bytes]) -> str:
@@ -373,8 +415,9 @@ def files_digest(files: dict[str, bytes]) -> str:
 
 
 def pages_digest(files: dict[str, bytes]) -> str:
-    """Final integrity of a generation's pages: files_digest over every key except the index."""
-    return files_digest({k: v for k, v in files.items() if k != INDEX_KEY})
+    """Final integrity of a generation's pages: files_digest over every key except the index
+    (the builder's or the published one)."""
+    return files_digest({k: v for k, v in files.items() if k not in (INDEX_KEY, PUBLISHED_INDEX_KEY)})
 
 
 def generation_name(files: dict[str, bytes]) -> str:
@@ -384,13 +427,16 @@ def generation_name(files: dict[str, bytes]) -> str:
     return f"{built.strftime('%Y%m%dT%H%M%SZ')}-{files_digest(files)[:16]}"
 
 
-def qualify_generation(files: dict[str, bytes]) -> tuple[str, dict[str, bytes]]:
-    """(gen, published files) for an unqualified build that already passed validation.
+def qualify_generation(files: dict[str, bytes], n: int = 1) -> tuple[str, dict[str, bytes]]:
+    """(incarnation id, published files) for incarnation n of an unqualified build that passed validation.
 
-    Pure and deterministic. Every page key becomes generation_page_key(gen, ...); every link that names a
-    page must name one of this build's pages (BuildError otherwise: no link may leave the generation).
+    Pure and deterministic in (files, n). Every page key becomes generation_page_key(<gen>.<n>, ...);
+    every link that names a page must name one of this build's pages (BuildError otherwise: no link
+    may leave the incarnation). The index (at PUBLISHED_INDEX_KEY) has no commit nonce yet: each index
+    write adds a fresh one with commit_index, so the bytes written are never the bytes returned here.
     """
     gen = generation_name(files)
+    inc = incarnation_id(gen, n)
     mapping = {}
     for key in files:
         if key == INDEX_KEY:
@@ -398,7 +444,7 @@ def qualify_generation(files: dict[str, bytes]) -> tuple[str, dict[str, bytes]]:
         m = _UNQUALIFIED_RE.match(key)
         if not m:
             raise BuildError(f"{key} is not an unqualified view page key")
-        mapping[key] = generation_page_key(gen, m.group(1), m.group(2), m.group(3), int(m.group(4)))
+        mapping[key] = generation_page_key(inc, m.group(1), m.group(2), m.group(3), int(m.group(4)))
 
     def relink(value, where):
         if value is None:
@@ -412,17 +458,49 @@ def qualify_generation(files: dict[str, bytes]) -> tuple[str, dict[str, bytes]]:
         if key == INDEX_KEY:
             continue
         page = json.loads(body)
-        page["gen"] = gen
+        page["gen"] = inc
         for field in ("prev_page", "next_page"):
             if field in page:
                 page[field] = relink(page[field], f"{key} {field}")
         out[mapping[key]] = encode(page)
     index = json.loads(files[INDEX_KEY])
     index["views"] = [dict(v, first_page=relink(v["first_page"], "index first_page")) for v in index["views"]]
-    index["gen"] = gen
+    index["schema_version"] = PUBLISHED_INDEX_SCHEMA
+    index["state"] = "published"
+    index["gen"] = inc
+    index["logical_gen"] = gen
     index["pages_sha256"] = pages_digest(out)
-    out[INDEX_KEY] = encode(index)
-    return gen, out
+    out[PUBLISHED_INDEX_KEY] = encode(index)
+    return inc, out
+
+
+def commit_index(index_bytes: bytes, nonce: str) -> bytes:
+    """The index bytes of one write: the qualified index (or a live index being resealed) with this
+    write's commit nonce. The nonce is outside the logical digest and the pages digest."""
+    if not is_nonce(nonce):
+        raise BuildError(f"not a commit nonce: {nonce!r}")
+    index = json.loads(index_bytes)
+    index["commit"] = {"nonce": nonce}
+    return encode(index)
+
+
+def tombstone_index(nonce: str, state: str = "withdrawn") -> bytes:
+    """The index written by withdrawal ("withdrawn") or before the first publication ("unpublished").
+    It names no generation and no page. The index key is never deleted, so this is what keeps an
+    older create-only or conditional request from ever finding the key absent or unchanged."""
+    if not is_nonce(nonce) or state not in ("withdrawn", "unpublished"):
+        raise BuildError(f"not a tombstone: {state!r} {nonce!r}")
+    return encode({"schema_version": PUBLISHED_INDEX_SCHEMA, "state": state, "commit": {"nonce": nonce}})
+
+
+def commit_nonce_of(index_bytes: bytes) -> str | None:
+    """The commit nonce in an index or tombstone body, or None if it has none (a foreign object)."""
+    try:
+        doc = json.loads(index_bytes)
+    except ValueError:
+        return None
+    nonce = doc.get("commit", {}).get("nonce") if isinstance(doc, dict) and isinstance(doc.get("commit"), dict) else None
+    return nonce if is_nonce(nonce) else None
 
 
 def qualified_limits(limits: "Limits" = None) -> "Limits":

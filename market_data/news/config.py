@@ -48,7 +48,11 @@ LEASE_TTL_S = 900
 GEN_READER_GRACE_S = 45 * 60      # nominal minimum public lifetime after a generation stops being current
 GEN_CLOCK_EPSILON_S = 120         # assumed store-clock error bound
 GEN_CLOCK_SKEW_S = 120            # allowed producer/store elapsed disagreement
-GEN_PAGE_CAP = 6300               # public generation page objects (5 x 1,260 at the pilot maximum)
+GEN_PAGE_CAP = 6300               # public page objects (5 x 1,260 at the pilot maximum). G6: counted as pages
+                                  # reserved in the publish head (pinned, open and retiring incarnations, written
+                                  # or not) plus public pages with no head record; it pauses and never evicts
+GEN_WITHDRAW_TOMBSTONE_ATTEMPTS = 3   # G6: tombstone writes per publish-withdraw call; each has a recorded result
+                                      # (a 412 re-reads the index first). Not a retry of an ambiguous write
 GEN_INDEX_LEASE_S = 30 * 60       # how long the panel follows links from one index (from request start)
 GEN_READER_DEADLINE_S = 20        # panel per-request deadline (index and pages)
 GEN_PROXY_DEADLINE_S = 15         # Worker upstream deadline for News keys (below the panel's)

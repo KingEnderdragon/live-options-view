@@ -73,6 +73,41 @@ class WriterBusy(ArchiveError):
     pass
 
 
+@dataclass(frozen=True)
+class CasOutcome:
+    """The explicit result of one conditional write (G6). Exactly one request was sent for it.
+
+      applied    the store answered that the write committed; etag is the new ETag when the store returned one
+      rejected   the store answered 412 PreconditionFailed: this request did not apply and cannot apply later
+      ambiguous  anything else (other errors, timeouts, resets, no response): the write may still commit,
+                 with no time bound. Callers must not treat it as either of the other two.
+    """
+    status: str
+    etag: str | None = None
+    detail: str = ""
+
+    @property
+    def applied(self) -> bool:
+        return self.status == "applied"
+
+    @property
+    def rejected(self) -> bool:
+        return self.status == "rejected"
+
+    @property
+    def ambiguous(self) -> bool:
+        return self.status == "ambiguous"
+
+
+def content_etag(data: bytes) -> str:
+    """The ETag the local and in-memory stores give an object: a quoted MD5 of its bytes. Identical
+    content gives an identical ETag (as the provider documents); callers that need a write to be
+    distinguishable must make its bytes unique."""
+    import hashlib
+
+    return '"' + hashlib.md5(data).hexdigest() + '"'
+
+
 # ── object stores ───────────────────────────────────────────────────────────
 
 def check_key(key: str) -> str:
@@ -123,6 +158,26 @@ class LocalObjectStore:
         path = self._path(key)
         return path.read_bytes() if path.is_file() else None
 
+    def get_versioned(self, key: str) -> tuple[bytes, str] | None:
+        """(bytes, ETag) of one object version, or None if absent."""
+        body = self.get(key)
+        return None if body is None else (body, content_etag(body))
+
+    def put_if_match(self, key: str, data: bytes, etag: str | None, content_type: str = "application/octet-stream",
+                     cache_control: str | None = None, write_id: str | None = None) -> CasOutcome:
+        """Compare-and-swap: write only if the object's ETag is `etag` (None: only if the key is absent).
+
+        A directory has no conditional write. The check and the replace here are two steps, so this is
+        a single-process stand-in for the bucket's atomic condition, not a cross-process guarantee."""
+        if etag is None:
+            created = self.put_if_absent(key, data, content_type, cache_control=cache_control)
+            return CasOutcome("applied", content_etag(data)) if created else CasOutcome("rejected", detail="key exists")
+        current = self.get(key)
+        if current is None or content_etag(current) != etag:
+            return CasOutcome("rejected", detail="ETag differs" if current is not None else "key absent")
+        self.put(key, data, content_type, cache_control=cache_control)
+        return CasOutcome("applied", content_etag(data))
+
     def delete(self, key: str) -> None:
         self._path(key).unlink(missing_ok=True)
 
@@ -148,9 +203,13 @@ class LocalObjectStore:
 class R2ObjectStore:
     """Cloudflare R2 through the S3 API. Only constructed by an explicit CLI opt-in."""
 
-    def __init__(self, client, bucket: str):
+    def __init__(self, client, bucket: str, cas_client=None):
         self.client = client
         self.bucket = bucket
+        # A second client that sends exactly one request per call (no SDK retries). Conditional index
+        # and head writes go through it only: a silent retry would turn "the first try landed" into a
+        # 412. Without it put_if_match refuses, so existing two-argument callers are unchanged.
+        self.cas_client = cas_client
 
     @classmethod
     def from_env(cls, env=os.environ):
@@ -159,11 +218,15 @@ class R2ObjectStore:
             raise ArchiveError(f"bucket mode needs {', '.join(missing)}")
         import boto3
 
-        client = boto3.client(
-            "s3", endpoint_url=f"https://{env['R2_ACCOUNT_ID']}.r2.cloudflarestorage.com",
-            aws_access_key_id=env["R2_ACCESS_KEY_ID"], aws_secret_access_key=env["R2_SECRET_ACCESS_KEY"],
-            region_name="auto")
-        return cls(client, env["R2_BUCKET_NAME"])
+        from botocore.config import Config
+
+        kwargs = dict(endpoint_url=f"https://{env['R2_ACCOUNT_ID']}.r2.cloudflarestorage.com",
+                      aws_access_key_id=env["R2_ACCESS_KEY_ID"], aws_secret_access_key=env["R2_SECRET_ACCESS_KEY"],
+                      region_name="auto")
+        client = boto3.client("s3", **kwargs)
+        # ASSUMPTION (SDK, not verified here): total_max_attempts=1 means one HTTP request and no retry.
+        cas_client = boto3.client("s3", config=Config(retries={"total_max_attempts": 1}), **kwargs)
+        return cls(client, env["R2_BUCKET_NAME"], cas_client=cas_client)
 
     @staticmethod
     def _code(exc) -> str:
@@ -201,6 +264,45 @@ class R2ObjectStore:
             if self._code(exc) in ("NoSuchKey", "404"):
                 return None
             raise
+
+    def get_versioned(self, key):
+        """(bytes, ETag) from one GetObject response, or None if absent.
+        ASSUMPTION (provider, not verified here): the body and the ETag header describe the same version."""
+        try:
+            resp = self.client.get_object(Bucket=self.bucket, Key=check_key(key))
+        except Exception as exc:
+            if self._code(exc) in ("NoSuchKey", "404"):
+                return None
+            raise
+        return resp["Body"].read(), resp["ETag"]
+
+    def put_if_match(self, key, data, etag, content_type="application/octet-stream", cache_control=None,
+                     write_id=None) -> CasOutcome:
+        """One single-part PutObject with If-Match: <etag> (etag None: If-None-Match: *), sent once.
+
+        Documented (R2 conditional operations): the condition is evaluated when the write commits;
+        a failed condition is 412 PreconditionFailed. Only that answer is "rejected"; every other
+        failure is "ambiguous" (the write may still commit).
+        ASSUMPTIONS (SDK/provider, not verified here): put_object accepts IfMatch/IfNoneMatch and
+        returns the new ETag; the 412 surfaces with code PreconditionFailed or 412."""
+        if self.cas_client is None:
+            raise ArchiveError("conditional writes need a no-retry client (R2ObjectStore.from_env provides one)")
+        extra = {"ContentType": content_type}
+        if cache_control:
+            extra["CacheControl"] = cache_control
+        if write_id:
+            extra["Metadata"] = {"write-id": write_id}
+        if etag is None:
+            extra["IfNoneMatch"] = "*"
+        else:
+            extra["IfMatch"] = etag
+        try:
+            resp = self.cas_client.put_object(Bucket=self.bucket, Key=check_key(key), Body=data, **extra)
+        except Exception as exc:
+            if self._code(exc) in ("PreconditionFailed", "412"):
+                return CasOutcome("rejected", detail="412 PreconditionFailed")
+            return CasOutcome("ambiguous", detail=f"{type(exc).__name__}: {exc}"[:300])
+        return CasOutcome("applied", (resp or {}).get("ETag"))
 
     def delete(self, key):
         self.client.delete_object(Bucket=self.bucket, Key=check_key(key))

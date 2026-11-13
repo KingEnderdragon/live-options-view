@@ -12,7 +12,7 @@ import shutil
 import subprocess
 import unittest
 
-from test_news_publish import INDEX, ROOT, qualified
+from test_news_publish import BUILD_INDEX, INDEX, ROOT, qualified
 from test_news_publish_repairs import P1, P2, Small, navigate
 from market_data.news import publish as pub
 from market_data.news.views import build_views, encode, limits_from
@@ -88,9 +88,9 @@ class ChejCases(Small):
         return dict(self.good, **{P1: encode(page)}), page
 
     def index_case(self, field):
-        index = json.loads(self.good[INDEX])
+        index = json.loads(self.good[BUILD_INDEX])
         del index[field]
-        return dict(self.good, **{INDEX: encode(index)}), index
+        return dict(self.good, **{BUILD_INDEX: encode(index)}), index
 
     def assert_refused_without_writes(self, files, field):
         before = self.private_files()
@@ -121,7 +121,7 @@ class ChejCases(Small):
 
     def test_index_counts_that_disagree_are_refused(self):
         """Renderable but false: the panel would show a complete index as incomplete, or the reverse."""
-        index = json.loads(self.good[INDEX])
+        index = json.loads(self.good[BUILD_INDEX])
         self.assertTrue(index["complete"])
         cases = {
             "views_total": dict(index, views_total=index["views_total"] + 1),
@@ -131,7 +131,7 @@ class ChejCases(Small):
         }
         for name, bad in cases.items():
             with self.subTest(name):
-                self.assert_refused_without_writes(dict(self.good, **{INDEX: encode(bad)}), name.split(" ")[0])
+                self.assert_refused_without_writes(dict(self.good, **{BUILD_INDEX: encode(bad)}), name.split(" ")[0])
 
     def test_nested_shapes_the_renderer_reads_are_refused(self):
         cases = {
@@ -162,7 +162,7 @@ class ChejCases(Small):
         navigate(self.raw_public)
         st = pub.status(self.private, self.public, self.clock)
         self.assertEqual(st["problems"], [])
-        self.assertEqual(st["committed"]["views_total"], json.loads(self.good[INDEX])["views_total"])
+        self.assertEqual(st["committed"]["views_total"], json.loads(self.good[BUILD_INDEX])["views_total"])
         # Every published page and the whole panel render through the unchanged renderer.
         published = {k: json.loads(b) for k, b in self.public_files().items()}
         results = probe([{"kind": "page", "page": p} for k, p in published.items() if k != INDEX] +
@@ -181,7 +181,7 @@ class RendererSweep(Small):
         self.good = self.gen("2026-11-09T10:20:00Z", 2)
 
     def sources(self):
-        pages = [json.loads(b) for k, b in self.good.items() if k != INDEX]
+        pages = [json.loads(b) for k, b in self.good.items() if k != BUILD_INDEX]
         pages += [json.loads(p.read_bytes()) for p in FIXTURE_VIEWS.rglob("page-*.json")]
         return pages
 
@@ -223,10 +223,10 @@ class RendererSweep(Small):
         # with validate_qualified, which also applies every validate_generation check.
         from market_data.news.views import generation_name
         qgood = qualified(self.good)
-        gen = generation_name(self.good)
+        gen = generation_name(self.good) + ".1"            # G6: the incarnation id the published index carries
         index = json.loads(qgood[INDEX])
         pages = {k: json.loads(b) for k, b in qgood.items() if k != INDEX}
-        self.assertEqual(pub.index_contract_problems(index), [])
+        self.assertEqual(pub.index_contract_problems(index, pub.PUBLISHED_INDEX_SCHEMA), [])
         mutations = [(path, new, set_path(index, path, new))
                      for path in generic_paths(index) if path for new in REPLACEMENTS]
         results = probe([{"kind": "mount", "index": index, "pages": pages}] +
@@ -257,7 +257,7 @@ class RendererSweep(Small):
                                                source_ids_per_segment=1))
         index = pub.validate_generation(files)
         self.assertTrue(any(not v["complete"] for v in index["views"]))
-        self.assertTrue(any(not json.loads(b)["complete"] for k, b in files.items() if k != INDEX))
+        self.assertTrue(any(not json.loads(b)["complete"] for k, b in files.items() if k != BUILD_INDEX))
         parsed = {k: json.loads(b) for k, b in qualified(files).items()}
         results = probe([{"kind": "page", "page": p} for k, p in parsed.items() if k != INDEX] +
                         [{"kind": "mount", "index": parsed[INDEX], "pages": parsed}])

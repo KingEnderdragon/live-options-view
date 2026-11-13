@@ -15,9 +15,13 @@
                                   [--rows-per-page N] [--page-bytes N] [--max-pages N] (limits only lower the defaults)
   python -m market_data.news sources
   python -m market_data.news pilot-cycle   [--config FILE] [--private DIR] [--public DIR] [--spool DIR] [--clock T] [--live]
-  python -m market_data.news publish-status|publish-stop --reason R|publish-resume|publish-withdraw
+  python -m market_data.news publish-status|publish-stop --reason R|publish-resume|publish-withdraw|publish-reseal
                                            [--config FILE] [--private DIR] [--public DIR] [--live]
   python -m market_data.news publish-restore --gen GEN_ID [--config FILE] [--private DIR] [--public DIR] [--live]
+      GEN_ID is the logical generation (YYYYMMDDTHHMMSSZ-<16 hex>), not a page namespace: the restore
+      reuses a still-pinned incarnation or writes a fresh one from the snapshot.
+      publish-reseal rewrites the live index with a fresh nonce (same pages): it closes open index commits.
+      publish-withdraw may report withdrawal_unconfirmed; run it again until a tombstone is confirmed.
 
 Defaults are inert: fixture feeds from tests/fixtures/news/feeds and a local
 directory store. Live feeds need --network; the bucket needs --bucket plus
@@ -129,7 +133,8 @@ def main(argv=None) -> int:
     jn.add_argument("--series", choices=tuple(SERIES), default="underlying_quote")
     jn.add_argument("--stream")
     jn.add_argument("--start")
-    bv = sub.add_parser("build-views", help="write sanitized, bounded news/v1/views/ pages (local files only)")
+    bv = sub.add_parser("build-views", help="write the builder's unqualified news/v1/views/ pages to a local directory "
+                                            "(never the published news/v2 form)")
     common(bv)
     bv.add_argument("--as-of", required=True)
     bv.add_argument("--tolerance-s", type=float, required=True, help="max age of a matched price (no default)")
@@ -155,12 +160,13 @@ def main(argv=None) -> int:
     pilot_common(pc)
     pc.add_argument("--spool", default="./news-spool")
     pc.add_argument("--fixtures", default=str(DEFAULT_FIXTURES))
-    for name in ("publish-status", "publish-resume", "publish-withdraw"):
+    for name in ("publish-status", "publish-resume", "publish-withdraw", "publish-reseal"):
         pilot_common(sub.add_parser(name))
     ps = sub.add_parser("publish-stop", help="stop cycles and publication (views stay as last published)")
     pilot_common(ps)
     ps.add_argument("--reason", required=True)
-    pr = sub.add_parser("publish-restore", help="republish a retained snapshot (requires publish-stop)")
+    pr = sub.add_parser("publish-restore", help="republish a retained generation from its snapshot, into a "
+                                                 "still-pinned or fresh incarnation (requires publish-stop)")
     pilot_common(pr)
     pr.add_argument("--gen", required=True)
     args = p.parse_args(argv)
@@ -305,6 +311,9 @@ def _pilot_main(args) -> int:
                           break_stale_lease=args.break_stale_lease).summary()
     elif args.cmd == "publish-withdraw":
         out = pub.withdraw(private, public, clock, break_stale_lease=args.break_stale_lease)
+        code = 1 if out["withdrawal_unconfirmed"] else 0
+    elif args.cmd == "publish-reseal":
+        out = pub.reseal(private, public, clock, break_stale_lease=args.break_stale_lease)
     print(json.dumps(out, indent=1, ensure_ascii=False))
     return code
 

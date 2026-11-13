@@ -75,7 +75,7 @@ const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.json': 'applic
         await page.evaluate(() => window.newsPanelReady);
       };
       const pick = async unqualified => {
-        const key = unqualified.startsWith('news/v1/views/g/') ? unqualified : Qs[current](unqualified);
+        const key = unqualified.startsWith('news/v2/views/p/') ? unqualified : Qs[current](unqualified);
         await page.selectOption('select[aria-label^="View"]', key);
         await page.waitForFunction(k => document.querySelector('#news-panel').getAttribute('data-page') === k, key);
       };

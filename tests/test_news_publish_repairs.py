@@ -13,7 +13,8 @@ import sys
 import textwrap
 from datetime import timedelta
 
-from test_news_publish import INDEX, PANEL, ROOT, Base, RecordingStore, qualified
+from test_news_publish import (BUILD_INDEX, INDEX, PANEL, ROOT, Base, RecordingStore, patched_config_path,
+                               qualified)
 from market_data.news import publish as pub
 from market_data.news.archive import WriterBusy
 from market_data.news.reader import load_archive
@@ -27,7 +28,7 @@ P2 = f"news/v1/views/collector/oil/{DATE}/page-0002.json"
 def qkey(files, key):
     """The published key of builder page `key` in the generation `files` becomes."""
     _, _, _, mode, stream, date, name = key.split("/")
-    return generation_page_key(generation_name(files), mode, stream, date, int(name[5:9]))
+    return generation_page_key(generation_name(files) + ".1", mode, stream, date, int(name[5:9]))
 
 
 def navigate(store) -> dict:
@@ -123,12 +124,12 @@ class Validation(Small):
                 self.assertEqual(self.public_files(), qualified(self.old), f"{name}: old publication untouched")
 
     def test_index_and_orphan_problems_are_rejected(self):
-        index = json.loads(self.good[INDEX])
+        index = json.loads(self.good[BUILD_INDEX])
         bad_first = dict(index, views=[dict(index["views"][0], first_page=P2)] + index["views"][1:])
         dup = dict(index, views=index["views"] + index["views"][:1])
         orphan = dict(self.good, **{"news/v1/views/collector/oil/2026-11-09/page-0020.json": self.good[P1]})
-        for name, files in (("first_page not page 1", dict(self.good, **{INDEX: encode(bad_first)})),
-                            ("view listed twice", dict(self.good, **{INDEX: encode(dup)})),
+        for name, files in (("first_page not page 1", dict(self.good, **{BUILD_INDEX: encode(bad_first)})),
+                            ("view listed twice", dict(self.good, **{BUILD_INDEX: encode(dup)})),
                             ("orphan page", orphan)):
             with self.subTest(name):
                 with self.assertRaises(pub.PublishError):
@@ -167,23 +168,23 @@ class Navigation(Small):
                 self.reset_public(old)
                 self.private.delete(pub.PUBLISH_LEASE_KEY)
                 self.raw_public.fail = ("put", lambda k: True, crash_at)
-                # A crash on a page is raised as is; on the index it leaves the candidate uncertain.
+                # A crash on a page or on the index write is raised as is (G6: the index commit stays open).
                 with self.assertRaises((RuntimeError, pub.PublishError)):
                     pub.publish(self.private, self.public, new, self.clock)
                 self.raw_public.fail = None
                 chains = navigate(self.raw_public)          # every reachable page exists and renders
-                self.assertEqual(self.raw_public.get(INDEX), qualified(old)[INDEX], "old index still live")
+                self.assertEqual(self.live_index(), qualified(old)[INDEX], "old index still live")
                 mixed_views += sum(1 for c in chains.values() if len({b for _, b in c}) > 1)
                 if crash_at == len(page_puts):
                     # The index write is unresolved: no index write follows, not even a retry of this build.
                     with self.assertRaises(pub.PublishPaused):
                         pub.publish(self.private, self.public, new, self.clock)
-                    self.assertEqual(self.raw_public.get(INDEX), qualified(old)[INDEX])
+                    self.assertEqual(self.live_index(), qualified(old)[INDEX])
                     navigate(self.raw_public)
                     continue
                 pub.publish(self.private, self.public, new, self.clock)      # the next cycle
                 final = navigate(self.raw_public)
-                build = json.loads(new[INDEX])["build_as_of"]
+                build = json.loads(new[BUILD_INDEX])["build_as_of"]
                 self.assertTrue(all(b == build for c in final.values() for _, b in c))
                 self.assertEqual(self.public_files(), qualified(new))
         return mixed_views
@@ -199,7 +200,7 @@ class Navigation(Small):
             pub.publish(self.private, self.public, new, self.clock)
         old_p1 = qkey(old, P1)
         self.assertEqual(self.raw_public.get(old_p1), qualified(old)[old_p1], "the old generation's pages are immutable")
-        self.assertEqual(self.raw_public.get(INDEX), qualified(old)[INDEX])
+        self.assertEqual(self.live_index(), qualified(old)[INDEX])
         navigate(self.raw_public)
 
     def test_growth_crash_anywhere_leaves_navigation_working(self):
@@ -222,9 +223,9 @@ class Identity(Small):
         page = json.loads(a[P1])
         page["rows"][0]["title"] = page["rows"][0]["title"] + " (revised)"
         b = dict(a, **{P1: encode(page)})
-        self.assertEqual(a[INDEX], b[INDEX])
-        ia = pub.generation_id(a, json.loads(a[INDEX]))
-        ib = pub.generation_id(b, json.loads(b[INDEX]))
+        self.assertEqual(a[BUILD_INDEX], b[BUILD_INDEX])
+        ia = pub.generation_id(a, json.loads(a[BUILD_INDEX]))
+        ib = pub.generation_id(b, json.loads(b[BUILD_INDEX]))
         self.assertNotEqual(ia, ib)
         pub.publish(self.private, self.public, a, self.clock)
         pub.publish(self.private, self.public, b, self.clock)
@@ -237,7 +238,7 @@ class Identity(Small):
 
     def test_conflicting_snapshot_reuse_is_refused_before_public_writes(self):
         a = self.gen("2026-11-09T10:20:00Z", 50)
-        gid = pub.generation_id(a, json.loads(a[INDEX]))
+        gid = pub.generation_id(a, json.loads(a[BUILD_INDEX]))
         other = self.gen("2026-11-09T10:10:00Z", 50)
         pub._snapshot(self.private, gid, other, self.clock)          # a planted, mismatched snapshot
         self.log.clear()
@@ -286,7 +287,7 @@ class AbandonedLease(Base):
     def crash(self, where, when):
         code = CRASH.format(root=str(ROOT), tests=str(ROOT / "tests"), where=where, when=when,
                             private=str(self.tmp / "private"), public=str(self.tmp / "public"),
-                            spool=str(self.spool), config=str(ROOT / "market_data/news/deploy/news-pilot.json"))
+                            spool=str(self.spool), config=str(patched_config_path(self.tmp)))
         r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
         self.assertEqual(r.returncode, 3, r.stderr[-2000:])
 

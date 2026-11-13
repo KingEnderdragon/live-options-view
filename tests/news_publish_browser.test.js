@@ -23,14 +23,20 @@ const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.json': 'applic
 (async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'news-publish-'));
   const pub = path.join(tmp, 'public');
-  const args = ['--private', path.join(tmp, 'private'), '--public', pub, '--spool', path.join(tmp, 'spool')];
+  // G6 (NOT RUN): deploy/news-pilot.json is unchanged and still names the legacy public prefix, so the
+  // shipped file no longer validates. This applies the one pending edit to a temporary copy.
+  const cfg = JSON.parse(fs.readFileSync(path.join(REPO, 'market_data/news/deploy/news-pilot.json'), 'utf8'));
+  cfg.storage.public.prefix = 'news/v2/views/';
+  const cfgPath = path.join(tmp, 'news-pilot.g6.json');
+  fs.writeFileSync(cfgPath, JSON.stringify(cfg));
+  const args = ['--config', cfgPath, '--private', path.join(tmp, 'private'), '--public', pub, '--spool', path.join(tmp, 'spool')];
   for (const clock of ['2026-11-09T10:05:00Z', '2026-11-09T10:20:00Z']) {
     execFileSync(process.env.PYTHON || 'python', ['-m', 'market_data.news', 'pilot-cycle', ...args, '--clock', clock],
       { cwd: REPO, stdio: ['ignore', 'pipe', 'inherit'] });
   }
   // G3 (NOT RUN when written): the pilot publishes immutable generations; the live index names one.
-  const gen = JSON.parse(fs.readFileSync(path.join(pub, 'news/v1/views/index.json'), 'utf8')).gen;
-  const published = key => key.replace('news/v1/views/', `news/v1/views/g/${gen}/`);
+  const gen = JSON.parse(fs.readFileSync(path.join(pub, 'news/v2/views/index.json'), 'utf8')).gen;
+  const published = key => key.replace('news/v1/views/', `news/v2/views/p/${gen}/`);
   const browser = await pw.chromium.launch({ headless: true });
   const foreign = [];
   try {

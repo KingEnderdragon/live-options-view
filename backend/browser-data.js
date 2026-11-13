@@ -33,14 +33,16 @@ export function isPublicArchiveKey(key) {
   return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === date;
 }
 // MediaFlow news view pages read by the News panel (accepted MediaFlow M4b-M6,
-// 8639c6d; G3 generations): exactly the fixed index, or one immutable
-// generation g/<YYYYMMDDTHHMMSSZ-16hex> (a real UTC instant) / mode / stream /
-// real calendar date / page 0001-0020 (views.py's MODES, STREAM_KEYS and
-// pages_per_view). site/js/news-panel.js applies the same check before every
-// request, and frontend/preview-policy.mjs mirrors it. Exact keys only: the
-// prospective news/v1/views/** prefix grant removed 2026-11-11 stays removed
-// (news/v1/views/today.json and unqualified pages remain 404).
-export const NEWS_VIEW_INDEX_KEY = 'news/v1/views/index.json';
+// 8639c6d; G3 generations; G6 fresh namespaces): exactly the fixed index
+// news/v2/views/index.json, or one immutable incarnation
+// p/<YYYYMMDDTHHMMSSZ-16hex>.<n> (a real UTC instant; n = 1..9999, no leading
+// zero) / mode / stream / real calendar date / page 0001-0020 (views.py's
+// MODES, STREAM_KEYS and pages_per_view). site/js/news-panel.js applies the
+// same check before every request, and frontend/preview-policy.mjs mirrors it.
+// Exact keys only: the prospective news/v1/views/** prefix grant removed
+// 2026-11-11 stays removed, and the legacy news/v1/views index and g/<gen>
+// pages are no longer served (404), like today.json and unqualified pages.
+export const NEWS_VIEW_INDEX_KEY = 'news/v2/views/index.json';
 // Upstream deadline for News keys only (G3; below the panel's 20 s request
 // deadline). It bounds the wait for the upstream response; the panel's own
 // deadline also covers the body.
@@ -52,7 +54,7 @@ function realDate(y, mo, d) {
 }
 export function isPublicNewsViewKey(key) {
   if (key === NEWS_VIEW_INDEX_KEY) return true;
-  const match = /^news\/v1\/views\/g\/([0-9]{4})([0-9]{2})([0-9]{2})T([0-9]{2})([0-9]{2})([0-9]{2})Z-[0-9a-f]{16}\/(?:collector|archive|publication)\/(?:all|ai_buildout|oil)\/([0-9]{4})-([0-9]{2})-([0-9]{2})\/page-([0-9]{4})\.json$/.exec(key);
+  const match = /^news\/v2\/views\/p\/([0-9]{4})([0-9]{2})([0-9]{2})T([0-9]{2})([0-9]{2})([0-9]{2})Z-[0-9a-f]{16}\.[1-9][0-9]{0,3}\/(?:collector|archive|publication)\/(?:all|ai_buildout|oil)\/([0-9]{4})-([0-9]{2})-([0-9]{2})\/page-([0-9]{4})\.json$/.exec(key);
   if (!match) return false;
   if (!realDate(match[1], match[2], match[3]) || Number(match[4]) > 23 || Number(match[5]) > 59 ||
       Number(match[6]) > 59) return false;
