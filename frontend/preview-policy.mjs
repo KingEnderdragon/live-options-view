@@ -12,6 +12,10 @@ const PUBLIC_KEYS = new Set([
   'squeeze-scanner/v1/scheduled/latest-attempt.json',
   'squeeze-scanner/v1/scheduled/latest-schedule.json',
 ]);
+// OI skew meter projection key: prepared, DISABLED (mirrors
+// backend/browser-data.js; no backend import in the gateway).
+export const OI_SKEW_PROJECTION_KEY = 'crassus/oi-skew/v1/latest.json';
+export const OI_SKEW_PROJECTION_PUBLIC = false;
 export function publicReadAllowed(url) {
   if (!url.pathname.startsWith('/browser-data/')) return false;
   if (url.search && !/^\?_=[0-9]{1,20}$/.test(url.search)) return false;
@@ -22,6 +26,7 @@ export function publicReadAllowed(url) {
   // backend/gateway agreement. (The prospective news/v1/views/** grant was
   // removed 2026-11-11: no accepted MediaFlow source exists.)
   if (key.includes('..') || /%2e/i.test(key) || key.includes('\\') || key.includes('\0')) return false;
+  if (OI_SKEW_PROJECTION_PUBLIC && key === OI_SKEW_PROJECTION_KEY) return true;
   if (PUBLIC_KEYS.has(key)) return true;
   const m = /^(?:raw\/(?:opex\/)?qqq_chain_|prices\/qqq_intraday_)(\d{4})(\d{2})(\d{2})\.csv$/.exec(key);
   if (!m) return false;

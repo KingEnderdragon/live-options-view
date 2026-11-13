@@ -19,6 +19,8 @@ const POSITIVE_KEYS = [
   'squeeze-scanner/v1/scheduled/latest-schedule.json',
 ];
 const NEGATIVE_KEYS = [
+  // OI skew meter projection: prepared but disabled until its approved release.
+  'crassus/oi-skew/v1/latest.json',
   '', 'system/bot-membership-v1.json', 'paper-trades/requests/x.json',
   'intraday/other.json', 'raw/qqq_chain_20260229.csv', 'raw/qqq_chain_20261301.csv',
   'raw/qqq_chain_20260431.csv', 'manifest.json.png', 'manifest.json/',
@@ -206,5 +208,20 @@ test('raw traversal strings are refused by the backend predicate', async () => {
   }
   for (const key of ['manifest.json', 'intraday/latest.json', 'raw/qqq_chain_20240229.csv']) {
     assert.equal(isPublicBrowserDataKey(key), true, key);
+  }
+});
+
+test('OI skew projection key is prepared, identical and disabled on both allowlists', async () => {
+  const b = await import('../backend/browser-data.js');
+  const g = await import('../frontend/preview-policy.mjs');
+  assert.equal(b.OI_SKEW_PROJECTION_KEY, 'crassus/oi-skew/v1/latest.json');
+  assert.equal(g.OI_SKEW_PROJECTION_KEY, b.OI_SKEW_PROJECTION_KEY);
+  assert.equal(b.OI_SKEW_PROJECTION_PUBLIC, false);
+  assert.equal(g.OI_SKEW_PROJECTION_PUBLIC, false);
+  assert.equal(b.isPublicBrowserDataKey(b.OI_SKEW_PROJECTION_KEY), false);
+  assert.equal(g.publicReadAllowed(new URL(APP + '/browser-data/' + g.OI_SKEW_PROJECTION_KEY)), false);
+  // Only the exact key could ever be granted: siblings stay private.
+  for (const k of ['crassus/oi-skew/v1/', 'crassus/oi-skew/v1/latest.json.bak', 'crassus/ledger.jsonl']) {
+    assert.equal(b.isPublicBrowserDataKey(k), false, k);
   }
 });
