@@ -155,6 +155,14 @@ function describeBotOiSkew(projection, nowMs = Date.now()) {
       detail: 'The OI Skew bot\'s session anchor lives only in the strategy runner; '
         + 'no read-only projection of it is published yet, so its effective state is not shown.' };
   }
+  // The projection says when its own evidence is incomplete (legacy ledger
+  // rows, unknown source revision...). That is shown as unavailable, never
+  // classified from whatever fields happen to be present.
+  if (projection.status?.code !== 'ok' || !projection.params) {
+    return { availability: 'unavailable', state: 'unknown', text: 'Bot signal: unavailable',
+      detail: `The published bot state is incomplete (${projection.status?.reason || 'no params'}); `
+        + 'its effective signal is not shown.' };
+  }
   const obsMs = Date.parse(projection.observed_snapshot_timestamp || '');
   const ageMs = Number.isFinite(obsMs) ? nowMs - obsMs : null;
   const cls = classifyOiSkewSignal(projection, projection.params);
@@ -162,11 +170,23 @@ function describeBotOiSkew(projection, nowMs = Date.now()) {
   if (ageMs == null || ageMs > OI_SKEW_CLOSED_AFTER_MS) availability = 'closed';
   else if (ageMs > OI_SKEW_STALE_AFTER_MS) availability = 'stale';
   const label = { bullish: 'Bullish', bearish: 'Bearish', neutral: 'Neutral' }[cls.state];
+  const rev = typeof projection.code_revision === 'string' ? projection.code_revision.slice(0, 7) : 'unknown';
+  const provenance = `Anchor ${projection.session_start_imbalance} observed ${projection.anchor_observed_at} `
+    + `(session ${projection.session_key}, ${projection.run_identity}); decided ${projection.decision_at}; `
+    + `source ${rev}, ${projection.strategy_id} ${projection.strategy_version}.`;
   return { ...cls, availability, age_ms: ageMs,
-    account_alias: projection.account_alias || null,
     session_phase: projection.session_phase || null,
+    anchor_observed_at: projection.anchor_observed_at, session_key: projection.session_key,
+    run_identity: projection.run_identity, code_revision: projection.code_revision,
+    decision_at: projection.decision_at,
     text: `Bot signal: ${label}${availability === 'live' ? '' : ` (${availability})`}`,
-    detail: cls.reason };
+    detail: `${cls.reason} ${provenance}` };
+}
+
+// A projection fetch that failed: unavailable, never the last state as live.
+function describeBotOiSkewFetchFailure(reason) {
+  return { availability: 'unavailable', state: 'unknown', text: 'Bot signal: unavailable',
+    detail: `The bot state could not be loaded (${reason}).` };
 }
 
 // Marker position on a −1…+1 diverging scale, as a 0…100 percentage.
@@ -179,5 +199,6 @@ function oiSkewMeterPercent(value) {
 if (typeof module !== 'undefined') {
   module.exports = { OI_SKEW_DEFAULTS, OI_SKEW_STALE_AFTER_MS, OI_SKEW_CLOSED_AFTER_MS,
     classifyOiSkewSignal, describeReferenceOiSkew, degradeOiSkewForRefreshFailure, describeBotOiSkew,
+    describeBotOiSkewFetchFailure,
     oiSkewMeterPercent };
 }
