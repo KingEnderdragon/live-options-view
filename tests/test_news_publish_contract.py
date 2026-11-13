@@ -15,7 +15,7 @@ import unittest
 from test_news_publish import BUILD_INDEX, INDEX, ROOT, qualified
 from test_news_publish_repairs import P1, P2, Small, navigate
 from market_data.news import publish as pub
-from market_data.news.views import build_views, encode, limits_from
+from market_data.news.views import build_views, commit_index, encode, limits_from
 
 PROBE = ROOT / "tests" / "news_panel" / "render_probe.js"
 FIXTURE_VIEWS = ROOT / "tests" / "fixtures" / "news" / "views"
@@ -233,9 +233,16 @@ class RendererSweep(Small):
                         [{"kind": "mount", "index": m, "pages": pages} for _, _, m in mutations])
         clean = results[0]
         self.assertIsNone(render_failed(clean, clean["text"], mount=True))
-        missed, broken = [], 0
+        missed, broken, commit_refused = [], 0, 0
         for (path, new, mutated), result in zip(mutations, results[1:]):
             why = render_failed(result, clean["text"], mount=True)
+            if path[0] == "commit":
+                # G7: the commit nonce is not builder input. commit_index writes a fresh 128-bit nonce into
+                # each index write, so the publisher never sends a malformed one; the reader must refuse
+                # one anyway (fail closed).
+                self.assertTrue(why, f"the panel mounted an index with commit {'.'.join(map(str, path))}={new!r}")
+                commit_refused += 1
+                continue
             if why:
                 broken += 1
                 files = dict(qgood, **{INDEX: encode(mutated)})
@@ -244,8 +251,12 @@ class RendererSweep(Small):
                 except pub.PublishError:
                     continue
                 missed.append((".".join(map(str, path)), new, why))
-        print(f"index sweep: {len(mutations)} mutations, {broken} renderer failures, {len(missed)} accepted", flush=True)
+        print(f"index sweep: {len(mutations)} mutations, {broken} renderer failures, {len(missed)} accepted, "
+              f"{commit_refused} commit mutations refused by the panel", flush=True)
         self.assertGreater(broken, 10)
+        self.assertGreater(commit_refused, 0)
+        nonce = json.loads(commit_index(qgood[INDEX], "a" * 32))["commit"]["nonce"]
+        self.assertEqual(nonce, "a" * 32, "commit_index writes the nonce it is given")
         self.assertEqual(missed, [], "index failures the publisher accepted")
 
     def test_overflowing_generations_pass_and_render(self):

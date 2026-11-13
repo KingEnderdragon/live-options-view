@@ -355,7 +355,7 @@ const resp = (status, body) => ({ status, ok: status >= 200 && status < 300, tex
 function fixtureFetch(calls, overrides = {}) {
   return async (url, opts) => {
     calls.push({ url, opts });
-    const key = url.replace(/^.*?(news\/v1\/views\/)/, '$1').replace(/\?_=\d+$/, '');
+    const key = url.replace(/^.*?(news\/v2\/views\/)/, '$1').replace(/\?_=\d+$/, '');
     if (key in overrides) return overrides[key]();
     const text = Q.text(key);   // the published (qualified) fixture
     return text !== null ? resp(200, text) : resp(404, 'not found');
@@ -387,7 +387,7 @@ test('the fetcher checks the key before every request', async () => {
   }
   assert.equal(calls.length, 0, 'a refused key is never requested');
   const got = await fetchJson(INDEX_KEY);
-  assert.equal(got.schema_version, 'news-view-index/v1');
+  assert.equal(got.schema_version, 'news-view-index/v2', 'the published (qualified) index');
   assert.equal(calls.length, 1);
   assert.equal(calls[0].url, '/browser-data/news/v2/views/index.json?_=1762686900123');
   assert.equal(calls[0].opts.credentials, 'omit');

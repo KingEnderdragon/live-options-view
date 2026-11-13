@@ -38,7 +38,7 @@ const NEWS_REJECTED = [
   'news/v1/views/index.json%00', 'news/v1/views/collector/oil/2026-11-09/..%2f..%2f..%2findex.json',
   'news/v1/views/collector/%6fil/2026-11-09/page-0001.json', 'news%2fv1%2fviews%2findex.json',
   'news/v1/index.json', 'news/oil/v1/latest.json', 'news/v1/raw/observations.jsonl', 'news/', 'news',
-  'news/v2/views/index.json', 'NEWS/v1/views/index.json',
+  'NEWS/v2/views/index.json', 'NEWS/v1/views/index.json',
   // G3: unqualified pages are no longer public, and the generation segment is exact.
   'news/v1/views/collector/all/2026-11-09/page-0001.json',
   `news/v2/views/p/${GEN.toUpperCase()}.1/collector/all/2026-11-09/page-0001.json`,

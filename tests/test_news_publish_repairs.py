@@ -176,12 +176,10 @@ class Navigation(Small):
                 self.assertEqual(self.live_index(), qualified(old)[INDEX], "old index still live")
                 mixed_views += sum(1 for c in chains.values() if len({b for _, b in c}) > 1)
                 if crash_at == len(page_puts):
-                    # The index write is unresolved: no index write follows, not even a retry of this build.
-                    with self.assertRaises(pub.PublishPaused):
-                        pub.publish(self.private, self.public, new, self.clock)
-                    self.assertEqual(self.live_index(), qualified(old)[INDEX])
-                    navigate(self.raw_public)
-                    continue
+                    # The index write has no outcome: its commit stays open. G6: that does not pause; the
+                    # next cycle sends a new commit (fresh nonce) on the same expected ETag, and when it
+                    # lands the first one is known dead.
+                    self.assertTrue(pub.status(self.private, self.public, self.clock)["open_commits"])
                 # The next cycle reuses the pinned incarnation. G6 r1: a crash on a page PUT leaves that
                 # attempt unanswered, so the incarnation stays quarantined (page_uploads_unsettled) after
                 # it goes live; navigation and the public files are unaffected.
@@ -327,7 +325,9 @@ class AbandonedLease(Base):
         out = json.loads(out)
         self.assertEqual(out["publication"]["recovered_from"] is not None, True)
         st = pub.status(self.private, self.public, self.clock.set("2026-11-09T10:41:00Z"))
-        self.assertTrue(st["healthy"], st["problems"])
+        # G6 r1: the process exited during a page PUT, so that upload attempt is never recorded answered;
+        # the publisher cannot know the PUT will not land. The recovered incarnation stays quarantined.
+        self.assertEqual(st["problems"], ["page_uploads_unsettled"])
         self.assertEqual(st["leases"], {})
         navigate(self.raw_public)
 

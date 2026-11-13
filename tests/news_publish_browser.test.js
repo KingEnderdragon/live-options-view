@@ -23,12 +23,8 @@ const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.json': 'applic
 (async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'news-publish-'));
   const pub = path.join(tmp, 'public');
-  // G6 (NOT RUN): deploy/news-pilot.json is unchanged and still names the legacy public prefix, so the
-  // shipped file no longer validates. This applies the one pending edit to a temporary copy.
-  const cfg = JSON.parse(fs.readFileSync(path.join(REPO, 'market_data/news/deploy/news-pilot.json'), 'utf8'));
-  cfg.storage.public.prefix = 'news/v2/views/';
-  const cfgPath = path.join(tmp, 'news-pilot.g6.json');
-  fs.writeFileSync(cfgPath, JSON.stringify(cfg));
+  // G7: the shipped (inactive) deploy/news-pilot.json names news/v2/views/ and is used as is.
+  const cfgPath = path.join(REPO, 'market_data/news/deploy/news-pilot.json');
   const args = ['--config', cfgPath, '--private', path.join(tmp, 'private'), '--public', pub, '--spool', path.join(tmp, 'spool')];
   for (const clock of ['2026-11-09T10:05:00Z', '2026-11-09T10:20:00Z']) {
     execFileSync(process.env.PYTHON || 'python', ['-m', 'market_data.news', 'pilot-cycle', ...args, '--clock', clock],

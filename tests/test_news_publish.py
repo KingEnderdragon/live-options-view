@@ -7,9 +7,8 @@ G6 (NOT RUN: ported for static review only, never executed): the published contr
 news/v2/views/index.json and news/v2/views/p/<gen>.<n>/...; every index write is a compare-and-swap
 carrying a fresh commit nonce; withdrawal writes a tombstone and never deletes the index. The helpers
 here normalise the live index's nonce to NONCE0 so builds can still be compared byte for byte. The
-shipped news-pilot.json is unchanged by G6 and no longer validates (it names the legacy public
-prefix): config() applies PENDING_PILOT_EDITS, the exact inactive edit the owner still has to make,
-to an in-memory copy. See the G6 coverage map.
+shipped news-pilot.json names news/v2/views/ since G7 (inactive); PENDING_PILOT_EDITS is empty, so
+config() loads the shipped file as is.
 
 Nothing here contacts a network or a bucket: feeds come from tests/fixtures/news/feeds and both
 stores are temporary directories.
@@ -40,8 +39,8 @@ BUILD_INDEX = pub.BUILDER_INDEX     # the builder's unqualified index (news/v1/v
 GEN_EXAMPLE = "20261109T100500Z-0123456789abcdef"
 INC_EXAMPLE = GEN_EXAMPLE + ".1"
 NONCE0 = "0" * 32
-# The exact edit news-pilot.json still needs (G6 left the file unchanged; it stays inactive either way).
-PENDING_PILOT_EDITS = {("storage", "public", "prefix"): "news/v2/views/"}
+# G7 applied the G6 edit to news-pilot.json; nothing is pending (it stays inactive).
+PENDING_PILOT_EDITS = {}
 
 
 def patched_config_raw() -> dict:
@@ -371,7 +370,7 @@ class Interruption(Base):
         self.assertEqual(st["last_failure"]["stage"], "pages")
         # Recovery: the next attempt completes and says what it recovered from.
         report = pub.publish(self.private, self.public, self.gen2, self.clock)
-        self.assertEqual(report.recovered_from, generation_name(self.gen2))
+        self.assertEqual(report.recovered_from, generation_name(self.gen2) + ".1", "the interrupted incarnation")
         self.assertEqual(self.public_files(), qualified(self.gen2))
         # G6 r1: the crashed PUT got no answer, so the first upload attempt stays recorded: the publisher
         # cannot know it will not land. The incarnation is live and keeps its reservation; nothing in
@@ -586,13 +585,14 @@ class MissingPrices(Base):
 
 
 class PilotConfig(Base):
-    def test_shipped_config_needs_exactly_the_pending_g6_edit(self):
-        # G6 left news-pilot.json unchanged (out of the patch's paths). Until the owner applies
-        # PENDING_PILOT_EDITS it is refused, for that reason only; it is inactive either way.
-        with self.assertRaises(pub.PublishError) as caught:
-            pub.load_pilot_config(CONFIG)
-        self.assertEqual(str(caught.exception), "pilot config invalid: storage.public.prefix must be news/v2/views/")
-        self.assertFalse(json.loads(CONFIG.read_bytes())["active"])
+    def test_shipped_config_names_the_v2_public_prefix_and_stays_inactive(self):
+        # G7 applied the edit G6 listed (section 5.1): the shipped file validates as is.
+        cfg = pub.load_pilot_config(CONFIG)
+        raw = json.loads(CONFIG.read_bytes())
+        self.assertEqual(raw["storage"]["public"]["prefix"], "news/v2/views/")
+        self.assertFalse(raw["active"])
+        self.assertFalse(cfg.active)
+        self.assertNotIn("news/v1/views", json.dumps(raw), "no legacy public key space is described")
 
     def test_shipped_config_is_inactive_and_valid(self):
         cfg = config()

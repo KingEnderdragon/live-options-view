@@ -42,6 +42,15 @@ class Cases:
         return build_views(archive or self.archive, pub.unavailable_prices(), as_of=self.AS_OF, tolerance_s=120,
                            data_label=LABEL, dates=self.DATES, limits=limits_from(rows_per_page=rows_per_page, **limits))
 
+    def problems(self):
+        """publish-status problems, less the one the inactive config always reports here: generations
+        replaced more than 49 min earlier (TwoDates publishes from Nov 8) wait on the unverified store-clock
+        bound (G3, clock_bound_verified=false). That one is asserted to be the reason when present."""
+        st = pub.status(self.private, self.public, self.clock)
+        if "expiry_blocked_clock_bound_unverified" in st["problems"]:
+            self.assertFalse(pub.DEFAULT_POLICY.clock_bound_verified)
+        return [p for p in st["problems"] if p != "expiry_blocked_clock_bound_unverified"]
+
     def prepare(self):
         self.views = PER_DATE * len(self.DATES)
         self.full = self.build()
@@ -168,11 +177,11 @@ class Cases:
         self.assertEqual(self.public_files(), qualified(good), "the previous good generation is byte-identical")
         self.assertEqual({k: self.private.get(k) for k in self.private.list("")}, before_private,
                          "no state, snapshot, lease or receipt writes")
-        self.assertEqual(pub.status(self.private, self.public, self.clock)["problems"], [])
+        self.assertEqual(self.problems(), [])
         navigate(self.raw_public)
         recovered = self.build(index_views=self.views - 1)
         self.assert_publishes_navigates_and_renders(recovered)
-        self.assertEqual(pub.status(self.private, self.public, self.clock)["problems"], [])
+        self.assertEqual(self.problems(), [])
         with self.assertRaisesRegex(BuildError, "mandatory index envelope"):
             self.build(index_bytes=300)
 
@@ -233,7 +242,7 @@ class Cases:
                 self.assertEqual([e for e in self.log if e[0] in ("put", "delete")], [], "no public writes")
                 self.assertEqual(self.public_files(), qualified(good), "previous good generation byte-identical")
                 self.assertEqual({k: self.private.get(k) for k in self.private.list("")}, before_private)
-                self.assertEqual(pub.status(self.private, self.public, self.clock)["problems"], [])
+                self.assertEqual(self.problems(), [])
         navigate(self.raw_public)
 
 

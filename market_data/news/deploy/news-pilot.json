@@ -22,23 +22,23 @@
  "storage": {
   "private": {
    "env_prefix": "NEWS_PRIVATE_",
-   "holds": "raw archive news/v1/runs/, news/v1/index/, news/v1/latest.json, leases, news/v1/publish/ state, snapshots and receipts",
+   "holds": "raw archive news/v1/runs/, news/v1/index/, news/v1/latest.json, leases, news/v1/publish/ state, head (news/v1/publish/head.json), commit records (news/v1/publish/commits/), snapshots and receipts",
    "bucket": null,
    "requirement": "not publicly readable (no r2.dev or custom-domain access)"
   },
   "public": {
    "env_prefix": "NEWS_PUBLIC_",
-   "prefix": "news/v1/views/",
+   "prefix": "news/v2/views/",
    "holds": "sanitized view pages and index.json only",
    "bucket": null,
-   "requirement": "the bucket the site already reads through /browser-data and the public R2 origin; credentials scoped to writes under news/v1/views/ if the provider allows"
+   "requirement": "the bucket the site already reads through /browser-data and the public R2 origin; credentials scoped to writes under news/v2/views/ if the provider allows"
   }
  },
  "retention": {
   "raw_archive": "keep (immutable history); review at the end of the pilot",
   "snapshots": 3,
   "receipts": "keep for the pilot",
-  "public_views": "the last views.days UTC dates, as immutable generations under news/v1/views/g/<gen>/; a generation's pages are deleted only once it has been out of the index for the reader grace (see generations)"
+  "public_views": "the last views.days UTC dates, as immutable incarnations under news/v2/views/p/<gen>.<n>/; an incarnation's pages are deleted only once it has been out of the index for the reader grace (see generations), and never while a page upload into it is unanswered"
  },
  "generations": {
   "note": "Owner-approved defaults (2026-11-12, G2 v2). A replaced generation stays public for at least reader_grace_s; deletion needs both the producer clock and the store clock to show reader_grace_s + clock_epsilon_s + clock_skew_s (49 min), agreeing within clock_skew_s. clock_epsilon_s is an ASSUMED store-clock bound that has not been verified for any provider, so clock_bound_verified stays false and expiry deletion is refused (reported by publish-status) until a deployment verifies it.",
