@@ -169,6 +169,25 @@ def main(argv=None) -> int:
                                                  "still-pinned or fresh incarnation (requires publish-stop)")
     pilot_common(pr)
     pr.add_argument("--gen", required=True)
+    # P1 research ledger: local stores only (no --bucket option; nothing fetches or publishes).
+    ri = sub.add_parser("research-import", help="import a prepared research bundle (captures + annotations) "
+                                                "into a local research ledger")
+    ri.add_argument("--store", required=True, help="local object-store directory")
+    ri.add_argument("--bundle", required=True)
+    ri.add_argument("--clock", help="fixed UTC time (annotated_at is this import's time)")
+    ri.add_argument("--commit-clock", help="fixed UTC time for the run's commit record")
+    ri.add_argument("--defer-commit", action="store_true", help="leave the run uncommitted (research-settle later)")
+    ri.add_argument("--break-stale-lease", action="store_true")
+    rs = sub.add_parser("research-settle", help="record commits for research runs that have none, stamped now")
+    rs.add_argument("--store", required=True)
+    rs.add_argument("--clock")
+    rs.add_argument("--break-stale-lease", action="store_true")
+    rv = sub.add_parser("research-view", help="write the sanitized research view at a cutoff (read-only)")
+    rv.add_argument("--store", required=True)
+    rv.add_argument("--cutoff", required=True)
+    rv.add_argument("--mode", default="research", choices=["collector", "archive", "publication", "research"])
+    rv.add_argument("--observations-store", help="local news archive whose collected revisions annotations may target")
+    rv.add_argument("--out", required=True)
     args = p.parse_args(argv)
 
     if args.cmd == "sources":
@@ -176,6 +195,13 @@ def main(argv=None) -> int:
             print(f"{'ENABLED ' if s.enabled else 'disabled'}  {s.id:40s} {','.join(s.streams):18s} {s.url}")
         print(f"config_digest={config.config_digest()} rules_digest={config.rules_digest()}")
         return 0
+
+    if args.cmd.startswith("research-"):
+        try:
+            return _research_main(args)
+        except (ArchiveError, ValueError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
 
     if args.cmd.startswith(("pilot-", "publish-")):
         try:
@@ -285,6 +311,33 @@ def _pilot_stores(args, cfg):
     st = cfg["storage"]
     return (pub.bucket_store_from_env(os.environ, st["private"]["env_prefix"]),
             pub.PublicViewStore(pub.bucket_store_from_env(os.environ, st["public"]["env_prefix"])))
+
+
+def _research_main(args) -> int:
+    from . import research
+
+    store = LocalObjectStore(args.store)
+    if args.cmd == "research-import":
+        bundle = json.loads(Path(args.bundle).read_text(encoding="utf-8"))
+        commit = fixed_or_real_clock(args.commit_clock) if args.commit_clock else None
+        out = research.import_bundle(store, bundle, fixed_or_real_clock(args.clock), commit_clock=commit,
+                                     defer_commit=args.defer_commit, break_stale_lease=args.break_stale_lease)
+    elif args.cmd == "research-settle":
+        out = {"settled": research.settle_research(store, fixed_or_real_clock(args.clock),
+                                                   break_stale_lease=args.break_stale_lease)}
+    else:
+        ledger = research.load_research(store)
+        if ledger.problems:
+            raise ArchiveError(f"research ledger has corrupt runs: {ledger.problems}")
+        observations = load_archive(LocalObjectStore(args.observations_store)).observations if args.observations_store else []
+        labels = sorted({r.manifest["bundle_label"] for r in ledger.runs})
+        view = research.project(research.research_view(ledger, args.cutoff, args.mode, observations),
+                                " + ".join(labels) or "no research records")
+        Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.out).write_text(json.dumps(view, indent=1, ensure_ascii=False), encoding="utf-8")
+        out = {"out": args.out, "mode": view["mode"], "cutoff": view["cutoff"], "items": len(view["items"])}
+    print(json.dumps(out, indent=1, ensure_ascii=False))
+    return 0
 
 
 def _pilot_main(args) -> int:

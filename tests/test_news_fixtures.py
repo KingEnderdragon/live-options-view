@@ -17,6 +17,7 @@ FIXTURE_SHA256 = {
     "parser/malformed.xml": "c3448ad09d909ff3a018afb215ff29b3116ad12548da2e571b5ae8d1a3fe328a",
     "parser/rdf.xml": "59feed618f453704338569a3c0119e387ea455b0ab6966884afc7c9aa45708a2",
     "prices/qqq_2026-11-09.synthetic.jsonl": "4172e8f3cb087e0a962b61ba33da41c7a1a1f5cb8af3c8220d3d2117795310e2",
+    "research/positioning_p1_prepared.json": "9acc2991df8bdc3d43863a4b1b4a337ae0fa3adabd51fe8f394cb80052fcd4ac",  # P1 prepared records (new)
     "scenarios/a_v1/oilprice_com.xml": "a0148021b3f954152d96ae3707b0ea00a9b95a8412c3e3813d0d0ccb5ada8682",
     "scenarios/a_v2/oilprice_com.xml": "d9294b6b26cb439656f79d59bb43f06739972cce6fc532eb63ff9112d71ada86",
     "scenarios/b/eia_today_in_energy.xml": "6ffca65a75411b5a05b9f18b867cf9c76e5502cb24cdc93ec2fc7ce1dd826f61",

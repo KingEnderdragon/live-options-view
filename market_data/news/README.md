@@ -377,3 +377,7 @@ store-clock bound is verified). Legacy `news/v1/views` keys are untouched. See `
 ("Generations and settlement") for the contract, the provider assumptions, the operator commands
 and what activation still needs. Tests (authored, NOT RUN): `tests/test_news_generations.py`,
 `tests/test_news_settlement.py`.
+
+## P1: research captures and annotations (local, inactive)
+
+`research.py` keeps a separate research ledger (`news/v1/research/`) of prepared research captures and versioned annotations (positioning / institutional pressure), with collector, archive, publication (hindsight) and research visibility. `research-import`, `research-settle` and `research-view` work on local stores only. The view module `site/js/news-research.js` is not loaded by the site. See [RESEARCH.md](RESEARCH.md).
