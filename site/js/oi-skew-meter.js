@@ -28,12 +28,44 @@ const OI_SKEW_AVAILABILITY_LABEL = {
   live: 'live', stale: 'stale', closed: 'session closed', unavailable: 'unavailable', no_data: 'no data',
 };
 
+// Freshness (Chej review of 074639e): the meter must not stay "live" just
+// because nothing re-rendered it. State kept here:
+//  - the last good payload (and bot projection) the fetch cycle delivered;
+//  - the error of the most recent QQQ refresh, if it failed or was empty.
+// A failed/empty refresh re-renders the last good snapshot as at best stale
+// (noteOiSkewRefreshFailure); a successful one clears the error; and a
+// ticker re-evaluates age every OI_SKEW_AGE_TICK_MS so elapsed time alone
+// moves live -> stale -> session closed without any fetch.
+const OI_SKEW_AGE_TICK_MS = 15 * 1000;
+const _oiSkewState = { payload: null, bot: null, refreshError: null, timer: null };
+
 function updateOiSkewMeter(payload, nowMs = Date.now(), botProjection = null) {
+  _oiSkewState.payload = payload;
+  _oiSkewState.bot = botProjection;
+  _oiSkewState.refreshError = null;
+  _ensureOiSkewAgeTicker();
+  renderOiSkewMeter(nowMs);
+}
+
+// Called by the fetch cycle when a QQQ refresh failed or returned no rows.
+function noteOiSkewRefreshFailure(reason, nowMs = Date.now()) {
+  _oiSkewState.refreshError = String(reason || 'refresh failed');
+  _ensureOiSkewAgeTicker();
+  renderOiSkewMeter(nowMs);
+}
+
+function _ensureOiSkewAgeTicker() {
+  if (_oiSkewState.timer || typeof setInterval !== 'function') return;
+  _oiSkewState.timer = setInterval(() => renderOiSkewMeter(Date.now()), OI_SKEW_AGE_TICK_MS);
+}
+
+function renderOiSkewMeter(nowMs = Date.now()) {
   const root = document.getElementById('oi-skew-meter');
   if (!root) return;
   const $ = id => document.getElementById(id);
-  const raw = describeReferenceOiSkew(payload, nowMs);
-  const bot = describeBotOiSkew(botProjection, nowMs);
+  const raw = degradeOiSkewForRefreshFailure(
+    describeReferenceOiSkew(_oiSkewState.payload, nowMs), _oiSkewState.refreshError);
+  const bot = describeBotOiSkew(_oiSkewState.bot, nowMs);
 
   root.dataset.state = raw.availability;
   root.dataset.lean = raw.lean || 'none';
@@ -58,7 +90,8 @@ function updateOiSkewMeter(payload, nowMs = Date.now(), botProjection = null) {
       `OI skew ${raw.value.toFixed(3)}, ${raw.lean}, ${OI_SKEW_AVAILABILITY_LABEL[raw.availability]}`);
   }
 
-  const status = OI_SKEW_AVAILABILITY_LABEL[raw.availability] || raw.availability;
+  const status = (OI_SKEW_AVAILABILITY_LABEL[raw.availability] || raw.availability)
+    + (raw.refresh_failed ? ' · refresh failed' : '');
   $('oi-skew-meta').textContent =
     `${raw.symbol || 'QQQ'} · reference ±${((raw.band_pct ?? 0.02) * 100).toFixed(0)}% band · `
     + `snapshot ${_oiSkewEtTime(raw.snapshot_ms)} · ${status}`;

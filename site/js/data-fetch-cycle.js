@@ -48,6 +48,8 @@ async function fetchLatest() {
     if (typeof updateOiSkewMeter === 'function') updateOiSkewMeter(qqq.data);
   } else {
     chainState.QQQ = { data: chainState.QQQ?.data ?? null, error: qqq.error || 'No QQQ rows in the latest snapshot.' };
+    // A failed/empty refresh must not leave the OI skew meter labelled live.
+    if (typeof noteOiSkewRefreshFailure === 'function') noteOiSkewRefreshFailure(chainState.QQQ.error);
   }
 
   if (token.symbol !== 'QQQ') {

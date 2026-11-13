@@ -180,4 +180,75 @@ checks += 3;
   checks += 11;
 }
 
+// ── freshness regressions (Chej review of 074639e) ───────────────────────────
+// A good snapshot followed by failed/empty refreshes, and elapsed time with
+// no refresh at all, must never leave the meter labelled live.
+{
+  assert.ok(fetchCycle.includes('noteOiSkewRefreshFailure(chainState.QQQ.error)'),
+    'failed/empty QQQ refresh path notifies the meter');
+  const { degradeOiSkewForRefreshFailure } = require('../site/shared/oi-skew.js');
+  const ok = describeReferenceOiSkew(live(), NOW);
+  assert.equal(degradeOiSkewForRefreshFailure(ok, null), ok);
+  const d = degradeOiSkewForRefreshFailure(ok, 'HTTP 503');
+  assert.equal(d.availability, 'stale');
+  assert.match(d.detail, /Latest refresh failed \(HTTP 503\)/);
+  assert.equal(degradeOiSkewForRefreshFailure({ ...ok, availability: 'closed' }, 'x').availability, 'closed');
+  checks += 5;
+
+  const els = {};
+  const mk = id => (els[id] = { id, textContent: '', title: '', dataset: {}, style: {}, hidden: false,
+    attrs: {}, setAttribute(k, v) { this.attrs[k] = String(v); } });
+  for (const id of ['oi-skew-meter', 'oi-skew-marker', 'oi-skew-track', 'oi-skew-value', 'oi-skew-lean',
+    'oi-skew-meta', 'oi-skew-bot', 'oi-skew-bot-detail', 'oi-skew-thresholds']) mk(id);
+  let clock = NOW;
+  const timers = [];
+  const FakeDate = class extends Date { static now() { return clock; } };
+  const shared = require('../site/shared/oi-skew.js');
+  const ctx = { document: { getElementById: id => els[id] || null }, ...shared, Date: FakeDate, Math, Number, Intl,
+    String, setInterval: (fn, ms) => { timers.push({ fn, ms }); return timers.length; } };
+  const vm = require('node:vm');
+  vm.createContext(ctx);
+  vm.runInContext(fs.readFileSync(path.join(root, 'site', 'js', 'oi-skew-meter.js'), 'utf8'), ctx);
+  const tick = () => timers.forEach(t => t.fn());
+  const state = () => els['oi-skew-meter'].dataset.state;
+
+  // good initial snapshot
+  ctx.updateOiSkewMeter(live(), clock);
+  assert.equal(state(), 'live');
+  assert.equal(timers.length, 1, 'one age ticker');
+  assert.ok(timers[0].ms <= 30000, 'ticker re-evaluates age well inside the 2-minute stale bound');
+  // failed refresh 10 s later: last good value stays visible but is not live
+  clock += 10000;
+  ctx.noteOiSkewRefreshFailure(`QQQ snapshot could not be loaded.`, clock);
+  assert.equal(state(), 'stale');
+  assert.equal(els['oi-skew-value'].textContent, '−0.448', 'last good value kept on screen');
+  assert.match(els['oi-skew-meta'].textContent, /stale · refresh failed/);
+  assert.match(els['oi-skew-meter'].title, /Latest refresh failed/);
+  assert.match(els['oi-skew-track'].attrs['aria-valuetext'], /stale/);
+  // a successful refresh clears the failure
+  ctx.updateOiSkewMeter(live(), clock);
+  assert.equal(state(), 'live');
+  assert.doesNotMatch(els['oi-skew-meta'].textContent, /refresh failed/);
+  // empty refresh (no rows) is a failure too
+  ctx.noteOiSkewRefreshFailure('No QQQ rows in the latest snapshot.', clock);
+  assert.equal(state(), 'stale');
+  // failure with no prior good snapshot: unavailable, never live
+  ctx.updateOiSkewMeter(null, clock);
+  ctx.noteOiSkewRefreshFailure('HTTP 500', clock);
+  assert.equal(state(), 'unavailable');
+  assert.equal(timers.length, 1, 'no duplicate tickers');
+  checks += 13;
+
+  // elapsed freshness with NO further calls from the fetch cycle
+  clock = NOW;
+  ctx.updateOiSkewMeter(live(), clock);
+  assert.equal(state(), 'live');
+  clock = Date.parse('2026-11-13T17:36:30Z'); tick();          // 2.5 min after the snapshot
+  assert.equal(state(), 'stale');
+  clock = Date.parse('2026-11-13T21:40:00Z'); tick();          // > 4 h later
+  assert.equal(state(), 'closed');
+  assert.match(els['oi-skew-meta'].textContent, /session closed/);
+  checks += 4;
+}
+
 console.log(`oi_skew_meter: ${checks} checks passed (${fixture.cases.length} parity cases)`);

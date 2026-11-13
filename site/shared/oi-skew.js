@@ -132,6 +132,18 @@ function describeReferenceOiSkew(payload, nowMs = Date.now()) {
       + `${common.band_strikes ?? '?'} strikes. Prior-day settled OI — not intraday flow or a win probability.` };
 }
 
+// A refresh that failed or returned no rows must never leave a reading
+// labelled live: the last good snapshot is kept on screen (it is still the
+// latest thing we know) but is at best "stale", and says why. Age-based
+// stale/closed from describeReferenceOiSkew still applies on top.
+function degradeOiSkewForRefreshFailure(desc, reason) {
+  if (!reason) return desc;
+  const note = `Latest refresh failed (${reason}); showing the last good snapshot.`;
+  const availability = desc.availability === 'live' ? 'stale' : desc.availability;
+  return { ...desc, availability, refresh_failed: true, refresh_error: reason,
+    detail: `${note} ${desc.detail || ''}`.trim() };
+}
+
 // Bot projection → display model. `projection` is the read-only document the
 // runner would publish (crassus oi_skew_meter projection, schema
 // oi_skew_meter.v1). Absent → the state is reported as not published; the
@@ -166,5 +178,6 @@ function oiSkewMeterPercent(value) {
 
 if (typeof module !== 'undefined') {
   module.exports = { OI_SKEW_DEFAULTS, OI_SKEW_STALE_AFTER_MS, OI_SKEW_CLOSED_AFTER_MS,
-    classifyOiSkewSignal, describeReferenceOiSkew, describeBotOiSkew, oiSkewMeterPercent };
+    classifyOiSkewSignal, describeReferenceOiSkew, degradeOiSkewForRefreshFailure, describeBotOiSkew,
+    oiSkewMeterPercent };
 }
