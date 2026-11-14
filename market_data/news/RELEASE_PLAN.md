@@ -2,7 +2,9 @@
 
 **Status: preparation only.** This is not a release approval and does not complete the quest. Nothing
 in it is authorized: provider operation, publication, push, merge, deployment and activation all
-stay held until Owen approves each step. It is drawn from `PUBLISHING.md` (operations, generations,
+stay held until Owen approves each step. The activation steps and the day-one review below are
+**proposed** release-plan steps, not an approved run or a scheduled commitment. Accepted engineering
+stays accepted; this plan adds no new finish line. It is drawn from `PUBLISHING.md` (operations, generations,
 settlement), `RESEARCH.md` (research publication) and the accepted local evidence. No new tests
 were run for it.
 
@@ -15,24 +17,29 @@ were run for it.
 | Candidate head | `d2dd21cd058ab7782b01523db28e4a432c880f5c` on `feat/news-p1-wiring` (local, not pushed) |
 | Commits | 13 commits: `1d62d3c` (G1 transplant of M2–M6) → G3 (`24da6cb`, `7610760`, `38e9995`, `ccefb6f`) → G6 (`98c8d80`, `26b6739`) → G7 `b02d664` → P1 `4915d51` → P1d `ba609b1` → R1/R2 `e54467b` → corrections `6836414`, `d2dd21c` |
 | Size vs base | 89 files, +22,598 / −21. Shared (non-`market_data/news`, non-test) files: `backend/browser-data.js`, `frontend/preview-policy.mjs`, `site/index.html`, `site/js/boot.js`, `site/js/tab-switching.js`, `site/js/news-panel.js`, `site/js/news-research.js`. **No workflow file is changed.** |
-| Acceptance | Each stage has bounded local/static acceptance (see the quest Log). The evidence is contributor-run: 319 Python tests, 62/64 Node files with 2 base-level nonzero results, and 18 rendered checks at `e54467b`, plus the focused rechecks at `6836414` and `d2dd21c`. **M8 is not done:** no reviewer rerun on the landed revision, R3 not run, A1–A8 not verified. |
+| Acceptance | Each stage has bounded local/static acceptance (see the quest Log), and it stays accepted. The evidence is contributor-run: 319 Python tests, 62/64 Node files with 2 base-level nonzero results, and 18 rendered checks at `e54467b`, plus the focused rechecks at `6836414` and `d2dd21c`. The R3 cases and any all-suite rerun are **deferred, separately authorized work**, not landing gates. A1–A8 are not verified (section 3). |
 
-### Exact changes still needed at landing (code)
+### Changes a landing would involve (code; not authorized here)
 
-1. **Rebase or merge onto the current `master`.** The base `6df6442` predates later merged work (for
-   example the E1 price-feed fix) and the pending H1 Skew branch. The shared files to reconcile are
-   `site/index.html` and `backend/browser-data.js`.
+No rebase or landing is authorized by this plan. When one is authorized:
+
+1. **Bring the candidate onto the current `master`.** The base `6df6442` predates later merged work
+   (for example the E1 price-feed fix) and the pending H1 Skew branch. The shared files to reconcile
+   are `site/index.html` and `backend/browser-data.js`.
    - Earlier test merges of H1 (`7d123de`) touched different hunks and merged cleanly. That was a
-     throwaway merge, not an integration. Landing order is D7.
+     throwaway merge, not an integration.
+   - Shared-file and landing coordination (D7) is Chej's to reconcile. It is not automatically an
+     owner decision.
 2. **Recompute both News script stamps** after the landing merge, if either file changed.
    - The rule is `?v=` = the first 16 hex characters of the file's SHA-256 (pinned by
      `tests/news_research_view.test.js`).
    - At `d2dd21c`: `js/news-research.js?v=aac117405484746a` and `js/news-panel.js?v=97258fdf37938322`.
    - `news-research.js` must stay loaded before `news-panel.js`.
-3. **Rerun every suite on the landed revision** (M8): the Python news files, all Node files, and the
-   rendered News/research browser tests. Also the R3 cases: cross-process lease races, a late head
-   write, a mounted reload into a tombstone, high growth and incarnation 9999, W5/T4/T5, and a corrupt
-   research commit record.
+3. **Deferred, separately authorized checks**, not newly mandatory gates:
+   - all-suite reruns on a landed revision;
+   - the R3 cases: cross-process lease races, a late head write, a mounted reload into a tombstone,
+     high growth and incarnation 9999, W5/T4/T5, and a corrupt research commit record.
+   Whether and when to run them is decided separately.
 
 ## 2. Settled policy (carried forward, not open)
 
@@ -51,7 +58,7 @@ were run for it.
 
 ## 3. Prerequisites before any activation
 
-### Provider checks (separately authorized; M8)
+### Provider checks (separately authorized)
 
 | Item | What must be shown on the real provider |
 | --- | --- |
@@ -68,12 +75,25 @@ were run for it.
 | Index caching on direct R2 | The index is written with `Cache-Control: no-store`. Confirm the public origin/CDN honours it; the proxy forces no-store regardless. Generation pages are immutable, so their long cache is correct. |
 | Prefix-scoped tokens | Whether public-bucket credentials can be limited to `news/v2/views/`. If not, the code-level key guard (`PublicViewStore`) is the only fence. |
 
-### Owner decisions still open
+### Genuine pre-live decisions
 
-D1 (research modes/cutoffs or a picker), D2 (live research sources, the excerpt policy, access
-questions 1–5), D4 (real price input), D5 (buckets, credential scope, pilot beyond 7 days, end-of-pilot
-retention review), D6 (scheduler host and activation; the classifier stays `rules-v1`), D7 (landing
-order against H1 and other shared-file work). D3 is settled: see section 2.
+These are the decisions a pinned-research, unavailable-price pilot actually needs:
+
+1. **Buckets and credential scope.** Which private and public buckets; whether credentials can be
+   limited to `news/v2/views/` (D5).
+2. **Host and run authority.** Which scheduler host runs the producer, and who may start, stop and
+   resume it (D6).
+3. **Provider and clock prerequisites.** Which of the section-3 checks must pass before the first
+   cycle, including the store clock bound.
+4. **Whether a no-research pilot is acceptable.** That is, a pilot whose research entry is `none`
+   (see "Research in a live pilot" below).
+
+Deferred, not blockers to that pilot:
+- **D1:** extra research modes or cutoffs, or a picker. The pilot keeps the pinned view.
+- **D4:** a real price input. The pilot keeps prices unavailable.
+- **D2:** live research sources, the excerpt policy and access questions 1–5.
+
+D7 (shared-file and landing coordination) is Chej's to reconcile. D3 is settled: see section 2.
 
 ### Infrastructure (Owen)
 
@@ -85,12 +105,18 @@ order against H1 and other shared-file work). D3 is settled: see section 2.
   - Cron `*/15 * * * *` UTC, one-shot, restart policy NEVER.
   - Watch paths must not overlap the collectors' (#225).
 
-### Known gap: research in a live run
+### Research in a live pilot
 
-`research-import` and `research-settle` write **local stores only**; they have no `--bucket` option.
-A live private bucket would therefore hold no research ledger, and every live publication would carry
-`research.state = "none"` ("No research view published"). That is safe but empty. Publishing research
-live needs a separate, authorized import path into the private bucket (part of D2).
+- **Why it would be empty.** `research-import` and `research-settle` write **local stores only**;
+  they have no `--bucket` option. A **fresh, unseeded** private ledger therefore holds no research
+  runs, and each publication from it would carry `research.state = "none"` ("No research view
+  published").
+- **What this does not say.** It is a statement about a fresh ledger under this code. It is not
+  evidence about what any current remote bucket holds.
+- **Two separate questions:**
+  1. Is a **no-research pilot** acceptable? Then nothing more is needed.
+  2. Should the pilot carry research? That needs a **separately authorized import path** into the
+     private bucket, plus the D2 source and excerpt decisions.
 
 ## 4. Exact configuration at activation
 
@@ -116,12 +142,14 @@ The command is the config's `schedule.command`:
 `python -m market_data.news pilot-cycle --config market_data/news/deploy/news-pilot.json --live`.
 `--live` is refused unless `active` is `true` **and** `NEWS_ALLOW_BUCKET_WRITES=1` is set.
 
-## 5. Activation order
+## 5. Proposed activation order
 
-Each step needs its own approval and is checked before the next one starts.
+This is a proposed sequence, not an approved run or a schedule. Each step would need its own
+approval and would be checked before the next one starts.
 
-1. **Land the code** (section 1): reviewed merge, stamps recomputed, M8 suites green on the landed
-   revision. There is no config flip yet, so the producer cannot write.
+1. **Land the code** (section 1), when authorized: a reviewed merge with the stamps recomputed. Any
+   suite reruns are the separately authorized checks of section 1. There is no config flip yet, so
+   the producer cannot write.
 2. **Release the site side first**: the shell (`index.html`, `boot.js`, `tab-switching.js`), the
    panel and research scripts, the Worker (`backend/browser-data.js`) and `preview-policy.mjs`,
    **together**.
@@ -134,17 +162,20 @@ Each step needs its own approval and is checked before the next one starts.
 5. **First cycle**, either one scheduler run or one supervised run, then:
    - `publish-status` exits 0;
    - the index is `published`, with `gen` = the head's pinned incarnation;
-   - the pages and the research entry (`none`, see the gap above) render on both bases;
+   - the pages and the research entry (`none` from a fresh, unseeded ledger: see "Research in a live pilot") render on both bases;
    - receipts are written;
    - the public bucket has nothing under `news/v1/`.
-6. **Unpause the 15-minute schedule.** Watch `publish-status` each hour on the first day. Chej
-   reviews after the first live day.
+6. **Unpause the 15-minute schedule.** Proposed: watch `publish-status` each hour on the first
+   day, and a review by Chej after the first live day.
 7. **Clock bound.** With `clock_bound_verified: false`, replaced generations are never deleted
-   (`expiry_blocked_clock_bound_unverified`), so pages accumulate against the cap.
-   - At about 64 pages per generation, the 6,300 cap is reached after about 98 cycles, **about
-     24.5 hours**. Publication then pauses (`publication_paused`); nothing is evicted.
-   - So either the clock bound is verified and the flag set within the first day, or a pause on day 2
-     is expected and acceptable. This is a decision before step 6.
+   (`expiry_blocked_clock_bound_unverified`), so pages accumulate against the cap until the safe
+   pause (`publication_paused`); nothing is evicted.
+   - **Illustration only, not a deadline:** at 64 pages per generation and one generation every
+     15 minutes, 6,300 pages last about 98 cycles, about 24.5 hours.
+   - The real time depends on page growth per generation, reservations (including quarantined
+     incarnations, which keep theirs) and whether the research entry is `none`.
+   - The 6,300 cap and the safe pause stay unchanged. Whether the clock bound is verified before or
+     during the pilot belongs to the provider/clock prerequisites decision above.
 
 ## 6. Stop, withdraw, restore and roll back
 
