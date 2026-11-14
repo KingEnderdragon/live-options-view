@@ -174,23 +174,46 @@ provider action; both still need the specific restoration authority above.
   the restored combined Worker `live-options-view`. The API Worker
   `live-options-api` then holds no cron.
 
+Ownership rule: **at most one** settlement cron owner at every point of the
+transition, and **exactly one** at completion. The existing restoration/write
+fence stays in place from before step 2 through the final readback in step 4.
+
 During the reverse handoff:
 
 1. Before executing, read back the triggers of both Workers and record them.
    Expected: `live-options-api` holds only `*/15 12-23 * * MON-FRI`, and
    `live-options-view` holds none.
-2. Keep one owner at every step and never two. Clear the API Worker's trigger
-   before the combined deploy installs its own. A brief interval with no owner
-   only skips an idempotent 15-minute sweep. Two owners would run settlement
-   twice.
+2. With the fence in place, clear the API Worker's trigger, then read back and
+   confirm that it is actually absent. Do not run the combined deploy until
+   that readback shows no API cron. Record the time the API trigger was
+   cleared: the no-owner interval starts here, and it lasts until step 4
+   passes. A failed deploy or correction can make it long.
 3. After the combined deploy, read back `live-options-view`'s triggers. They
-   will show the pinned numeric `1-5`. Correct them with a trigger-only change
-   to exactly `*/15 12-23 * * MON-FRI`, under the same restoration authority.
-   Do not change the restoration checkout to do this.
-4. Verify and record, in the dated release record: exactly one settlement cron
-   across both Workers, on `live-options-view`, with a named-weekday expression
-   `*/15 12-23 * * MON-FRI`; `live-options-api` holds none. Stop and escalate if
-   a numeric day-of-week remains or both Workers hold a cron.
+   will show the pinned numeric `1-5`. Still fenced, correct them with a
+   trigger-only change to exactly `*/15 12-23 * * MON-FRI`, under the same
+   restoration authority. Do not change the restoration checkout to do this.
+4. Final readback, still fenced: exactly one settlement cron across both
+   Workers, on `live-options-view`, with the named-weekday expression
+   `*/15 12-23 * * MON-FRI`, and none on `live-options-api`. Record it in the
+   dated release record together with the actual missed interval (from the
+   step 2 clear time to this readback) and the scheduled sweeps that fell
+   inside it. Lift the fence only after this readback passes.
+
+If any step fails (the API trigger does not clear, the deploy fails or is
+partial, the correction fails, or a readback disagrees):
+
+- Stay fenced. Do not lift the fence and do not leave a numeric day-of-week
+  cron active, including after escalation.
+- Reconcile the actual state first: read back which Worker versions are
+  deployed and the triggers on both Workers, and record them.
+- Recover a verified single-owner schedule under the specific restoration
+  authority. That owner is either the restored `live-options-view` corrected to
+  `*/15 12-23 * * MON-FRI`, or, if the restoration is abandoned, the API Worker
+  with `*/15 12-23 * * MON-FRI`. Do not restore the API trigger while
+  `live-options-view` still holds any cron; remove or confirm the absence of
+  the combined Worker's trigger first.
+- Confirm exactly one owner by readback, record the actual missed interval, and
+  only then lift the fence.
 
 Forward re-separation reverses this: the API Worker again becomes the only owner
 of `*/15 12-23 * * MON-FRI` from `wrangler.api.toml`, and the asset Worker keeps
