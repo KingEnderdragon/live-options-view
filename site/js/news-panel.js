@@ -38,6 +38,7 @@
   // and frontend/preview-policy.mjs. Legacy news/v1/views keys are refused.
   var GEN = /^([0-9]{4})([0-9]{2})([0-9]{2})T([0-9]{2})([0-9]{2})([0-9]{2})Z-[0-9a-f]{16}\.[1-9][0-9]{0,3}$/;
   var VIEW_KEY = /^news\/v2\/views\/p\/([0-9]{8}T[0-9]{6}Z-[0-9a-f]{16}\.[1-9][0-9]{0,3})\/(collector|archive|publication)\/(all|ai_buildout|oil)\/([0-9]{4})-([0-9]{2})-([0-9]{2})\/page-([0-9]{4})\.json$/;
+  var RESEARCH_KEY = /^news\/v2\/views\/p\/([0-9]{8}T[0-9]{6}Z-[0-9a-f]{16}\.[1-9][0-9]{0,3})\/research\/view\.json$/;
   var NONCE = /^[0-9a-f]{32}$/;
   // Owner-approved defaults (config.GEN_*): a reader follows one index for at most LEASE_MS from the
   // moment its request started; every request has a DEADLINE_MS deadline.
@@ -94,9 +95,18 @@
     return m[1];
   }
 
-  // The index, or one incarnation / mode / stream, a real calendar date and page 0001-0020. Nothing else.
+  // MediaFlow R1: the incarnation of a generation's one research page (p/<gen>.<n>/research/view.json),
+  // or null. Kept apart from genOf so a research key never stands in for a view page.
+  function researchGenOf(key) {
+    if (typeof key !== 'string') return null;
+    var m = RESEARCH_KEY.exec(key);
+    return m && isGen(m[1]) ? m[1] : null;
+  }
+
+  // The index, one incarnation / mode / stream, a real calendar date and page 0001-0020, or one
+  // incarnation's research page. Nothing else.
   function isNewsViewKey(key) {
-    return key === INDEX_KEY || genOf(key) !== null;
+    return key === INDEX_KEY || genOf(key) !== null || researchGenOf(key) !== null;
   }
 
   function newsError(kind, message) {
@@ -525,11 +535,19 @@
     container.setAttribute('data-state', 'loading');
     var leaseValid = startLease(clocks, leaseMs);   // from the moment the index request starts
     var dead = false;                               // set once this mount has asked for a refresh
+    // MediaFlow R1: opts.onIndex(event) lets the research view follow this mount's one index read
+    // (same generation, same lease) instead of fetching anything of its own. Its failures never reach
+    // the news views. event.state: published | withdrawn | unpublished | absent | failed | refresh.
+    function tell(event) {
+      if (typeof opts.onIndex !== 'function') return;
+      try { opts.onIndex(event); } catch (e) { /* the research view reports its own failure */ }
+    }
 
     // Never mixes generations and never falls back: the reader reloads the fixed index instead.
     function refresh(reason) {
       if (dead) return;
       dead = true;
+      tell({ state: 'refresh', reason: reason });
       clear(pickerSlot);
       clear(pageSlot);
       container.removeAttribute('data-pending');
@@ -559,10 +577,12 @@
         container.removeAttribute('data-pending');
         container.setAttribute('data-page', '');
         container.setAttribute('data-state', tomb === 'withdrawn' ? 'withdrawn' : 'absent');
+        tell({ state: tomb });
         return null;
       }
       var problems = validateIndex(index);
       if (problems.length) throw new Error(problems.join('; '));
+      tell({ state: 'published', index: index, fetchJson: fetchJson, leaseValid: leaseValid });
       var latest = 0;
       if (opts.events && typeof opts.events.addEventListener === 'function') {
         var recheck = function () { if (!dead && !leaseValid()) refresh('the index lease ended'); };
@@ -619,6 +639,7 @@
       return show(index.views[0].first_page);
     }).catch(function (e) {
       clear(pageSlot);
+      tell({ state: e && e.newsKind === 'absent' ? 'absent' : 'failed' });
       if (e && e.newsKind === 'absent') {
         add(pageSlot, el(doc, 'p', 'np-empty np-absent', 'No news views published yet'));
         container.setAttribute('data-state', 'absent');
@@ -631,7 +652,7 @@
 
   var api = { safeUrl: safeUrl, validatePage: validatePage, validateIndex: validateIndex, renderPage: renderPage,
     mount: mount, segmentText: segmentText, isNewsViewKey: isNewsViewKey, makeFetcher: makeFetcher,
-    isGen: isGen, genOf: genOf, startLease: startLease, tombstoneState: tombstoneState,
+    isGen: isGen, genOf: genOf, researchGenOf: researchGenOf, startLease: startLease, tombstoneState: tombstoneState,
     VIEW_SCHEMA: VIEW_SCHEMA, INDEX_SCHEMA: INDEX_SCHEMA, INDEX_KEY: INDEX_KEY, MODES: MODES, STREAMS: STREAMS, MAX_PAGES: MAX_PAGES,
     LEASE_MS: LEASE_MS, DEADLINE_MS: DEADLINE_MS, CLOCK_AGREE_MS: CLOCK_AGREE_MS };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
@@ -642,9 +663,11 @@
 // BROWSER_DATA is the page's shared data base (index.html): the bounded
 // /browser-data proxy on the production origin, the public R2 origin otherwise.
 function loadNewsPanel() {
-  // MediaFlow P1: the research view (js/news-research.js) mounts with the news views, under them.
-  if (typeof loadNewsResearch === 'function') loadNewsResearch();
+  // MediaFlow R1: the research view (js/news-research.js) follows this mount's index: it shows the
+  // research page that index names, from the same generation, under the same lease.
+  var box = document.getElementById('news-research');
+  var onIndex = box && typeof NewsResearch !== 'undefined' ? NewsResearch.follow(document, box) : null;
   return NewsPanel.mount(document, document.getElementById('news-panel'),
     NewsPanel.makeFetcher(BROWSER_DATA, function (url, opts) { return fetch(url, opts); }, Date.now),
-    NewsPanel.INDEX_KEY, { events: typeof window !== 'undefined' ? window : null });
+    NewsPanel.INDEX_KEY, { events: typeof window !== 'undefined' ? window : null, onIndex: onIndex });
 }

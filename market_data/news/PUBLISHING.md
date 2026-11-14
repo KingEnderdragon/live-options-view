@@ -17,6 +17,10 @@ start".
 3. It builds sanitized views for the last 7 UTC dates with the accepted M4a builder. No price input
    is connected, so every price is `missing`, pages carry `price_series.input: "unavailable"`, and
    the data label says "prices unavailable".
+   R2: the same build also carries one research page. It is the sanitized projection of the private
+   research ledger (`news/v1/research/`), **fixed** to research mode at this build's cutoff, and is
+   named by the index's `research` entry (state `published`, `none` or `omitted`). It is a page of
+   the generation like any other. See RESEARCH.md, "Publication".
 4. It publishes the views to the public store, in this order (see `publish.py`):
    - The index and every page it names are checked before any write: no state, snapshot, lease,
      receipt or public object is touched by a generation that fails.
@@ -149,6 +153,9 @@ What the provider documents and what this code assumes are listed separately at 
   plus public pages with no head record. The reservation is taken in the same compare-and-swap that pins the incarnation, so
   two admissions cannot both fit into the last free room. At the cap publication pauses (visible);
   nothing protected is evicted; cleanup keeps running.
+  R1: the research page counts as one page of its incarnation. The pilot maximum is 1,261 pages per
+  generation, so five generations at that maximum (6,305) exceed the unchanged cap, and the fifth
+  pauses instead of evicting.
 - **Retirement.** A replaced generation stays public for at least `reader_grace_s` (45 min). Its pages
   are deleted only when the producer clock and the store clock (the private heartbeat's
   LastModified) both show 45 min + `clock_epsilon_s` + `clock_skew_s` = 49 min since it ceased, they

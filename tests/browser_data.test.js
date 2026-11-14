@@ -18,8 +18,9 @@ const KEYS = [
   `news/v2/views/p/${GEN}.1/collector/all/2026-11-09/page-0001.json`,
   `news/v2/views/p/${GEN}.1/archive/oil/2026-11-09/page-0002.json`,
   `news/v2/views/p/${GEN}.1/publication/ai_buildout/2024-02-29/page-0020.json`,
-  // MediaFlow P1: exactly the sanitized research view.
-  'news/v2/research/view.json',
+  // MediaFlow R1: one incarnation's research page (the generation's sanitized research view).
+  `news/v2/views/p/${GEN}.1/research/view.json`,
+  `news/v2/views/p/${GEN}.9999/research/view.json`,
 ];
 // The panel applies the same key rule before every request (both bases); the two must agree.
 const newsPanel = require('../site/js/news-panel.js');
@@ -46,6 +47,13 @@ const NEWS_REJECTED = [
   'news/v1/research/runs/2026-11-13/20261113T180000Z-0123abcd/manifest.json', 'news/v1/research/_writer/lease.json',
   'news/v2/research/', 'news/v2/research/view.json/', 'news/v2/research/view.json.bak', 'news/v2/research/other.json',
   'news/v2/research/view.JSON', 'news/v2/research//view.json', 'news/v2/research/%76iew.json',
+  // R1: the retired mutable research key, and research-page near-misses.
+  'news/v2/research/view.json', `news/v2/views/p/${GEN}/research/view.json`, `news/v2/views/p/${GEN}.0/research/view.json`,
+  `news/v2/views/p/${GEN}.1/research/view.json/`, `news/v2/views/p/${GEN}.1/research/view.json.bak`,
+  `news/v2/views/p/${GEN}.1/research/other.json`, `news/v2/views/p/${GEN}.1/research/`, `news/v2/views/p/${GEN}.1/research/view.JSON`,
+  `news/v2/views/p/${GEN}.1/research/%76iew.json`, `news/v2/views/p/${GEN}.1/collector/research/view.json`,
+  'news/v2/views/p/20261332T100500Z-0123456789abcdef.1/research/view.json',
+  'news/v2/views/p/20261109T250500Z-0123456789abcdef.1/research/view.json', 'news/v2/views/research/view.json',
   // G3: unqualified pages are no longer public, and the generation segment is exact.
   'news/v1/views/collector/all/2026-11-09/page-0001.json',
   `news/v2/views/p/${GEN.toUpperCase()}.1/collector/all/2026-11-09/page-0001.json`,

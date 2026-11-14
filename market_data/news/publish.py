@@ -71,10 +71,11 @@ from .normalize import iso, parse_iso, sha256_hex
 from .prices import PriceFile
 from .reader import MODES, load_archive
 from .views import (INCARNATION_MAX, INCARNATION_PATTERN, INDEX_KEY as BUILDER_INDEX, INDEX_REASONS, LIMITS,
-                    PAGES_ROOT, PUBLISHED_INDEX_KEY, PUBLISHED_INDEX_SCHEMA, PUBLISHED_ROOT, STREAM_KEYS, build_views,
-                    commit_index, commit_nonce_of, files_digest, generation_name, generation_page_key, is_gen,
-                    is_incarnation, page_key, pages_digest, qualified_limits, qualify_generation, split_incarnation,
-                    tombstone_index)
+                    PAGES_ROOT, PUBLISHED_INDEX_KEY, PUBLISHED_INDEX_SCHEMA, PUBLISHED_ROOT, RESEARCH_KEY,
+                    RESEARCH_STATES, RESEARCH_VIEW_SCHEMA, STREAM_KEYS, build_views, commit_index, commit_nonce_of,
+                    files_digest, generation_name, generation_page_key, generation_research_key, is_gen,
+                    is_incarnation, page_key, pages_digest, qualified_limits, qualify_generation, research_page,
+                    split_incarnation, tombstone_index)
 
 PUBLIC_PREFIX = f"{PUBLISHED_ROOT}/"                 # news/v2/views/ : the fresh public namespace (G6)
 PUBLIC_INDEX = PUBLISHED_INDEX_KEY                  # news/v2/views/index.json : the only commit point
@@ -112,6 +113,8 @@ _PAGE_RE = re.compile(r"^news/v1/views/(collector|archive|publication)/(all|ai_b
                       r"([0-9]{4})-([0-9]{2})-([0-9]{2})/page-([0-9]{4})\.json$")
 _INC_PAGE_RE = re.compile(rf"^news/v2/views/p/({INCARNATION_PATTERN})/(collector|archive|publication)/"
                           r"(all|ai_buildout|oil)/([0-9]{4})-([0-9]{2})-([0-9]{2})/page-([0-9]{4})\.json$")
+# R1: the generation's one research page (news/v2/views/p/<gen>.<n>/research/view.json).
+_INC_RESEARCH_RE = re.compile(rf"^news/v2/views/p/({INCARNATION_PATTERN})/research/view\.json$")
 
 
 class PublishError(ArchiveError):
@@ -149,14 +152,17 @@ def _real_date(y: str, m: str, d: str) -> bool:
 
 def is_builder_view_key(key: str) -> bool:
     """The builder's unqualified keys (index, or mode/stream/real date/page 0001..pages_per_view)."""
-    if key == BUILDER_INDEX:
+    if key in (BUILDER_INDEX, RESEARCH_KEY):
         return True
     m = _PAGE_RE.match(key)
     return bool(m) and 1 <= int(m.group(6)) <= LIMITS.pages_per_view and _real_date(m.group(3), m.group(4), m.group(5))
 
 
 def incarnation_of(key: str) -> str | None:
-    """The incarnation (<gen>.<n>) of a published page key, or None if key is not one."""
+    """The incarnation (<gen>.<n>) of a published page key (a view page or the research page), or None."""
+    r = _INC_RESEARCH_RE.match(key)
+    if r:
+        return r.group(1) if is_incarnation(r.group(1)) else None
     m = _INC_PAGE_RE.match(key)
     if not m or not is_incarnation(m.group(1)):
         return None
@@ -499,7 +505,59 @@ def _page_key(mode, stream, date, n):
     return page_key(mode, stream, date, n)
 
 
-def _check_views(files: dict[str, bytes], index: dict, key_of, limits, gen: str | None, index_key: str) -> None:
+_RESEARCH_ENTRY_KEYS = {"schema_version", "mode", "cutoff", "fixed", "runs", "unverified_runs", "state", "page",
+                        "items", "reason", "bytes"}
+
+
+def _check_research(files: dict[str, bytes], index: dict, research_key: str, gen: str | None) -> set[str]:
+    """R1/R2: the index's optional "research" entry and the one page it names.
+
+    The view is fixed: mode "research" at cutoff == build_as_of. state "published" names exactly the
+    generation's research key, whose page is a news-research-view/v1 projection agreeing with the entry
+    (and carrying gen when qualified); "none" and "omitted" name no page, and the build must hold none.
+    Returns the set of keys it named (the research page, or nothing)."""
+    entry = index.get("research")
+    if entry is None:
+        if research_key in files:
+            raise PublishError("the generation has a research page but its index has no research entry")
+        return set()
+    if not isinstance(entry, dict) or set(entry) - _RESEARCH_ENTRY_KEYS:
+        raise PublishError(f"index.research is not a research entry: {sorted(entry) if isinstance(entry, dict) else entry!r}")
+    want = {"schema_version": RESEARCH_VIEW_SCHEMA, "mode": "research", "cutoff": index.get("build_as_of"), "fixed": True}
+    wrong = {k: entry.get(k) for k, v in want.items() if entry.get(k) != v}
+    if wrong or entry.get("state") not in RESEARCH_STATES:
+        raise PublishError(f"index.research must be the fixed research view at the build cutoff: {wrong or entry.get('state')}")
+    for name in ("runs", "unverified_runs", "items"):
+        if not _int(entry.get(name)) or entry[name] < 0:
+            raise PublishError(f"index.research.{name} is not a count")
+    if entry["state"] != "published":
+        if entry.get("page") is not None or research_key in files:
+            raise PublishError(f"index.research is {entry['state']!r} but a research page is present or named")
+        if entry["state"] == "omitted" and entry.get("reason") != "research_view_bytes":
+            raise PublishError("an omitted research view must give its reason")
+        return set()
+    if entry.get("page") != research_key:
+        raise PublishError(f"index.research.page {entry.get('page')!r} is not this generation's research page {research_key}")
+    if research_key not in files:
+        raise PublishError(f"index names a research page the generation lacks: {research_key}")
+    try:
+        page = json.loads(files[research_key])
+    except ValueError as exc:
+        raise PublishError(f"{research_key} is not JSON: {exc}") from exc
+    expect = {"schema_version": RESEARCH_VIEW_SCHEMA, "page_kind": "research", "mode": "research",
+              "cutoff": index.get("build_as_of"), "build_as_of": index.get("build_as_of"), "hindsight": False}
+    if gen is not None:
+        expect["gen"] = gen
+    wrong = {k: page.get(k) for k, v in expect.items() if not isinstance(page, dict) or page.get(k) != v}
+    if wrong:
+        raise PublishError(f"{research_key} disagrees with its index entry: {wrong}")
+    if not isinstance(page.get("items"), list) or len(page["items"]) != entry["items"]:
+        raise PublishError(f"{research_key}: items differ from its index entry")
+    return {research_key}
+
+
+def _check_views(files: dict[str, bytes], index: dict, key_of, limits, gen: str | None, index_key: str,
+                 research_key_of: str = RESEARCH_KEY) -> None:
     """Every page the index names: present, renderable, agreeing with its key, entry and page chain."""
     named, seen_views = set(), set()
     for v in index["views"]:
@@ -535,6 +593,7 @@ def _check_views(files: dict[str, bytes], index: dict, key_of, limits, gen: str 
                 raise PublishError(f"{key} disagrees with its key, index entry or page chain: {wrong}")
             if page["view"].get("rows_total") != v.get("rows_total") or page["complete"] != v.get("complete"):
                 raise PublishError(f"{key}: rows_total/complete differ from its index entry")
+    named |= _check_research(files, index, research_key_of, gen)
     orphans = sorted(set(files) - named - {index_key})
     if orphans:
         raise PublishError(f"pages the index does not name: {orphans[:5]}")
@@ -598,7 +657,8 @@ def validate_qualified(inc: str, files: dict[str, bytes], limits=LIMITS) -> dict
         raise PublishError(f"index.gen {index.get('gen')!r} / logical_gen {index.get('logical_gen')!r} is not {inc}")
     if index.get("pages_sha256") != pages_digest(files):
         raise PublishError("index.pages_sha256 does not match the incarnation's pages")
-    _check_views(files, index, lambda m, s, d, n: generation_page_key(inc, m, s, d, n), limits, inc, PUBLIC_INDEX)
+    _check_views(files, index, lambda m, s, d, n: generation_page_key(inc, m, s, d, n), limits, inc, PUBLIC_INDEX,
+                 generation_research_key(inc))
     return index
 
 
@@ -1795,7 +1855,14 @@ def load_pilot_config(path) -> PilotConfig:
     for name in ("clock_epsilon_s", "clock_skew_s"):
         if not isinstance(gens.get(name), int) or gens[name] <= 0:
             problems.append(f"generations.{name} must be a positive integer")
-    per_generation = 7 * len(STREAM_KEYS) * len(MODES) * LIMITS.pages_per_view
+    research = cfg.get("research") or {}
+    if research.get("mode") != "research" or research.get("cutoff") != "build_as_of":
+        problems.append("research must be pinned to mode 'research' at cutoff 'build_as_of' (the fixed view; "
+                        "other modes or cutoffs are a separate decision)")
+    if not research.get("data_label"):
+        problems.append("research.data_label is required")
+    # The pilot maximum: every view at its page limit, plus the one research page (R1).
+    per_generation = 7 * len(STREAM_KEYS) * len(MODES) * LIMITS.pages_per_view + 1
     if not isinstance(gens.get("page_cap"), int) or gens["page_cap"] < per_generation:
         problems.append(f"generations.page_cap must be an integer >= {per_generation} (one pilot generation at its maximum)")
     if gens.get("clock_bound_verified") not in (True, False):
@@ -1822,6 +1889,21 @@ def view_dates_for(now: datetime, days: int) -> list[str]:
     return [(today - timedelta(days=n)).isoformat() for n in range(days - 1, -1, -1)]
 
 
+def build_research(private, archive, now: datetime, data_label: str, limits=LIMITS) -> tuple[dict, bytes | None]:
+    """R2: the research page of one build, from the private research ledger (news/v1/research/, local
+    store only while the pilot is inactive). Pinned: research mode at this build's cutoff (now), with the
+    collector archive's observations available as annotation targets. All time gates are research.py's
+    (capture access + capture commit + annotation creation + annotation commit <= cutoff); nothing here
+    chooses another mode or cutoff. Runs that fail verification are counted, never shown."""
+    from .research import load_research, project, research_view   # local import: research imports archive
+    ledger = load_research(private)
+    if not ledger.runs:
+        return research_page(None, as_of=now, limits=limits, problems=len(ledger.problems))
+    view = research_view(ledger, now, "research", archive.observations)
+    return research_page(project(view, data_label), as_of=now, limits=limits, runs=len(ledger.runs),
+                         problems=len(ledger.problems))
+
+
 def pilot_cycle(private, public, spool, fetch, clock, cfg: PilotConfig, *, commit_clock=None,
                 lease_holder=None, break_stale_lease=False) -> dict:
     """One scheduled cycle: collect the four sources, build bounded views, publish. A stop marker no-ops."""
@@ -1836,9 +1918,13 @@ def pilot_cycle(private, public, spool, fetch, clock, cfg: PilotConfig, *, commi
                           break_stale_lease=break_stale_lease)
     now = (commit_clock or clock)()
     v = cfg["views"]
+    archive = load_archive(private)
+    limits = qualified_limits()
+    research = build_research(private, archive, now, cfg["research"]["data_label"], limits)
     # qualified_limits leaves room for the generation-qualified keys and fields added on publication.
-    files = build_views(load_archive(private), unavailable_prices(), as_of=now, tolerance_s=v["tolerance_s"],
-                        data_label=v["data_label"], dates=view_dates_for(now, v["days"]), limits=qualified_limits())
+    files = build_views(archive, unavailable_prices(), as_of=now, tolerance_s=v["tolerance_s"],
+                        data_label=v["data_label"], dates=view_dates_for(now, v["days"]), limits=limits,
+                        research=research)
     pub = publish(private, public, files, commit_clock or clock, keep_snapshots=cfg["retention"]["snapshots"],
                   policy=policy_from(cfg), lease_holder=lease_holder, break_stale_lease=break_stale_lease)
     m = report.manifest

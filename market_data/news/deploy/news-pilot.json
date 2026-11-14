@@ -18,6 +18,12 @@
   "tolerance_s": 120,
   "data_label": "PILOT news: prices unavailable (no price input connected)"
  },
+ "research": {
+  "mode": "research",
+  "cutoff": "build_as_of",
+  "data_label": "PREPARED research records (positioning / institutional pressure): not live collection",
+  "note": "FIXED VIEW. Each cycle publishes one research page, built from the private research ledger (news/v1/research/, private store only), in research mode at that cycle's build cutoff, as a page of the same generation as the news views. The loader accepts no other mode or cutoff; more modes, a cutoff picker, adapters or live research sources are separate decisions."
+ },
  "prices": {"input": "unavailable"},
  "storage": {
   "private": {

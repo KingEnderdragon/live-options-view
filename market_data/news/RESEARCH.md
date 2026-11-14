@@ -5,19 +5,61 @@ Positioning and institutional-pressure records, built from the accepted design
 what pressure is actually reported, and what adjustment might follow?** Every answer stays labelled
 with how and when we knew it.
 
-**Status:** local and inactive. Nothing collects, fetches, publishes or reads a bucket:
+**Status:** local and inactive. Nothing collects, fetches or reads a bucket:
 - The CLI commands below take local stores only. They have no `--bucket` option.
-- The view module `site/js/news-research.js` is **not** loaded by `site/index.html`. Wiring it into
-  the News tab would need these shared-file steps, none of which is done:
-  - the script tag and its `?v=` stamp in `site/index.html`;
-  - a public key for the projection in `backend/browser-data.js` and `frontend/preview-policy.mjs`;
-  - a publish path for that key.
 - Prices stay unavailable, and the v1 view fixtures are unchanged.
 
-Code: `market_data/news/research.py`. Tests:
+## Publication (R1 + R2: implemented locally, inactive)
+
+The research view is published **as one page of each news generation**, not under a key of its own:
+- **R2: who writes it.** `pilot-cycle` reads the research ledger from the **private** store
+  (`news/v1/research/`), builds `research_view` in **research mode at the cycle's build cutoff**, with
+  the collector archive's observations as annotation targets, and projects it (`project`). Ledger
+  runs that fail verification are counted in the entry (`unverified_runs`), never shown.
+- **R1: where it goes.** The projection is the unqualified page `news/v1/views/research/view.json`
+  of the build (in memory only). Qualification moves it to
+  `news/v2/views/p/<gen>.<n>/research/view.json`, adds `gen`, and covers it in `pages_sha256`. The
+  index's `research` entry names it. So it uses the same head compare-and-swap, commit nonce,
+  page-cap reservation, quarantine of unanswered uploads, retirement and index-only withdrawal as
+  the news view pages, with no research-specific publish path.
+- **The index entry:** `{schema_version, mode: "research", cutoff: build_as_of, fixed: true, state,
+  page, items, runs, unverified_runs}`, where `state` is:
+  - `published`: names this generation's research page;
+  - `none`: no verified research run, so no page;
+  - `omitted`: the page would exceed the page byte cap (`reason: research_view_bytes`). The news
+    views still publish.
+  The publisher refuses a build whose entry and page disagree: wrong mode, a cutoff that is not the
+  build cutoff, a page in another incarnation, an item count mismatch, a page with no entry, or an
+  entry with no page.
+- **Reader.** `site/js/news-research.js` has no key and no fetch of its own. `loadNewsPanel` passes
+  `NewsResearch.follow(...)` to the panel as `onIndex`. The research view reads the page that the
+  panel's one index read names, through the panel's fetcher (exact-key check, deadline, no-store,
+  `?_=`), and only while that index's lease holds. A tombstone, a 404, a deadline, an incarnation
+  mismatch or a panel refresh shows the matching state, never another generation's research page.
+- **Gateway.** `backend/browser-data.js` and `frontend/preview-policy.mjs` admit only
+  `news/v2/views/p/<gen>.<n>/research/view.json` (a real UTC instant, n = 1..9999). The P1
+  single mutable key `news/v2/research/view.json` is **retired** (404). The private ledger is never
+  served.
+- **FIXED VIEW (explicit limitation).** Each publication carries exactly one research view, in
+  research mode at its build cutoff. `load_pilot_config` refuses any other `research.mode` or
+  `research.cutoff`. The tab has no mode or cutoff picker. Archive, collector, publication-hindsight
+  and earlier cutoffs exist only through `research-view` on local stores. Adding them, a picker,
+  adapters or live research sources is a separate decision.
+- **Label.** The page's `data_label` comes from the pilot config (`research.data_label`, currently
+  "PREPARED research records ..."). It is one label for the whole ledger, not per bundle.
+- **Capacity arithmetic.** The pilot maximum per generation is now 1,260 view pages + 1 research page =
+  1,261. Five generations at that maximum come to 6,305 pages, which is over the unchanged 6,300 cap.
+  So the fifth admission at the absolute maximum pauses (visible) instead of evicting. Real pilot
+  generations are far below the maximum (the local runs have 64 pages).
+
+Code: `market_data/news/research.py` (ledger, view, projection), `views.py` (`research_page`, the
+research key and its qualification), `publish.py` (`build_research`, `_check_research`, the pilot
+step). Tests:
 - `tests/test_news_research.py`
-- `tests/news_research_view.test.js`
-- `tests/news_research_browser.test.js`
+- `tests/test_news_research_publish.py` (R1/R2)
+- `tests/news_research_view.test.js` (renderer and `follow`)
+- `tests/news_research_browser.test.js` (harness)
+- `tests/news_research_site_browser.test.js` (the integrated News tab, real pilot stores)
 - scenarios in `tests/news_research_scenarios.py`
 
 ## Records

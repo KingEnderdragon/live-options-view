@@ -19,6 +19,12 @@ class Node {
   removeChild(c) { this.children.splice(this.children.indexOf(c), 1); return c; }
   setAttribute(k, v) { this.attributes[k] = String(v); }
   getAttribute(k) { return k in this.attributes ? this.attributes[k] : null; }
+  removeAttribute(k) { delete this.attributes[k]; }
+  insertBefore(c, ref) {
+    const i = ref ? this.children.indexOf(ref) : -1;
+    if (i < 0) this.children.push(c); else this.children.splice(i, 0, c);
+    c.parent = this; return c;
+  }
   set textContent(v) { this.children = []; this._text = String(v); }
   get textContent() { return this._text + this.children.map(c => c.textContent).join(' '); }
   set innerHTML(v) { throw new Error('innerHTML must not be used: ' + v); }
@@ -110,63 +116,117 @@ test('only http(s) URLs become links', () => {
   assert.ok(root.textContent.includes('SYNTHETIC: fund reported cutting gross exposure'));
 });
 
-// --- P1 wiring: the fetcher, mount and site wiring -------------------------------------------------
+// --- R1 wiring: the research view follows the News panel's index ------------------------------------
+const panel = require(path.join(__dirname, '../site/js/news-panel.js'));
 const tick = () => new Promise(r => setImmediate(r));
-function fakeFetch(calls, respond) {
-  return async (url, opts) => { calls.push({ url, opts }); return respond(url); };
-}
 const resp = (status, body) => ({ status, ok: status >= 200 && status < 300, text: async () => body });
+const INC = '20261113T190000Z-0123456789abcdef.1';
+const BUILT = '2026-11-13T19:00:00Z';
+const PAGE = `news/v2/views/p/${INC}/research/view.json`;
 
 async function asyncTests() {
-  const goodText = fs.readFileSync(path.join(out, 'prepared-research.json'), 'utf8');
-  {
+  const good = JSON.parse(fs.readFileSync(path.join(out, 'prepared-research.json'), 'utf8'));
+  // The published form of a projection: the builder adds gen, build_as_of and the fixed cutoff.
+  const page = Object.assign({}, good, { gen: INC, build_as_of: BUILT, cutoff: BUILT, mode: 'research', page_kind: 'research' });
+  const entry = (over) => Object.assign({ schema_version: 'news-research-view/v1', mode: 'research', cutoff: BUILT, fixed: true,
+    runs: 1, unverified_runs: 0, state: 'published', page: PAGE, items: page.items.length }, over || {});
+  const index = (research) => ({ gen: INC, build_as_of: BUILT, views: [], research });
+  function setup(respond, opts) {
     const calls = [];
-    const f = research.makeFetcher('/browser-data/', fakeFetch(calls, () => resp(200, goodText)), () => 1762686900123.7);
-    const v = await f();
-    assert.equal(v.schema_version, 'news-research-view/v1');
-    assert.equal(calls.length, 1);
-    assert.equal(calls[0].url, '/browser-data/news/v2/research/view.json?_=1762686900123');
-    assert.equal(calls[0].opts.credentials, 'omit');
-    assert.equal(calls[0].opts.cache, 'no-store');
-    await assert.rejects(f('news/v1/research/runs/x/manifest.json'), e => e.researchKind === 'refused');
-    await assert.rejects(f('news/v2/views/index.json'), e => e.researchKind === 'refused');
-    assert.equal(calls.length, 1, 'a refused key is never requested');
-    const r2 = [];
-    await research.makeFetcher('https://pub.example.r2.dev', fakeFetch(r2, () => resp(200, goodText)), () => 5)();
-    assert.equal(r2[0].url, 'https://pub.example.r2.dev/news/v2/research/view.json?_=5');
-    n++; console.log('ok - the fetcher requests exactly the research view key, uncached, without credentials');
-  }
-  for (const [what, respond, state, text] of [
-    ['404', () => resp(404, 'nf'), 'absent', 'No research view published'],
-    ['500', () => resp(500, 'x'), 'failed', 'Could not load research records: HTTP 500'],
-    ['bad json', () => resp(200, '{'), 'failed', 'response is not valid JSON'],
-    ['network', () => { throw new TypeError('down'); }, 'failed', 'network error'],
-    ['wrong schema', () => resp(200, JSON.stringify({ schema_version: 'x', items: [] })), 'failed', 'Could not show research records'],
-  ]) {
+    const fetchJson = panel.makeFetcher('/browser-data/', async (url, o) => { calls.push({ url, o }); return respond(url); },
+      () => 7, (opts && opts.deadline) || 20000, opts && opts.timers);
     const root = new Node('div');
-    const got = await research.mount(makeDoc(), root, research.makeFetcher('/b', fakeFetch([], respond), () => 1));
-    assert.equal(got, state, what);
-    assert.equal(root.getAttribute('data-state'), state, what);
-    assert.ok(root.textContent.includes(text), `${what}: ${root.textContent}`);
-    n++; console.log(`ok - mount: ${what} -> ${state}`);
+    const onIndex = research.follow(makeDoc(), root);
+    return { calls, fetchJson, root, onIndex };
+  }
+
+  {
+    const t = setup(() => resp(200, JSON.stringify(page)));
+    assert.equal(t.root.getAttribute('data-state'), 'loading');
+    const got = await t.onIndex({ state: 'published', index: index(entry()), fetchJson: t.fetchJson, leaseValid: () => true });
+    assert.equal(got, 'ready');
+    assert.deepEqual(t.calls.map(c => c.url), [`/browser-data/${PAGE}?_=7`], 'exactly the page the index names');
+    assert.equal(t.calls[0].o.cache, 'no-store');
+    assert.equal(t.calls[0].o.credentials, 'omit');
+    assert.equal(t.root.getAttribute('data-page'), PAGE);
+    assert.ok(t.root.textContent.includes(research.FIXED_NOTE), 'the fixed-view limitation is shown');
+    assert.ok(t.root.textContent.includes('Cutoff ' + BUILT));
+    n++; console.log('ok - follow: the index research page is fetched through the panel fetcher and rendered with the fixed-view note');
+  }
+  for (const [what, ev, state, text] of [
+    ['no research entry', { state: 'published', index: index(undefined) }, 'absent', 'No research view published'],
+    ['state none', { state: 'published', index: index(entry({ state: 'none', page: null, items: 0, runs: 0 })) }, 'absent', 'no verified research run'],
+    ['state none with unverified runs', { state: 'published', index: index(entry({ state: 'none', page: null, items: 0, runs: 0, unverified_runs: 2 })) }, 'absent', '2 research run(s) failed verification'],
+    ['omitted', { state: 'published', index: index(entry({ state: 'omitted', page: null, reason: 'research_view_bytes', bytes: 300000 })) }, 'omitted', 'research_view_bytes, 300000 bytes'],
+    ['page in another incarnation', { state: 'published', index: index(entry({ page: PAGE.replace('.1/', '.2/') })) }, 'failed', 'not in generation'],
+    ['not the build cutoff', { state: 'published', index: index(entry({ cutoff: '2026-11-13T18:00:00Z' })) }, 'failed', 'not the build cutoff'],
+    ['not the fixed mode', { state: 'published', index: index(entry({ mode: 'publication' })) }, 'failed', 'not the fixed research view'],
+    ['withdrawn tombstone', { state: 'withdrawn' }, 'withdrawn', 'Research records are not currently published'],
+    ['unpublished tombstone', { state: 'unpublished' }, 'absent', 'No research view published'],
+    ['index 404', { state: 'absent' }, 'absent', 'No research view published'],
+    ['index failed', { state: 'failed' }, 'unavailable', 'news index could not be loaded'],
+    ['panel refresh', { state: 'refresh', reason: 'the index lease ended' }, 'refresh-required', 'Reload the News view above'],
+  ]) {
+    const t = setup(() => { throw new Error('must not fetch'); });
+    await t.onIndex(Object.assign({ fetchJson: t.fetchJson, leaseValid: () => true }, ev));
+    assert.equal(t.root.getAttribute('data-state'), state, what);
+    assert.ok(t.root.textContent.includes(text), `${what}: ${t.root.textContent}`);
+    assert.equal(t.calls.length, 0, `${what}: nothing requested`);
+    n++; console.log(`ok - follow: ${what} -> ${state}, no request`);
+  }
+  for (const [what, respond, lease, state, text] of [
+    ['page 404 (gone)', () => resp(404, 'nf'), true, 'refresh-required', 'no longer published'],
+    ['page 500', () => resp(500, 'x'), true, 'failed', 'HTTP 500'],
+    ['bad json', () => resp(200, '{'), true, 'failed', 'not valid JSON'],
+    ['page from another incarnation', () => resp(200, JSON.stringify(Object.assign({}, page, { gen: INC.replace('.1', '.2') }))), true, 'refresh-required', 'not from generation'],
+    ['page at another cutoff', () => resp(200, JSON.stringify(Object.assign({}, page, { cutoff: '2026-11-13T18:00:00Z' }))), true, 'refresh-required', 'not from generation'],
+    ['lease ended while loading', () => resp(200, JSON.stringify(page)), false, 'refresh-required', 'lease ended'],
+    ['wrong schema', () => resp(200, JSON.stringify(Object.assign({}, page, { schema_version: 'x' }))), true, 'failed', 'Could not show research records'],
+  ]) {
+    const t = setup(respond);
+    await t.onIndex({ state: 'published', index: index(entry()), fetchJson: t.fetchJson, leaseValid: () => lease });
+    assert.equal(t.root.getAttribute('data-state'), state, what);
+    assert.ok(t.root.textContent.includes(text), `${what}: ${t.root.textContent}`);
+    n++; console.log(`ok - follow: ${what} -> ${state}`);
   }
   {
     let fire = null;
     const timers = { set: f => { fire = f; return 1; }, clear: () => {} };
-    const f = research.makeFetcher('/b', () => new Promise(() => {}), () => 1, 20000, timers);
-    const root = new Node('div');
-    const p = research.mount(makeDoc(), root, f);
-    assert.equal(root.getAttribute('data-state'), 'loading');
+    const t = setup(() => new Promise(() => {}), { timers });
+    const p = t.onIndex({ state: 'published', index: index(entry()), fetchJson: t.fetchJson, leaseValid: () => true });
     await tick(); fire();
-    assert.equal(await p, 'failed');
-    assert.ok(root.textContent.includes('no complete response within 20 s'));
-    n++; console.log('ok - mount: a request past its deadline is a failure');
+    assert.equal(await p, 'refresh-required');
+    assert.ok(t.root.textContent.includes('no complete response within 20 s'));
+    n++; console.log('ok - follow: a research request past its deadline asks for a refresh');
+  }
+  {
+    // A late answer for an earlier index never replaces what a later event showed.
+    let release = null;
+    const t = setup(() => new Promise(r => { release = () => r(resp(200, JSON.stringify(page))); }));
+    const first = t.onIndex({ state: 'published', index: index(entry()), fetchJson: t.fetchJson, leaseValid: () => true });
+    await tick();
+    t.onIndex({ state: 'refresh', reason: 'replaced' });
+    release();
+    assert.equal(await first, null);
+    assert.equal(t.root.getAttribute('data-state'), 'refresh-required');
+    n++; console.log('ok - follow: a stale research response never renders over a later state');
+  }
+  {
+    assert.equal(panel.isNewsViewKey(PAGE), true);
+    assert.equal(panel.researchGenOf(PAGE), INC);
+    assert.equal(panel.genOf(PAGE), null, 'a research key never stands in for a view page');
+    for (const k of ['news/v2/research/view.json', `news/v2/views/p/${INC}/research/other.json`,
+      'news/v1/research/runs/2026-11-13/x/manifest.json', `news/v2/views/p/${INC.replace('.1', '.0')}/research/view.json`]) {
+      assert.equal(panel.isNewsViewKey(k), false, k);
+    }
+    n++; console.log('ok - panel key rule: the research page of an incarnation only; the retired key and the ledger are refused');
   }
   {
     const html = fs.readFileSync(path.join(__dirname, '../site/index.html'), 'utf8');
     const { createHash } = require('node:crypto');
     const hash = f => createHash('sha256').update(fs.readFileSync(path.join(__dirname, '../site/js', f))).digest('hex').slice(0, 16);
     assert.ok(html.includes('<script src="js/news-research.js?v=' + hash('news-research.js') + '"></script>'), 'research stamp');
+    assert.ok(html.includes('<script src="js/news-panel.js?v=' + hash('news-panel.js') + '"></script>'), 'panel stamp');
     const at = s => html.indexOf(s);
     assert.ok(at('js/news-research.js?v=') > 0 && at('js/news-research.js?v=') < at('js/news-panel.js?v='), 'loaded before the panel');
     assert.equal((html.match(/id="news-research"/g) || []).length, 1, 'one research container');
@@ -174,10 +234,14 @@ async function asyncTests() {
     assert.ok(at('id="news-panel"') < at('id="news-research"') && between.split('\n').length <= 2,
       'the research container directly follows #news-panel (the sibling rule hides it with the tab)');
     assert.ok(html.includes('#news-panel.hidden + #news-research { display: none; }'));
-    assert.ok(!/news\/v1\/research/.test(html), 'the page never names the private ledger');
+    assert.ok(!/news\/v[12]\/research/.test(html), 'the page names neither the ledger nor the retired key');
     const panelSrc = fs.readFileSync(path.join(__dirname, '../site/js/news-panel.js'), 'utf8');
-    assert.ok(/function loadNewsPanel\(\) \{[\s\S]{0,200}if \(typeof loadNewsResearch === 'function'\) loadNewsResearch\(\);/.test(panelSrc));
-    n++; console.log('ok - site wiring: stamp, order, one container after #news-panel, hidden with it, mounted by loadNewsPanel');
+    assert.ok(/function loadNewsPanel\(\) \{[\s\S]{0,400}NewsResearch\.follow\(document, box\)[\s\S]{0,400}onIndex: onIndex/.test(panelSrc));
+    assert.ok(!/news\/v[12]\/research/.test(panelSrc));
+    const researchSrc = fs.readFileSync(path.join(__dirname, '../site/js/news-research.js'), 'utf8');
+    assert.ok(!/fetch\(/.test(researchSrc), 'the research module makes no request of its own');
+    assert.ok(!/loadNewsResearch/.test(researchSrc + panelSrc), 'the standalone research loader is gone');
+    n++; console.log('ok - site wiring: stamps, order, one container after #news-panel, follows the panel index, no own key');
   }
 }
 

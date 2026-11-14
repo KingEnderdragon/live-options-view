@@ -84,14 +84,14 @@ const fixture = key => JSON.parse(Q.text(key));
         const errors = [];
         const foreign = [];
         let news = [];  // every News view request the page made: { base, key, query }
-        let researchReqs = [];  // P1: the research view mounts with the panel (its own key, tested separately)
+        let researchReqs = [];  // R1: the research view follows the panel index (tested in news_research_site_browser)
         page.on('pageerror', e => errors.push(e.message));
         page.on('dialog', d => { errors.push('dialog: ' + d.message()); d.dismiss(); });
         await page.route('**/*', async route => {
           const url = new URL(route.request().url());
           if (url.origin === pageOrigin && url.pathname.startsWith('/browser-data/')) {
             const key = url.pathname.slice('/browser-data/'.length);
-            if (key === 'news/v2/research/view.json') researchReqs.push({ base: 'proxy', key, query: url.search });
+            if (key.includes('research')) researchReqs.push({ base: 'proxy', key, query: url.search });
             else if (key.startsWith('news/')) news.push({ base: 'proxy', key, query: url.search });
             const res = await worker.fetch(new Request(url, { headers: { Origin: APP } }), env);
             return route.fulfill({ status: res.status, body: Buffer.from(await res.arrayBuffer()),
@@ -99,7 +99,7 @@ const fixture = key => JSON.parse(Q.text(key));
           }
           if (url.origin === R2) {
             const key = url.pathname.slice(1);
-            if (key === 'news/v2/research/view.json') researchReqs.push({ base: 'r2', key, query: url.search });
+            if (key.includes('research')) researchReqs.push({ base: 'r2', key, query: url.search });
             else if (key.startsWith('news/')) news.push({ base: 'r2', key, query: url.search });
             const r = upstream(key);
             return route.fulfill({ status: r.status, body: r.body, contentType: r.type || 'text/plain',
@@ -284,8 +284,9 @@ const fixture = key => JSON.parse(Q.text(key));
         await shot('7-missing-page');
         checkNewsRequests();
 
-        assert.ok(researchReqs.length <= 1 && researchReqs.every(r => r.base === base && /^\?_=[0-9]{1,20}$/.test(r.query)),
-          `${label}: at most one research request per mount, on this base`);
+        // R1: these fixture indexes carry no research entry, so the research view requests nothing (and the
+        // retired news/v2/research/view.json key is never requested).
+        assert.deepEqual(researchReqs, [], `${label}: no research request without a research entry in the index`);
         assert.deepEqual(foreign, [], `${label}: requests left the page and R2 origins`);
         assert.deepEqual(errors, [], `${label}: page errors`);
         results.push(label);
@@ -294,7 +295,7 @@ const fixture = key => JSON.parse(Q.text(key));
       }
     }
     // The proxy only ever fetched view keys from R2 for News; nothing else reached the bucket for a refused key.
-    for (const key of upstreamCalls.filter(k => k.startsWith('news/') && k !== 'news/v2/research/view.json')) assert.ok(panel.isNewsViewKey(key), key);
+    for (const key of upstreamCalls.filter(k => k.startsWith('news/'))) assert.ok(panel.isNewsViewKey(key), key);
     for (const key of [BAD_FIRST, BAD_PICK]) assert.ok(!upstreamCalls.includes(key));
   } finally {
     global.fetch = originalFetch;

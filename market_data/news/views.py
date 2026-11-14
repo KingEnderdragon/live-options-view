@@ -341,6 +341,14 @@ def page_key(mode: str, stream: str, date: str, n: int) -> str:
 # Legacy keys (news/v1/views/index.json, news/v1/views/g/...) are never read, written or deleted.
 
 INDEX_KEY = f"{ROOT}/index.json"                       # the builder's unqualified index (in memory only)
+# R1 (P1 research under generation protection): the sanitized research projection is one more page of
+# the generation. Unqualified (in memory only) at RESEARCH_KEY; published at
+# news/v2/views/p/<gen>.<n>/research/view.json and named only by the index's "research" entry, so it
+# shares the head CAS, page-cap reservation, quarantine, retirement and index-only withdrawal of the
+# news view pages. The private ledger (news/v1/research/**) is never part of a build.
+RESEARCH_KEY = f"{ROOT}/research/view.json"
+RESEARCH_VIEW_SCHEMA = "news-research-view/v1"
+RESEARCH_STATES = ("published", "none", "omitted")
 PUBLISHED_ROOT = "news/v2/views"
 PUBLISHED_INDEX_KEY = f"{PUBLISHED_ROOT}/index.json"
 PUBLISHED_INDEX_SCHEMA = "news-view-index/v2"
@@ -402,6 +410,11 @@ def generation_page_key(inc: str, mode: str, stream: str, date: str, n: int) -> 
     return f"{PAGES_ROOT}/{inc}/{mode}/{stream}/{date}/page-{n:04d}.json"
 
 
+def generation_research_key(inc: str) -> str:
+    """The published research page of incarnation inc (R1)."""
+    return f"{PAGES_ROOT}/{inc}/research/view.json"
+
+
 def files_digest(files: dict[str, bytes]) -> str:
     """SHA-256 over every key and its bytes (length-prefixed, sorted by key)."""
     import hashlib
@@ -441,6 +454,9 @@ def qualify_generation(files: dict[str, bytes], n: int = 1) -> tuple[str, dict[s
     for key in files:
         if key == INDEX_KEY:
             continue
+        if key == RESEARCH_KEY:
+            mapping[key] = generation_research_key(inc)
+            continue
         m = _UNQUALIFIED_RE.match(key)
         if not m:
             raise BuildError(f"{key} is not an unqualified view page key")
@@ -465,6 +481,8 @@ def qualify_generation(files: dict[str, bytes], n: int = 1) -> tuple[str, dict[s
         out[mapping[key]] = encode(page)
     index = json.loads(files[INDEX_KEY])
     index["views"] = [dict(v, first_page=relink(v["first_page"], "index first_page")) for v in index["views"]]
+    if isinstance(index.get("research"), dict) and index["research"].get("page") is not None:
+        index["research"] = dict(index["research"], page=relink(index["research"]["page"], "index research page"))
     index["schema_version"] = PUBLISHED_INDEX_SCHEMA
     index["state"] = "published"
     index["gen"] = inc
@@ -663,20 +681,31 @@ def build_index(entries: list[dict], *, as_of: datetime, data_label: str, limits
 
 
 def _build_index(entries: list[dict], *, as_of: datetime, data_label: str,
-                 limits: Limits = LIMITS) -> tuple[bytes, list[int]]:
+                 limits: Limits = LIMITS, research: dict | None = None) -> tuple[bytes, list[int]]:
     """(index.json, positions in entries of the views it lists).
 
     A cut (index_views, then index_bytes) retains whole views newest date first; within a date it keeps
     the build order (mode, then stream), so the views dropped first are the oldest date's last ones.
     Retained views are listed in build order, so an uncut index is unchanged.
+
+    research (R1): the index's "research" entry, or None for a build without one (the key is then
+    absent, so builds without research are byte-identical to before). It is measured with its page
+    key widened by the qualification segment, so the qualified index stays within its cap.
     """
+    measured = research
+    if research is not None and research.get("page"):
+        measured = dict(research, page=research["page"] + "x" * QUALIFY_SEGMENT)
+
     def doc(views, omitted, reasons, wide=False):
-        return {"schema_version": INDEX_SCHEMA, "data_label": data_label, "build_as_of": iso(as_of),
-                "root": ROOT, "modes": list(MODES), "streams": list(STREAM_KEYS),
-                "limits": asdict(limits), "complete": False if wide else not reasons,
-                "overflow_reasons": list(INDEX_REASONS) if wide else sorted(reasons),
-                "views_total": WIDE_INT if wide else len(entries),
-                "views_omitted": WIDE_INT if wide else omitted, "views": views}
+        d = {"schema_version": INDEX_SCHEMA, "data_label": data_label, "build_as_of": iso(as_of),
+             "root": ROOT, "modes": list(MODES), "streams": list(STREAM_KEYS),
+             "limits": asdict(limits), "complete": False if wide else not reasons,
+             "overflow_reasons": list(INDEX_REASONS) if wide else sorted(reasons),
+             "views_total": WIDE_INT if wide else len(entries),
+             "views_omitted": WIDE_INT if wide else omitted, "views": views}
+        if research is not None:
+            d["research"] = measured if wide else research
+        return d
     floor = len(encode(doc([], 0, set(), wide=True)))
     if floor > limits.index_bytes:
         raise BuildError(f"the mandatory index envelope ({floor} bytes) exceeds the index cap "
@@ -701,14 +730,45 @@ def _neg_date(date: str) -> tuple[int, ...]:
     return tuple(-int(part) for part in date.split("-"))
 
 
+def research_page(projection: dict | None, *, as_of: datetime, limits: Limits = LIMITS,
+                  runs: int = 0, problems: int = 0) -> tuple[dict, bytes | None]:
+    """R1/R2: (index "research" entry, page bytes or None) for one build.
+
+    projection is research.project(...) at this build's cutoff, or None when the ledger has no verified
+    run. The view is FIXED: mode "research", cutoff == build_as_of (R2 pins both; a different mode or
+    cutoff is refused here, not chosen). A page over the page cap is omitted with its reason instead
+    of failing the news build. problems counts ledger runs that failed verification (never shown)."""
+    built = iso(as_of)
+    entry = {"schema_version": RESEARCH_VIEW_SCHEMA, "mode": "research", "cutoff": built, "fixed": True,
+             "runs": runs, "unverified_runs": problems}
+    if projection is None:
+        return dict(entry, state="none", page=None, items=0), None
+    if projection.get("schema_version") != RESEARCH_VIEW_SCHEMA or projection.get("mode") != "research" \
+            or projection.get("cutoff") != built:
+        raise BuildError(f"the research view must be mode 'research' at the build cutoff {built}, not "
+                         f"{projection.get('mode')!r} at {projection.get('cutoff')!r}")
+    page = dict(projection, build_as_of=built, page_kind="research",
+                fixed_view="one view per publication: research mode at the build cutoff; no other mode or "
+                           "cutoff is published")
+    body = encode(page)
+    # The qualified page gains "gen" (<= 40 bytes with its key); keep the same reserve as view pages.
+    if len(body) > limits.page_bytes:
+        return dict(entry, state="omitted", page=None, items=len(projection["items"]),
+                    reason="research_view_bytes", bytes=len(body)), None
+    return dict(entry, state="published", page=RESEARCH_KEY, items=len(projection["items"])), body
+
+
 def build_views(archive: Archive, prices: PriceFile, *, as_of, tolerance_s: float, data_label: str,
                 instrument_id: str = "etf.qqq", series: str = "underlying_quote", modes=MODES,
-                streams=STREAM_KEYS, dates=None, limits: Limits = LIMITS) -> dict[str, bytes]:
+                streams=STREAM_KEYS, dates=None, limits: Limits = LIMITS,
+                research: tuple[dict, bytes | None] | None = None) -> dict[str, bytes]:
     """index.json plus the pages of every view it lists, keyed by relative path. Pure: nothing is written.
 
     If the index is cut (index_views or index_bytes), the omitted views' pages are not emitted either:
     a generation never contains a page its index does not name. The index counts them in
     views_omitted (views_total is every view built) and says complete: false with the reason.
+
+    research: research_page(...)'s (entry, page) for this build, or None (no "research" entry at all).
     """
     as_of = parse_iso(as_of) if isinstance(as_of, str) else as_of
     if not data_label:
@@ -723,10 +783,13 @@ def build_views(archive: Archive, prices: PriceFile, *, as_of, tolerance_s: floa
                                       data_label=data_label, limits=limits, mapping=mapping)
                 view_files.append(f)
                 entries.append(entry)
-    index, kept = _build_index(entries, as_of=as_of, data_label=data_label, limits=limits)
+    entry, body = research if research is not None else (None, None)
+    index, kept = _build_index(entries, as_of=as_of, data_label=data_label, limits=limits, research=entry)
     files = {}
     for i in kept:
         files.update(view_files[i])
+    if body is not None:
+        files[RESEARCH_KEY] = body
     files[f"{ROOT}/index.json"] = index
     return files
 

@@ -47,11 +47,11 @@ export const NEWS_VIEW_INDEX_KEY = 'news/v2/views/index.json';
 // deadline). It bounds the wait for the upstream response; the panel's own
 // deadline also covers the body.
 export const NEWS_PROXY_DEADLINE_MS = 15000;
-// MediaFlow P1 research view: exactly one key, the sanitized projection
-// (news-research-view/v1) that site/js/news-research.js renders. The private
+// MediaFlow R1: the sanitized research projection is one immutable page of a
+// generation, p/<gen>.<n>/research/view.json, named by the index (the
+// retired mutable news/v2/research/view.json grant stays removed). The private
 // research ledger (news/v1/research/**) and any other research key are never
-// served; there is no research prefix grant. Mutable, so never cacheable.
-export const NEWS_RESEARCH_VIEW_KEY = 'news/v2/research/view.json';
+// served; there is no research prefix grant.
 function realDate(y, mo, d) {
   const date = `${y}-${mo}-${d}`;
   const parsed = new Date(`${date}T00:00:00Z`);
@@ -59,6 +59,11 @@ function realDate(y, mo, d) {
 }
 export function isPublicNewsViewKey(key) {
   if (key === NEWS_VIEW_INDEX_KEY) return true;
+  const research = /^news\/v2\/views\/p\/([0-9]{4})([0-9]{2})([0-9]{2})T([0-9]{2})([0-9]{2})([0-9]{2})Z-[0-9a-f]{16}\.[1-9][0-9]{0,3}\/research\/view\.json$/.exec(key);
+  if (research) {
+    return realDate(research[1], research[2], research[3]) && Number(research[4]) <= 23 &&
+      Number(research[5]) <= 59 && Number(research[6]) <= 59;
+  }
   const match = /^news\/v2\/views\/p\/([0-9]{4})([0-9]{2})([0-9]{2})T([0-9]{2})([0-9]{2})([0-9]{2})Z-[0-9a-f]{16}\.[1-9][0-9]{0,3}\/(?:collector|archive|publication)\/(?:all|ai_buildout|oil)\/([0-9]{4})-([0-9]{2})-([0-9]{2})\/page-([0-9]{4})\.json$/.exec(key);
   if (!match) return false;
   if (!realDate(match[1], match[2], match[3]) || Number(match[4]) > 23 || Number(match[5]) > 59 ||
@@ -73,8 +78,7 @@ export function isPublicNewsViewKey(key) {
 // backslash and NUL are refused for every key shape, before the allowlist.
 export function isPublicBrowserDataKey(key) {
   if (key.includes('..') || /%2e/i.test(key) || key.includes('\\') || key.includes('\0')) return false;
-  return BROWSER_DATA_KEYS.has(key) || isPublicArchiveKey(key) || isPublicNewsViewKey(key) ||
-    key === NEWS_RESEARCH_VIEW_KEY;
+  return BROWSER_DATA_KEYS.has(key) || isPublicArchiveKey(key) || isPublicNewsViewKey(key);
 }
 const MAX_LIVE_QUOTE_SYMBOLS = 100;
 export async function handleBrowserData(request, url) {
@@ -94,7 +98,7 @@ export async function handleBrowserData(request, url) {
   }
   // News keys (G3) get a finite upstream deadline and, for the index, no-store.
   // Every other key keeps its existing behaviour.
-  const news = isPublicNewsViewKey(key) || key === NEWS_RESEARCH_VIEW_KEY;
+  const news = isPublicNewsViewKey(key);
   const ctrl = news && typeof AbortController === 'function' ? new AbortController() : null;
   const timer = ctrl ? setTimeout(() => ctrl.abort(), NEWS_PROXY_DEADLINE_MS) : null;
   try {
@@ -115,8 +119,8 @@ export async function handleBrowserData(request, url) {
       const value = upstream.headers.get(name);
       if (value !== null) headers.set(name, value);
     }
-    // The index and the research view are the mutable News objects: never cacheable, whatever upstream says.
-    if (key === NEWS_VIEW_INDEX_KEY || key === NEWS_RESEARCH_VIEW_KEY) headers.set('Cache-Control', 'no-store');
+    // The index is the only mutable News object: never cacheable, whatever upstream says.
+    if (key === NEWS_VIEW_INDEX_KEY) headers.set('Cache-Control', 'no-store');
     return new Response(upstream.body, {
       status: upstream.status, statusText: upstream.statusText, headers,
     });
