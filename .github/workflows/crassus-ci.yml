@@ -46,7 +46,7 @@ jobs:
       - name: OI skew decision provenance for the meter projection
         working-directory: crassus
         run: python scripts/verify_oi_skew_provenance.py
-      - name: OI skew meter projection (inactive): provenance, privacy, unavailability
+      - name: "OI skew meter projection (inactive): provenance, privacy, unavailability"
         working-directory: crassus
         run: python scripts/verify_oi_skew_projection.py
       - name: OI skew public projection publisher (fail-safe, sanitized, single key)
