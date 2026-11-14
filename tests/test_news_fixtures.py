@@ -18,6 +18,9 @@ FIXTURE_SHA256 = {
     "parser/rdf.xml": "59feed618f453704338569a3c0119e387ea455b0ab6966884afc7c9aa45708a2",
     "prices/qqq_2026-11-09.synthetic.jsonl": "4172e8f3cb087e0a962b61ba33da41c7a1a1f5cb8af3c8220d3d2117795310e2",
     "research/positioning_p1_prepared.json": "9acc2991df8bdc3d43863a4b1b4a337ae0fa3adabd51fe8f394cb80052fcd4ac",  # P1 prepared records (new)
+    # REAL collector sidecar (public object intraday/20261113/snapshot_161416905398.provenance.json, read 2026-11-14);
+    # a midpoint selection, the adapter's exclusion case and the base for last-trade variants
+    "sidecars/intraday/20261113/snapshot_161416905398.provenance.json": "d4d6045164f22ca250a16d6230ca0fe7c0994467553605d94998de3943fd9f4c",
     "scenarios/a_v1/oilprice_com.xml": "a0148021b3f954152d96ae3707b0ea00a9b95a8412c3e3813d0d0ccb5ada8682",
     "scenarios/a_v2/oilprice_com.xml": "d9294b6b26cb439656f79d59bb43f06739972cce6fc532eb63ff9112d71ada86",
     "scenarios/b/eia_today_in_energy.xml": "6ffca65a75411b5a05b9f18b867cf9c76e5502cb24cdc93ec2fc7ce1dd826f61",
