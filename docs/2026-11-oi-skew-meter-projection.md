@@ -62,3 +62,53 @@ Built on `claude/oi-skew-meter` 7d123de (#233). One commit per release lane:
 2. **Projector (the new writer):** not built. It needs approval of the destination object and credentials, and a call site after each OI Skew decision that runs `build_projection(...)`, then `assert_sanitized(...)`, then writes `crassus/oi-skew/v1/latest.json`.
 3. **API:** flip `OI_SKEW_PROJECTION_PUBLIC` in `backend/browser-data.js` through the reviewed `deploy.yml` lane, only after (2) is writing.
 4. **Asset:** flip the gateway flag and `OI_SKEW_PROJECTION_ENABLED` through `deploy-staged.yml`. Verify the live meter shows the bot state with its anchor, reset identity and revision, and shows unavailable when the object is stale or missing.
+
+## H1 delivery runbook (2026-11-13, authorized scope; operator: Chej)
+
+### Candidates
+- **A. Writer + both indicators, flags off:** branch `claude/oi-skew-h1-delivery`. It contains #233 → #235 in dependency order, then the reconciled #237 harness (master 4629da6 merged in), then the fail-safe writer (`crassus/oi_skew_publisher.py`) and `scripts/check_published_projection.py`. Safe to merge before anything is configured: the writer is off without its settings, and both flags are false.
+- **B. Flags:** branch `claude/oi-skew-h1-flags`, a single commit on top of A that flips:
+  - API `OI_SKEW_PROJECTION_PUBLIC = true`;
+  - gateway preview flag = true;
+  - site `OI_SKEW_PROJECTION_ENABLED = true`.
+
+### Read path (verified read-only, 2026-11-13)
+- **Production custom domain.** The page on `https://options.moopertonic.net` reads data **directly from the public R2 bucket** (`https://pub-4d5c916b8cb74ffb8c0abd7dfadb02cf.r2.dev`); its own `/browser-data/*` returns 403 for every key, including `intraday/latest.json`. The real site's read path for the bot indicator is therefore the public bucket object. **Writing it makes it publicly readable at the r2.dev URL immediately**, whatever the API flag says.
+- **workers.dev host.** On `https://live-options-view.otmooper12.workers.dev`, `/browser-data/*` is served by the API allowlist. There the projection key needs the API flag (B). It returns 404 today.
+
+### Steps
+1. **Merge #237, then A** (Chej). A touches `crassus/**`, which makes it a crassus-runner deploy candidate and causes a **restart**:
+   - observation gap;
+   - new `run_id`;
+   - fresh OI Skew anchor at the first snapshot after the restart.
+
+   These appear honestly in the projection (`run_identity`, `anchor_observed_at`). Recommended timing: after the close, with capture protected. Record the current runner deployment ID first, for rollback.
+2. **Configure the writer.** Set the runner environment variables:
+   - `CRASSUS_OI_SKEW_PUBLIC_ACCOUNT_ID`
+   - `CRASSUS_OI_SKEW_PUBLIC_BUCKET`, set to the bucket served at `pub-4d5c…r2.dev`
+   - `CRASSUS_OI_SKEW_PUBLIC_ACCESS_KEY_ID`
+   - `CRASSUS_OI_SKEW_PUBLIC_SECRET_ACCESS_KEY`
+
+   Use a credential scoped to that bucket. Any missing setting keeps publication off, logged as `oi skew public projection disabled: <reason>`, and the runner is unaffected.
+3. **Verify the object** after the first OI Skew decision (runner cycles are every 5 min; outside market hours the decisions are still recorded, with no trades):
+   `python crassus/scripts/check_published_projection.py https://pub-4d5c916b8cb74ffb8c0abd7dfadb02cf.r2.dev/crassus/oi-skew/v1/latest.json`
+
+   It should exit 0, with `problems: []`, schema v1 and allowlisted keys only. `status` is `ok` once the new provenance fields are present, which they will be on every post-deploy row.
+4. **API:** run `deploy.yml` at B (Chej dispatches and approves). This opens the key on workers.dev only.
+5. **Assets:** run `deploy-staged.yml` at B. The site fetches the projection on the existing 60 s cycle.
+6. **End-to-end:** Playwright, desktop 1366 and mobile 390, against `https://options.moopertonic.net`. Check:
+   - both indicators render;
+   - the bot indicator shows the anchor, session/run identity, decision time and revision;
+   - freshness behaves correctly (live during the session, then stale or closed);
+   - no horizontal overflow and the ARIA output is correct.
+
+   The missing, stale and incomplete states remain covered by fixtures (303 meter checks, 14 parity cases).
+
+### Rollback (per lane; flags-off containment first)
+| Lane | Containment | Previous known-good |
+|---|---|---|
+| Assets | Revert B (site and gateway flags false) and release | Asset revision `f759582e2b327989e31749ddfeae7df9c6474890` (current production, verified 2026-11-13) |
+| API | `OI_SKEW_PROJECTION_PUBLIC = false` via `deploy.yml` | The API version recorded by Chej immediately before step 4 |
+| Writer | Unset the `CRASSUS_OI_SKEW_PUBLIC_*` variables (publication off; an environment change redeploys the runner). Optionally delete the object; otherwise the page shows it aging to stale or closed | The runner deployment recorded before step 1 |
+
+Any runner rollback is another restart, with the same consequences: observation gap, new `run_id`, fresh anchor. Trading behaviour is unchanged in every lane, because the writer is post-write and non-blocking.
