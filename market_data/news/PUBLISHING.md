@@ -382,7 +382,7 @@ reports `stale_writer_lease` or `stale_publish_lease`. Leases are never taken ov
    assumption to verify, but if it holds, `news/v1/runs/**` must go elsewhere. This needs a new
    private bucket plus credentials.
 2. **Public bucket and credentials.** Use the bucket behind `/browser-data/` and the public origin.
-   The credentials should be scoped to `news/v1/views/` if the provider supports prefix-scoped
+   The credentials should be scoped to `news/v2/views/` if the provider supports prefix-scoped
    tokens. Otherwise they are bucket-wide, and the code-level key guard is the only fence.
 3. **Scheduler service.** A new Railway cron service, or other runner, with the cron above. Its
    watch paths must not overlap the collectors' (`market_data/news/**` is not watched by them today;
@@ -401,14 +401,12 @@ Implemented locally in G3 and re-keyed in G6 (see "Generations and settlement");
 of the pilot and never run. The fixed-key mixed-build limit no longer applies: a reader following one
 index sees one build.
 
-## Not changed by G6, and needed before activation
+## Release and rollback plan
 
-- `deploy/news-pilot.json` is unchanged and **no longer validates**: `storage.public.prefix` must
-  become `news/v2/views/`. Its descriptive text (`holds`, `public_views`, the credential-scope note)
-  still names `news/v1/views/` and `g/<gen>/`. Every `pilot-cycle` / `publish-*` command therefore
-  fails closed on the shipped file until the owner edits it; it stays inactive either way.
-- `site/index.html` still loads `js/news-panel.js` with its previous `?v=` stamp. Until that stamp is
-  bumped, browsers holding the cached script keep requesting `news/v1/views/index.json`, which the
-  proxy now refuses: they see a load failure, not stale views.
-- The committed view fixtures are builder output (unqualified `news/v1` keys) and remain valid.
-- Provider checks for the assumptions above, and a first execution of every test source.
+The G6-era list that stood here is superseded:
+- G7 (`b02d664`) moved `deploy/news-pilot.json` to `storage.public.prefix` `news/v2/views/`. It validates and stays inactive.
+- G7 bumped the `site/index.html` stamps, and R1/R2 and the corrections bumped them again.
+
+The candidate, the remaining landing changes, the settled policy, the provider prerequisites, the
+exact activation config, the activation order and the stop/withdraw/restore/rollback procedures are
+in `RELEASE_PLAN.md` (R4 draft, preparation only).
