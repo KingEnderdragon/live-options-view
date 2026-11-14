@@ -7,7 +7,7 @@ export const API_PATHS = new Set([
 // OI skew meter projection key: prepared, DISABLED (mirrors
 // backend/browser-data.js; no backend import in the gateway).
 export const OI_SKEW_PROJECTION_KEY = 'crassus/oi-skew/v1/latest.json';
-export const OI_SKEW_PROJECTION_PUBLIC = false;
+export const OI_SKEW_PROJECTION_PUBLIC = true;
 const PUBLIC_KEYS = new Set([
   'intraday/latest.json', 'intraday/spy/latest.json', 'intraday/ibit/latest.json',
   'intraday/prices.json', 'intraday/health.json', 'derived/OIranges.csv',

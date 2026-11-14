@@ -337,10 +337,10 @@ checks += 3;
   checks += 4;
 }
 
-// ── projection fetch: disabled by default; when invoked, fails closed ────────
+// ── projection fetch: enabled for H1 delivery; fails closed ─────────────────
 (async () => {
   const src = fs.readFileSync(path.join(root, 'site', 'js', 'oi-skew-meter.js'), 'utf8');
-  assert.ok(/const OI_SKEW_PROJECTION_ENABLED = false;/.test(src), 'projection fetch ships disabled');
+  assert.ok(/const OI_SKEW_PROJECTION_ENABLED = true;/.test(src), 'projection fetch enabled for delivery');
   assert.ok(src.includes("'crassus/oi-skew/v1/latest.json'"), 'fetches only the allowlisted key');
   const backendSrc = fs.readFileSync(path.join(root, 'backend', 'browser-data.js'), 'utf8');
   assert.ok(backendSrc.includes("OI_SKEW_PROJECTION_KEY = 'crassus/oi-skew/v1/latest.json'"), 'same key as the API');
@@ -360,8 +360,11 @@ checks += 3;
   vm.runInContext(src, ctx);
   ctx.updateOiSkewMeter(live(), NOW);
   ctx.updateOiSkewMeter(live(), NOW);
-  assert.equal(calls.length, 0, 'disabled flag: no projection request at all');
-  assert.equal(els['oi-skew-bot'].textContent, 'Bot signal: not published');
+  assert.equal(calls.length, 2, 'one projection request per 60 s refresh, no extra polling');
+  assert.ok(calls.every(u => /^\/browser-data\/crassus\/oi-skew\/v1\/latest\.json\?_=\d+$/.test(u)), calls[0]);
+  await new Promise(r => setTimeout(r, 0));
+  assert.equal(els['oi-skew-bot'].textContent, 'Bot signal: unavailable', '404 (not yet published) is unavailable');
+  assert.match(els['oi-skew-bot-detail'].textContent, /not published \(404\)/);
 
   const doc = fixture.cases.find(c => c.bot.state === 'bearish').projection;
   const ok = async () => ({ ok: true, status: 200, json: async () => doc });

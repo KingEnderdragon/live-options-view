@@ -17,7 +17,7 @@ export const BROWSER_DATA_PREFIX = '/browser-data/';
 // enables the projector; frontend/preview-policy.mjs carries the same key and
 // flag, and tests/r2_proxy_bounded.test.js pins them together.
 export const OI_SKEW_PROJECTION_KEY = 'crassus/oi-skew/v1/latest.json';
-export const OI_SKEW_PROJECTION_PUBLIC = false;
+export const OI_SKEW_PROJECTION_PUBLIC = true;
 export const BROWSER_DATA_KEYS = new Set([
   'intraday/latest.json',
   'intraday/spy/latest.json',
