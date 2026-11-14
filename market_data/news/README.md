@@ -254,6 +254,15 @@ python -m market_data.news build-views --as-of 2026-11-09T11:15:00Z --tolerance-
   `ready`, `empty`, `absent` or `failed`.
 - Nothing is published yet. The panel and proxy are deployed (2026-11-14, `55db036`), the producer
   is inactive, and the deployed tab shows "No news views published yet".
+- **Dedicated News origin.** News keys are read only from the dedicated public News bucket's origin
+  (`NEWS_R2_ORIGIN` in `backend/browser-data.js`, `NEWS_R2` in `site/index.html`), never from the
+  shared market origin. Both are `null` until that bucket is provisioned. While they are `null`, the
+  proxy answers every News key with 404 and makes no upstream request (the tab shows "No news views
+  published yet"). Off the production origin, the panel requests nothing and shows "Could not load
+  news views: no public News origin is configured".
+- **Scheduled command.** The scheduled command is the bounded launcher
+  (`python -m market_data.news.launch`, see `launch.py`). It gives the whole cycle process one
+  deadline and a clean terminal failure path. The cost and sizing evidence is in `deploy/COSTS.md`.
 
 Tests: `python -m unittest discover -s tests -p "test_news*.py" -v`,
 `node tests/news_panel_view.test.js`, `node tests/browser_data.test.js`,
