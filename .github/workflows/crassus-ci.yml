@@ -88,6 +88,9 @@ jobs:
       - name: Run pre-merge credential provisioning gate suite (#41)
         working-directory: crassus
         run: python scripts/verify_provisioning_gate.py
+      - name: Harness startup handshake (diagnostic lines, single deadline, identity)
+        working-directory: crassus
+        run: python scripts/verify_harness_process.py
       - name: Run isolated paper lifecycle with real Runner + Worker harness (#41/#86/#102)
         working-directory: crassus
         run: python scripts/verify_paper_lifecycle.py
