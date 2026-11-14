@@ -20,6 +20,8 @@ class Node {
   setAttribute(k, v) { this.attributes[k] = String(v); }
   getAttribute(k) { return k in this.attributes ? this.attributes[k] : null; }
   removeAttribute(k) { delete this.attributes[k]; }
+  addEventListener(type, fn) { (this.listeners = this.listeners || {})[type] = fn; }
+  click() { if (this.listeners && this.listeners.click) this.listeners.click(); }
   insertBefore(c, ref) {
     const i = ref ? this.children.indexOf(ref) : -1;
     if (i < 0) this.children.push(c); else this.children.splice(i, 0, c);
@@ -165,7 +167,7 @@ async function asyncTests() {
     ['unpublished tombstone', { state: 'unpublished' }, 'absent', 'No research view published'],
     ['index 404', { state: 'absent' }, 'absent', 'No research view published'],
     ['index failed', { state: 'failed' }, 'unavailable', 'news index could not be loaded'],
-    ['panel refresh', { state: 'refresh', reason: 'the index lease ended' }, 'refresh-required', 'Reload the News view above'],
+    ['panel refresh', { state: 'refresh', reason: 'the index lease ended' }, 'refresh-required', 'Use the Reload button in the News view above'],
   ]) {
     const t = setup(() => { throw new Error('must not fetch'); });
     await t.onIndex(Object.assign({ fetchJson: t.fetchJson, leaseValid: () => true }, ev));
@@ -184,10 +186,23 @@ async function asyncTests() {
     ['wrong schema', () => resp(200, JSON.stringify(Object.assign({}, page, { schema_version: 'x' }))), true, 'failed', 'Could not show research records'],
   ]) {
     const t = setup(respond);
-    await t.onIndex({ state: 'published', index: index(entry()), fetchJson: t.fetchJson, leaseValid: () => lease });
+    let reloads = 0;
+    await t.onIndex({ state: 'published', index: index(entry()), fetchJson: t.fetchJson, leaseValid: () => lease,
+      reload: () => { reloads++; } });
     assert.equal(t.root.getAttribute('data-state'), state, what);
     assert.ok(t.root.textContent.includes(text), `${what}: ${t.root.textContent}`);
-    n++; console.log(`ok - follow: ${what} -> ${state}`);
+    const buttons = t.root.all(x => x.tagName === 'BUTTON');
+    if (state === 'refresh-required') {
+      // Chej 11-13: actionable recovery even while the news views stay ready: the shared-index reload.
+      assert.equal(buttons.length, 1, `${what}: one reload control`);
+      assert.equal(buttons[0].getAttribute('data-action'), 'reload-shared-index');
+      assert.ok(!t.root.textContent.includes('Reload the News view above'), `${what}: no instruction to a control that may not exist`);
+      buttons[0].click();
+      assert.equal(reloads, 1, `${what}: the button reloads the shared index`);
+    } else {
+      assert.equal(buttons.length, 0, `${what}: no reload control`);
+    }
+    n++; console.log(`ok - follow: ${what} -> ${state}${state === 'refresh-required' ? ' (shared-index reload control)' : ''}`);
   }
   {
     let fire = null;
@@ -197,6 +212,8 @@ async function asyncTests() {
     await tick(); fire();
     assert.equal(await p, 'refresh-required');
     assert.ok(t.root.textContent.includes('no complete response within 20 s'));
+    assert.ok(t.root.textContent.includes('Reload the page to see the current publication'),
+      'without a shared reload the wording points at a browser reload');
     n++; console.log('ok - follow: a research request past its deadline asks for a refresh');
   }
   {

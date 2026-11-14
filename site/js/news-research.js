@@ -63,6 +63,8 @@
     '#news-research .nr-hyp { margin-top: 0.45rem; padding: 0.4rem 0.5rem; border: 1px dashed var(--border, #30363d);',
     '  border-radius: 4px; }',
     '#news-research .nr-empty { color: var(--dim, #6e7681); font-style: italic; }',
+    '#news-research .nr-btn { font: inherit; font-size: 0.8rem; padding: 2px 10px; cursor: pointer;',
+    '  color: var(--fg, #c9d1d9); background: transparent; border: 1px solid var(--border, #30363d); border-radius: 4px; }',
     '@media (max-width: 600px) { #news-research { padding: 0.75rem 16px; } }'
   ].join('\n');
 
@@ -337,7 +339,7 @@
       var st = event && event.state;
       if (st === 'refresh') {
         return message(doc, container, 'refresh-required', 'nr-bad',
-          'This research view was replaced or has expired. Reload the News view above (' + (event.reason || 'refresh required') + ').');
+          'This research view was replaced or has expired. Use the Reload button in the News view above (' + (event.reason || 'refresh required') + ').');
       }
       if (st === 'withdrawn') return message(doc, container, 'withdrawn', 'nr-empty', 'Research records are not currently published');
       if (st === 'unpublished' || st === 'absent') return message(doc, container, 'absent', 'nr-empty', 'No research view published');
@@ -380,9 +382,21 @@
         if (e && (e.newsKind === 'gone' || e.newsKind === 'deadline')) return onStale(e.message);
         return message(doc, container, 'failed', 'nr-bad', 'Could not load research records: ' + (e && e.message || 'unknown error'));
       });
+      // The news views may still be ready (no Reload of their own), so the recovery is offered here: the
+      // panel's shared-index reload (event.reload) re-reads the one index for both, never a second index.
       function onStale(reason) {
-        return message(doc, container, 'refresh-required', 'nr-bad',
-          'This research view was replaced or has expired. Reload the News view above (' + reason + ').');
+        message(doc, container, 'refresh-required', 'nr-bad',
+          'This research view was replaced or has expired (' + reason + ').');
+        var box = container.firstChild;
+        if (typeof event.reload === 'function') {
+          var button = el(doc, 'button', 'nr-btn', 'Reload news and research');
+          button.setAttribute('data-action', 'reload-shared-index');
+          button.addEventListener('click', function () { event.reload(); });
+          add(box, el(doc, 'span', null, ' '), button);
+        } else {
+          add(box, el(doc, 'span', null, ' Reload the page to see the current publication.'));
+        }
+        return 'refresh-required';
       }
     };
   }

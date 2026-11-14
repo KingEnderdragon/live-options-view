@@ -77,7 +77,8 @@ const CASES = [
   { name: 'withdrawn', store: 'withdrawn', panel: 'withdrawn', state: 'withdrawn', requests: 0,
     must: ['Research records are not currently published'] },
   { name: 'page-gone', store: 'prepared', override: { status: 404 }, panel: 'ready', state: 'refresh-required', requests: 1,
-    must: ['This research view was replaced or has expired', 'no longer published'] },
+    must: ['This research view was replaced or has expired', 'no longer published', 'Reload news and research'],
+    reload: true },
   { name: 'upstream-500', store: 'prepared', override: { status: 500 }, panel: 'ready', state: 'failed', requests: 1,
     must: ['Could not load research records', 'HTTP 500'] },
   { name: 'malformed', store: 'prepared', override: { body: '{"schema_version": "news-research-view/v1", "items": ' },
@@ -227,12 +228,25 @@ const CASES = [
             fs.mkdirSync(EVIDENCE, { recursive: true });
             await page.screenshot({ path: path.join(EVIDENCE, `${c.name}-${base}-${viewport.width}.png`), fullPage: true });
           }
+          if (c.reload) {
+            // Chej 11-13: the research recovery is actionable while the news views stay ready. Its button
+            // reloads the one shared index: news views and research both follow the new read.
+            const indexReads = news.filter(n => n.key === INDEX_KEY).length;
+            await page.click('#news-research button[data-action="reload-shared-index"]');
+            await page.waitForFunction(() => {
+              const b = document.querySelector('#news-research');
+              return b && b.getAttribute('data-state') === 'refresh-required' && !b.hasAttribute('data-pending');
+            }, null, { timeout: 10000 });
+            await waitState('#news-panel', 'ready');
+            assert.equal(news.filter(n => n.key === INDEX_KEY).length, indexReads + 1, `${label}: one fresh index read for both`);
+            assert.equal(news.filter(n => n.key.includes('research')).length, c.requests + 1, `${label}: research refetched once from the new index`);
+          }
           // Leaving the tab hides the research view; reopening does not refetch.
           await page.click('#tab-live');
           assert.ok(await page.locator('#news-research').isHidden(), `${label}: research hides with the News tab`);
           await page.click('#tab-news');
           await page.waitForTimeout(200);
-          assert.equal(news.filter(n => n.key.includes('research')).length, c.requests, `${label}: not refetched on reopen`);
+          assert.equal(news.filter(n => n.key.includes('research')).length, c.reload ? c.requests + 1 : c.requests, `${label}: not refetched on reopen`);
           assert.deepEqual(foreign, [], `${label}: requests left the page and R2 origins`);
           assert.deepEqual(errors, [], `${label}: page errors`);
           checks++;

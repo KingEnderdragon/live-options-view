@@ -36,6 +36,11 @@ The research view is published **as one page of each news generation**, not unde
   panel's one index read names, through the panel's fetcher (exact-key check, deadline, no-store,
   `?_=`), and only while that index's lease holds. A tombstone, a 404, a deadline, an incarnation
   mismatch or a panel refresh shows the matching state, never another generation's research page.
+  When only the research page is stale (404, deadline, lease or generation mismatch) the news
+  views can stay ready with no Reload of their own, so the research view offers its own **Reload
+  news and research** button. That calls the panel's shared-index reload (`event.reload`): the
+  panel mount ends, the one index is read again, and news views and research both follow that one
+  read. Without a shared reload the wording asks for a browser reload instead.
 - **Gateway.** `backend/browser-data.js` and `frontend/preview-policy.mjs` admit only
   `news/v2/views/p/<gen>.<n>/research/view.json` (a real UTC instant, n = 1..9999). The P1
   single mutable key `news/v2/research/view.json` is **retired** (404). The private ledger is never
@@ -49,8 +54,9 @@ The research view is published **as one page of each news generation**, not unde
   "PREPARED research records ..."). It is one label for the whole ledger, not per bundle.
 - **Capacity arithmetic.** The pilot maximum per generation is now 1,260 view pages + 1 research page =
   1,261. Five generations at that maximum come to 6,305 pages, which is over the unchanged 6,300 cap.
-  So the fifth admission at the absolute maximum pauses (visible) instead of evicting. Real pilot
-  generations are far below the maximum (the local runs have 64 pages).
+  So the fifth admission at the absolute maximum pauses (visible) instead of evicting. That is an
+  **availability limit**, not a reason to raise the cap: the 6,300 cap stays unchanged (Chej,
+  2026-11-13). Real pilot generations are far below the maximum (the local runs have 64 pages).
 
 Code: `market_data/news/research.py` (ledger, view, projection), `views.py` (`research_page`, the
 research key and its qualification), `publish.py` (`build_research`, `_check_research`, the pilot

@@ -543,6 +543,12 @@
       try { opts.onIndex(event); } catch (e) { /* the research view reports its own failure */ }
     }
 
+    function reloadAll() {
+      dead = true;
+      clear(container);
+      mount(doc, container, fetchJson, indexKey, opts);
+    }
+
     // Never mixes generations and never falls back: the reader reloads the fixed index instead.
     function refresh(reason) {
       if (dead) return;
@@ -582,7 +588,9 @@
       }
       var problems = validateIndex(index);
       if (problems.length) throw new Error(problems.join('; '));
-      tell({ state: 'published', index: index, fetchJson: fetchJson, leaseValid: leaseValid });
+      // reload: the shared-index reload for the research view's own recovery. It ends this mount and
+      // mounts again, so news views and research both follow the one fresh index read (never two).
+      tell({ state: 'published', index: index, fetchJson: fetchJson, leaseValid: leaseValid, reload: reloadAll });
       var latest = 0;
       if (opts.events && typeof opts.events.addEventListener === 'function') {
         var recheck = function () { if (!dead && !leaseValid()) refresh('the index lease ended'); };

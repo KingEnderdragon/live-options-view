@@ -155,7 +155,7 @@ What the provider documents and what this code assumes are listed separately at 
   nothing protected is evicted; cleanup keeps running.
   R1: the research page counts as one page of its incarnation. The pilot maximum is 1,261 pages per
   generation, so five generations at that maximum (6,305) exceed the unchanged cap, and the fifth
-  pauses instead of evicting.
+  pauses instead of evicting. This is an availability limit; the cap stays 6,300.
 - **Retirement.** A replaced generation stays public for at least `reader_grace_s` (45 min). Its pages
   are deleted only when the producer clock and the store clock (the private heartbeat's
   LastModified) both show 45 min + `clock_epsilon_s` + `clock_skew_s` = 49 min since it ceased, they
