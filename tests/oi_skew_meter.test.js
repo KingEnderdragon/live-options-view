@@ -301,6 +301,14 @@ checks += 3;
     ['anchor_observed_at', { ...good, anchor_observed_at: 'yesterday' }],
     ['anchor_observed_at', { ...good, anchor_observed_at: '2026-11-13T11:00:00' }],   // naive
     ['observed_snapshot_timestamp', { ...good, observed_snapshot_timestamp: '' }],
+    // Impossible calendar/clock components (Date.parse would normalize these).
+    ['anchor_observed_at', { ...good, anchor_observed_at: '2026-02-30T17:30:00Z' }],
+    ['anchor_observed_at', { ...good, anchor_observed_at: '2026-11-13T24:00:00Z' }],
+    ['anchor_observed_at', { ...good, anchor_observed_at: '2026-11-13T11:60:00Z' }],
+    ['anchor_observed_at', { ...good, anchor_observed_at: '2026-11-13T11:00:61Z' }],
+    ['anchor_observed_at', { ...good, anchor_observed_at: '2026-11-13T11:00:00+25:00' }],
+    ['observed_snapshot_timestamp', { ...good, observed_snapshot_timestamp: '2026-02-29T17:30:00Z' }],
+    ['decision_at', { ...good, decision_at: '2026-04-31T17:30:05+00:00' }],
     ['observed_snapshot_timestamp', { ...good, observed_snapshot_timestamp: '2026-13-01T00:00:00Z' }],
     ['decision_at', { ...good, decision_at: 'not a time' }],
     ['run_identity', { ...good, run_identity: 'parity-run' }],
@@ -321,6 +329,11 @@ checks += 3;
   }
   assert.equal(describeBotOiSkew({ ...good, decision_at: '2026-11-13T17:30:05.123+00:00' }, at).availability, 'live');
   assert.equal(describeBotOiSkew({ ...good, code_revision: 'abc1234' }, at).availability, 'live');
+  // Real calendar edges stay valid.
+  for (const okTs of ['2028-02-29T17:30:00Z', '2026-11-13T23:59:59.999+00:00', '2026-11-13T11:00:00-05:00']) {
+    assert.deepEqual(oiSkewProjectionProblems({ ...good, anchor_observed_at: okTs }), [], okTs);
+    checks++;
+  }
   checks += 4;
 }
 

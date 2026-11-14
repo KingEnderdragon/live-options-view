@@ -194,10 +194,16 @@ function describeBotOiSkew(projection, nowMs = Date.now()) {
 // Field rules mirrored from the builder: an aware ISO instant, a real UTC
 // calendar date, a lowercase git SHA, the digest run identity, finite
 // numbers and complete params. Returns the offending field names.
+// Date.parse normalizes impossible components (2026-02-30 -> Mar 2), so
+// each calendar/clock component is validated explicitly, matching the
+// Python builder's datetime.fromisoformat (review 7:04 PM).
 function _awareInstant(v) {
-  return typeof v === 'string'
-    && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/.test(v)
-    && Number.isFinite(Date.parse(v));
+  if (typeof v !== 'string') return false;
+  const m = /^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?(Z|([+-])(\d{2}):(\d{2}))$/.exec(v);
+  if (!m || !_calendarDate(m[1])) return false;
+  if (Number(m[2]) > 23 || Number(m[3]) > 59 || (m[4] !== undefined && Number(m[4]) > 59)) return false;
+  if (m[5] !== 'Z' && (Number(m[7]) > 23 || Number(m[8]) > 59)) return false;
+  return Number.isFinite(Date.parse(v));
 }
 function _calendarDate(v) {
   if (typeof v !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(v)) return false;

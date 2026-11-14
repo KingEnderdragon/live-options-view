@@ -145,6 +145,8 @@ with tempfile.TemporaryDirectory() as tmp:
         ("anchor_observed_at", with_meta(anchor_observed_at="")),
         ("anchor_observed_at", with_meta(anchor_observed_at="yesterday")),
         ("anchor_observed_at", with_meta(anchor_observed_at="2024-01-01T14:00:00")),  # naive
+        ("anchor_observed_at", with_meta(anchor_observed_at="2026-02-30T17:30:00Z")),  # impossible date
+        ("anchor_observed_at", with_meta(anchor_observed_at="2026-11-13T24:00:00Z")),
         ("observed_snapshot_timestamp", dict(rec, market_snapshot_timestamp="")),
         ("observed_snapshot_timestamp", dict(rec, market_snapshot_timestamp="2024-13-01T00:00:00Z")),
         ("decision_at", dict(rec, timestamp_utc="not a time")),
