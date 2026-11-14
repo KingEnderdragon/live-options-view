@@ -428,6 +428,61 @@
     .pin-candidate-name { display: none; }
   }
 
+  /* ── OI skew meter (Skew + Direction H1) ──────────────────────────────── */
+  #oi-skew-meter {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 12px 10px;
+    margin-bottom: 1rem;
+  }
+  #oi-skew-meter .oi-skew-head {
+    display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px;
+  }
+  #oi-skew-meter h2 { font-size: 0.85rem; font-weight: 600; color: var(--bright); }
+  #oi-skew-value { font-size: 1.35rem; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--bright); }
+  #oi-skew-lean { font-size: 0.85rem; font-weight: 600; }
+  #oi-skew-meter[data-lean="put-heavy"] #oi-skew-lean { color: var(--put5); }
+  #oi-skew-meter[data-lean="call-heavy"] #oi-skew-lean { color: var(--call5); }
+  #oi-skew-meta { font-size: 0.72rem; color: var(--dim); }
+  #oi-skew-meter[data-state="stale"] #oi-skew-meta,
+  #oi-skew-meter[data-state="closed"] #oi-skew-meta { color: #d49a00; }
+  #oi-skew-meter[data-state="stale"] .oi-skew-scale,
+  #oi-skew-meter[data-state="closed"] .oi-skew-scale,
+  #oi-skew-meter[data-state="unavailable"] .oi-skew-scale,
+  #oi-skew-meter[data-state="no_data"] .oi-skew-scale { opacity: 0.55; }
+  .oi-skew-scale { margin: 8px 0 2px; }
+  #oi-skew-track {
+    position: relative; height: 14px; border-radius: 7px;
+    background: linear-gradient(to right, var(--put4) 0%, var(--put2) 35%, #21262d 50%, var(--call2) 65%, var(--call4) 100%);
+    border: 1px solid var(--border);
+  }
+  #oi-skew-track .oi-skew-tick {
+    position: absolute; top: -3px; bottom: -3px; width: 0; border-left: 1px dashed var(--fg); opacity: 0.6;
+  }
+  #oi-skew-track .oi-skew-zero { border-left-style: solid; opacity: 0.35; }
+  #oi-skew-marker {
+    position: absolute; top: -5px; width: 4px; height: 22px; margin-left: -2px;
+    background: var(--bright); border-radius: 2px; box-shadow: 0 0 0 2px var(--bg);
+  }
+  .oi-skew-labels {
+    display: flex; justify-content: space-between; font-size: 0.68rem; color: var(--dim); margin-top: 3px;
+  }
+  .oi-skew-bot-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin-top: 6px; }
+  #oi-skew-bot {
+    font-size: 0.78rem; font-weight: 600; padding: 1px 8px; border-radius: 4px;
+    border: 1px solid var(--border); color: var(--fg);
+  }
+  #oi-skew-bot[data-state="bullish"] { color: var(--call5); border-color: var(--call3); }
+  #oi-skew-bot[data-state="bearish"] { color: var(--put5); border-color: var(--put3); }
+  #oi-skew-bot[data-availability="not_published"] { color: var(--dim); border-style: dashed; }
+  #oi-skew-bot-detail, #oi-skew-thresholds, .oi-skew-caveat { font-size: 0.72rem; color: var(--dim); }
+  #oi-skew-thresholds, .oi-skew-caveat { margin-top: 3px; white-space: normal; }
+  @media (max-width: 640px) {
+    #oi-skew-meter { padding: 8px 10px; }
+    .oi-skew-labels .oi-skew-label-gate { display: none; }
+  }
+
   /* ── crude calibration panel ─────────────────────────────────────────── */
   #steo-panel {
     display: flex;
@@ -1119,6 +1174,33 @@
 
 <div id="cal-error">Calibration data (OIranges.csv) failed to load — heatmap colors are unreliable. OI level 5 (wall) may be shown for all nonzero cells.</div>
 
+<section id="oi-skew-meter" data-state="unavailable" aria-labelledby="oi-skew-heading">
+  <div class="oi-skew-head">
+    <h2 id="oi-skew-heading">QQQ near-money OI skew</h2>
+    <span id="oi-skew-value">—</span>
+    <span id="oi-skew-lean">Waiting for snapshot</span>
+    <span id="oi-skew-meta" role="status"></span>
+  </div>
+  <div class="oi-skew-scale">
+    <div id="oi-skew-track" role="meter" aria-labelledby="oi-skew-heading"
+         aria-valuemin="-1" aria-valuemax="1" aria-valuenow="0" aria-valuetext="OI skew unavailable">
+      <span class="oi-skew-tick" style="left:35%" aria-hidden="true"></span>
+      <span class="oi-skew-tick oi-skew-zero" style="left:50%" aria-hidden="true"></span>
+      <span class="oi-skew-tick" style="left:65%" aria-hidden="true"></span>
+      <span id="oi-skew-marker" hidden aria-hidden="true"></span>
+    </div>
+    <div class="oi-skew-labels" aria-hidden="true">
+      <span>−1 all puts</span><span class="oi-skew-label-gate">−0.3 bot gate</span><span>0</span><span class="oi-skew-label-gate">+0.3 bot gate</span><span>+1 all calls</span>
+    </div>
+  </div>
+  <div class="oi-skew-bot-row">
+    <span id="oi-skew-bot" data-state="unknown" data-availability="not_published">Bot signal: not published</span>
+    <span id="oi-skew-bot-detail"></span>
+  </div>
+  <p id="oi-skew-thresholds"></p>
+  <p class="oi-skew-caveat">(call OI − put OI) ÷ (call OI + put OI) over strikes within ±2% of spot. Open interest is prior-day settled positioning: not fresh intraday flow, and not a win probability.</p>
+</section>
+
 <div id="price-strip" aria-label="Quote cards">
   <section class="quote-section" aria-labelledby="qp-core-heading">
     <div class="quote-heading-row">
@@ -1342,6 +1424,7 @@
 <script src="shared/instruments.js?v=860821b9e03c4a08"></script>
 <script src="shared/quote-panel.js?v=3806793be069e8a7"></script>
 <script src="shared/chain.js?v=477ee1ce1d6f08f2"></script>
+<script src="shared/oi-skew.js?v=eaf1d6a0da079f08"></script>
 <script>// ── stale-page protection ──────────────────────────────────────────────────────
 // Cache-Control: no-store (set by the Worker) stops new responses from being// cached, but it can't evict a copy a device already cached before that header
 // existed, and it does nothing for iOS Safari's back-forward cache (bfcache),
@@ -1444,7 +1527,8 @@ let timerHandle = null;
 // loads the module instead of slicing up to the countdown banner; the banner
 // stays here as the section's marker.
 </script>
-<script src="js/data-fetch-cycle.js?v=61430ae31487fa9d"></script>
+<script src="js/data-fetch-cycle.js?v=edb39ff1eda795e1"></script>
+<script src="js/oi-skew-meter.js?v=8093f2455127bd48"></script>
 <script>
 
 // ── countdown timer ───────────────────────────────────────────────────────────
