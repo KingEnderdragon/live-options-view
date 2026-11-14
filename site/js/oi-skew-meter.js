@@ -43,7 +43,7 @@ const _oiSkewState = { payload: null, bot: null, botError: null, refreshError: n
 // that also enables the projector writer and both allowlist flags
 // (backend/browser-data.js, frontend/preview-policy.mjs). While false the
 // meter makes no extra request and shows "Bot signal: not published".
-const OI_SKEW_PROJECTION_ENABLED = false;
+const OI_SKEW_PROJECTION_ENABLED = true;
 const OI_SKEW_PROJECTION_PATH = 'crassus/oi-skew/v1/latest.json';
 
 function updateOiSkewMeter(payload, nowMs = Date.now(), botProjection = undefined) {

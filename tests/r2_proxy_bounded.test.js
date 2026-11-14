@@ -245,22 +245,22 @@ test('raw traversal strings are refused by the backend predicate', async () => {
   }
 });
 
-test('OI skew projection key is prepared, identical and disabled on both allowlists', async () => {
+test('OI skew projection key is enabled identically on both allowlists, and only that key', async () => {
   const b = await import('../backend/browser-data.js');
   const g = await import('../frontend/preview-policy.mjs');
   assert.equal(b.OI_SKEW_PROJECTION_KEY, 'crassus/oi-skew/v1/latest.json');
   assert.equal(g.OI_SKEW_PROJECTION_KEY, b.OI_SKEW_PROJECTION_KEY);
-  assert.equal(b.OI_SKEW_PROJECTION_PUBLIC, false);
-  assert.equal(g.OI_SKEW_PROJECTION_PUBLIC, false);
-  assert.equal(b.BROWSER_DATA_KEYS.has(b.OI_SKEW_PROJECTION_KEY), false);
-  // Disabled means refused by both predicates and 404 at HTTP, exactly like
-  // any unlisted key; siblings of the key stay private either way.
-  for (const k of [b.OI_SKEW_PROJECTION_KEY, 'crassus/oi-skew/v1/', 'crassus/oi-skew/v1/latest.json.bak',
-                   'crassus/ledger.jsonl']) {
+  assert.equal(b.OI_SKEW_PROJECTION_PUBLIC, true);
+  assert.equal(g.OI_SKEW_PROJECTION_PUBLIC, true);
+  assert.equal(b.BROWSER_DATA_KEYS.has(b.OI_SKEW_PROJECTION_KEY), true);
+  assert.equal(b.isPublicBrowserDataKey(b.OI_SKEW_PROJECTION_KEY), true);
+  assert.equal(g.publicReadAllowed(new URL(APP + '/browser-data/' + g.OI_SKEW_PROJECTION_KEY)), true);
+  // Only the exact key: siblings, prefixes and the private ledger stay refused.
+  for (const k of ['crassus/oi-skew/v1/', 'crassus/oi-skew/v1/latest.json.bak', 'crassus/oi-skew/v1/latest.jsonx',
+                   'crassus/ledger.jsonl', 'crassus/oi-skew/', 'crassus/oi-skew/v2/latest.json']) {
     assert.equal(b.isPublicBrowserDataKey(k), false, k);
     assert.equal(g.publicReadAllowed(new URL(APP + '/browser-data/' + k)), false, k);
   }
-  const res = await b.handleBrowserData(new Request(APP + '/browser-data/' + b.OI_SKEW_PROJECTION_KEY),
-    new URL(APP + '/browser-data/' + b.OI_SKEW_PROJECTION_KEY));
-  assert.equal(res.status, 404);
+  // Query strings other than the numeric cache-buster stay refused.
+  assert.equal(g.publicReadAllowed(new URL(APP + '/browser-data/' + g.OI_SKEW_PROJECTION_KEY + '?x=1')), false);
 });
