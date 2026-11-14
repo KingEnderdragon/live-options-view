@@ -145,10 +145,12 @@ class CountingStore(LocalObjectStore):
     def list(self, prefix):
         return self._listed("list", super().list(prefix))
 
-    def list_meta(self, prefix):
-        # The base list_meta calls self.list; count it once, as one listing.
+    def list_meta(self, prefix, start_after=None):
+        # The base list_meta calls self.list; count it once, as one listing (StartAfter honoured).
         out = {}
         for key in LocalObjectStore.list(self, prefix):
+            if start_after is not None and key.encode() <= start_after.encode():
+                continue
             st = self._path(key).stat()
             out[key] = f"{st.st_size}:{st.st_mtime_ns}"
         self._listed("list_meta", list(out))

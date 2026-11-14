@@ -29,9 +29,16 @@ live cycle never holds a lease past its expiry. Exit codes:
   1/2  the cycle finished with that exit code (pilot-cycle's own failure codes)
   2    the config is invalid (no child is started)
   124  deadline: the cycle was interrupted and exited (its leases were released by the cycle)
-  137  deadline or stop: the cycle did not exit within the grace and was killed (leases may remain)
-  143  stopped by a signal to the launcher; the cycle was interrupted and exited
+  137  deadline or stop: the cycle did not exit within the grace; its group was killed and confirmed
+       gone (leases may remain held)
+  126  deadline or stop: the group was killed but its termination could NOT be confirmed within
+       kill_wait_s (a writer may still be running; reported, never assumed away)
+  143  stopped by a signal to the launcher; the cycle was interrupted and its group exited
   125  the child could not be started
+
+"The cycle" is the child's whole owned process group (a new session): a leader that exits while a
+descendant remains does not end the cycle; the launcher waits for the group under the same deadline.
+Only an observed-empty group is reported as group_terminated: true.
 """
 from __future__ import annotations
 
@@ -80,6 +87,37 @@ def _spawn(cmd: list[str]) -> subprocess.Popen:
     return subprocess.Popen(cmd, start_new_session=True)
 
 
+def _group_alive(proc: subprocess.Popen) -> bool:
+    """Is any process of the cycle's owned group still present?
+
+    POSIX: the child leads a new session and process group (pgid == its pid). The leader is reaped
+    first (poll), then signal 0 to the group asks whether any member remains: a descendant that
+    outlived the leader keeps the group alive. A group ID cannot be reused while any member exists, so
+    signalling it only while this says True never reaches an unrelated group. A descendant that leaves
+    the group itself (setsid/setpgid) is not tracked; nothing in the cycle does that.
+    Windows (local development only): only the leader is observable."""
+    proc.poll()
+    if WINDOWS:
+        return proc.returncode is None
+    try:
+        os.killpg(proc.pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _wait_group(proc: subprocess.Popen, timeout: float, monotonic=time.monotonic) -> bool:
+    """Wait up to timeout for the whole owned group to be gone; True only when confirmed gone."""
+    end = monotonic() + timeout
+    while _group_alive(proc):
+        if monotonic() >= end:
+            return False
+        time.sleep(0.05)
+    return True
+
+
 def _interrupt(proc: subprocess.Popen) -> None:
     try:
         if WINDOWS:
@@ -100,10 +138,26 @@ def _kill(proc: subprocess.Popen) -> None:
         pass
 
 
+KILLED_NOTE = ("the cycle's process group was killed: its writer/publish leases may remain held until they "
+               "expire; later cycles exit non-zero until an operator confirms no writer runs and passes "
+               "--break-stale-lease (publish-status reports stale_*_lease)")
+UNCONFIRMED_NOTE = ("termination of the cycle's process group could NOT be confirmed after the kill wait: a "
+                    "writer may still be running. Its leases are not broken; later cycles refuse while they "
+                    "are held. Confirm no writer runs before any --break-stale-lease")
+
+
 def launch(config_path: str, cycle_args: list[str], *, monotonic=time.monotonic, cmd_prefix=None) -> dict:
-    """Run one bounded cycle; return the terminal record (its exit_code is the process exit code)."""
+    """Run one bounded cycle; return the terminal record (its exit_code is the process exit code).
+
+    The bound covers the cycle's whole owned process group, not only the direct child: a cycle has
+    ended only when no member of the group remains. If the leader exits while a descendant remains,
+    the launcher keeps waiting for the group under the same deadline, then interrupts and kills the
+    group as for a running cycle. Every outcome other than config_invalid/spawn_failed states
+    group_terminated: true only after the group was observed gone; otherwise the outcome is
+    termination_unconfirmed."""
     start = monotonic()
-    record = {"schema": LAUNCH_SCHEMA, "config": config_path, "started_at": _now()}
+    record = {"schema": LAUNCH_SCHEMA, "config": config_path, "started_at": _now(),
+              "group_check": "leader_only (Windows)" if WINDOWS else "posix_process_group"}
 
     def finish(outcome: str, exit_code: int, **extra) -> dict:
         record.update(outcome=outcome, exit_code=exit_code, ended_at=_now(),
@@ -139,39 +193,47 @@ def launch(config_path: str, cycle_args: list[str], *, monotonic=time.monotonic,
 
         reason = None
         while True:
-            remaining = deadline - (monotonic() - start)
             if stop["signal"] is not None:
                 reason = "stopped"
                 break
+            remaining = deadline - (monotonic() - start)
             if remaining <= 0:
                 reason = "deadline"
                 break
-            try:
-                code = proc.wait(timeout=min(remaining, 1.0))
-            except subprocess.TimeoutExpired:
-                continue
-            if code == 0:
-                return finish("ok", 0, child_exit=0)
-            return finish("cycle_failed", code if code in (1, 2) else 1, child_exit=code)
+            if proc.returncode is None:
+                try:
+                    proc.wait(timeout=min(remaining, 1.0))
+                except subprocess.TimeoutExpired:
+                    continue
+                record["child_exit"] = proc.returncode
+            if not _group_alive(proc):
+                code = proc.returncode
+                if record.get("descendants_outlived_leader"):
+                    record["group_ended_at"] = _now()
+                if code == 0:
+                    return finish("ok", 0, group_terminated=True)
+                return finish("cycle_failed", code if code in (1, 2) else 1, group_terminated=True)
+            # The leader has exited but a descendant remains: the cycle is not over.
+            if not record.get("descendants_outlived_leader"):
+                record["descendants_outlived_leader"] = True
+                record["leader_exited_at"] = _now()
+            time.sleep(min(0.1, max(0.0, remaining)))
 
         _interrupt(proc)
         record["interrupted_at"] = _now()
-        try:
-            code = proc.wait(timeout=grace)
+        if _wait_group(proc, grace, monotonic):
+            record["child_exit"] = proc.returncode
             if reason == "stopped":
-                return finish("stopped_interrupted", 143, child_exit=code, signal=stop["signal"])
-            return finish("deadline_interrupted", 124, child_exit=code)
-        except subprocess.TimeoutExpired:
-            pass
+                return finish("stopped_interrupted", 143, group_terminated=True, signal=stop["signal"])
+            return finish("deadline_interrupted", 124, group_terminated=True)
         _kill(proc)
-        try:
-            code = proc.wait(timeout=kill_wait)
-        except subprocess.TimeoutExpired:
-            code = None
-        return finish("killed", 137, child_exit=code, cause=reason,
-                      lease_note="the cycle was killed: its writer/publish leases may remain held until they "
-                                 "expire; later cycles exit non-zero until an operator confirms no writer runs "
-                                 "and passes --break-stale-lease (publish-status reports stale_*_lease)")
+        record["killed_at"] = _now()
+        confirmed = _wait_group(proc, kill_wait, monotonic)
+        record["child_exit"] = proc.returncode
+        if confirmed:
+            return finish("killed", 137, group_terminated=True, cause=reason, lease_note=KILLED_NOTE)
+        return finish("termination_unconfirmed", 126, group_terminated=False, cause=reason,
+                      lease_note=UNCONFIRMED_NOTE)
     finally:
         for sig, handler in previous.items():
             signal.signal(sig, handler)

@@ -1,7 +1,9 @@
 # News pilot: runtime, operations, storage and cost envelope
 
-Status: evidence for sizing the schedule within Owen's **$5/month incremental** News budget
-(2026-11-14). Nothing here is provisioned. The pilot config stays `active: false`.
+Status: evidence for the schedule within Owen's **$5/month incremental** News budget (2026-11-14).
+Revised after Chej's review of #247: the history read now lists raw runs only after the checkpoint
+frontier (bounded listing). Nothing here is provisioned. The pilot config stays `active: false` and
+the cadence stays `*/15`.
 
 Each figure is labelled:
 - **OBSERVED:** measured from the shipped code on local stores;
@@ -14,50 +16,39 @@ Each figure is labelled:
   simulated 15-minute tick, against two counting local stores. Every store call is recorded as the R2
   request it maps to in `R2ObjectStore`:
   - put → PutObject (Class A);
-  - list → ListObjectsV2 (Class A, one request per 1,000 keys);
+  - list → ListObjectsV2 (Class A, one request per 1,000 keys returned);
   - get → GetObject (Class B);
   - `last_modified` → HeadObject (Class B);
   - delete → DeleteObject (free).
-- `--expiry` simulates a verified store-clock bound (`clock_bound_verified: true`) in a temporary copy
-  of the config. The shipped value stays `false`.
-- `tests/news_cost_projection.py` turns a measurement file into monthly figures. Its assumptions are
-  listed in its docstring and repeated below.
-- Runs behind this document:
-  - 96 cycles, expiry off;
-  - 192 cycles, expiry on;
-  - 1 cycle against the four live public feeds (reads only, local stores).
+- `--expiry` simulates a verified store-clock bound in a temporary copy of the config. The shipped
+  `clock_bound_verified` stays `false`.
+- `tests/news_cost_projection.py` projects monthly figures from a measurement file. Its assumptions
+  are in its docstring and below.
+- `tests/test_news_checkpoint.py` `BoundedListing` measures the run listing on a 1,500-run history
+  (6,000 raw objects, about 16 days at `*/15`).
 
 ## Observed
 
-| Measure | Expiry off (96 cycles) | Expiry on (192 cycles) |
+| Measure | Before (#247 head 832a6cb) | Now (bounded listing) |
 | --- | --- | --- |
-| Publications | 96/96 published | 192/192 published |
-| Class A per cycle (private + public) | 168 → 193 (public listings grow) | 170 (flat) |
-| Class B per cycle | 169 → 229 | 231 (flat) |
-| Public pages written per cycle | 64 | 64 |
-| Public objects held at the end | 6,049 (still growing) | 316 (flat from cycle 5) |
-| Old public pages deleted per cycle | 0 | 63 (free) |
-| Private growth per cycle with no new items | ~60 KB, 6 objects | ~58 KB, 6 objects |
+| Class A per cycle, steady (192 cycles, expiry on) | 170 | 170 |
+| Class B per cycle, steady | 231, plus one content replay a day (428 at 192 runs: 4 GETs per raw run) | 233, no replay spike (max 42 private) |
+| Listings of `news/v1/runs/` per cycle | 4, each over the whole raw history | 4, each after the frontier only |
+| Run keys listed per cycle, 1,500-run history | > 6,000 per listing | ≤ 16 in total (`BoundedListing`) |
+| ListObjectsV2 for runs per cycle, 1,500 runs | ≥ 2 × 6 + … (grows) | constant over 10 further cycles |
+| Scheduled verification (every 24 h) | content replay: every object read again | full listing compared with the checkpoint; re-reads only changed runs (0 normally) |
+| Public objects held / deleted per cycle | 316 / 63 (free) | unchanged |
+| Private growth per cycle with no new items | ~58 KB, 6 objects | unchanged |
 
-- **Expiry off means publication pauses after about a day.** Nothing expires, so the public page
-  count passes 6,000 after 96 cycles. The 6,300 cap is reached at about cycle 100 (~25 h at
-  `*/15`), and then publication pauses. Continuous operation needs the clock-bound check passed and
-  `clock_bound_verified: true` first, or pauses must be accepted.
-- **The raw archive is listed in full four times every cycle.** `news/v1/runs/` grows by exactly 4
-  objects per cycle (measured over 12 cycles) and is listed four times per cycle. Raw runs are kept
-  ("keep (immutable history)"), so those listings grow by 4 ListObjectsV2 requests per 1,000 runs:
-  about +46 Class A per cycle per month at `*/15`. This is the only term that grows without bound.
-- **Live feeds** (2026-11-14, a Saturday):
+- **Expiry off** (the shipped `clock_bound_verified: false`): nothing expires. The 6,300-page cap is
+  reached after about 100 cycles (~25 h at `*/15`), and then publication pauses (96-cycle run). This is
+  unchanged.
+- **Live feeds** (2026-11-14, a Saturday, local stores, reads only):
   - All 4 sources were OK, with 82 items on first sight.
-  - The first cycle's private store was 1.04 MB, including one view snapshot.
-  - Feed fetch plus cycle took about 2 s of local wall time.
-  - The feeds' own publication rates add up to about 35 items/day: ars_technica 10.3, oilprice_com
-    13.0, techcrunch 10.8, eia_today_in_energy 0.4.
-- **Process:** one fixture cycle through the launcher on Linux (WSL) took 0.45 s elapsed with a
-  peak RSS of about 29 MB.
-- **Local wall time is not a runtime measurement.** Local time rose from 1.3 s to 10.3 s over 192
-  cycles. A profile shows that is the local store's directory walk (`rglob` over directories left
-  empty by deletes), which R2 does not have. R2 listing cost is counted above as requests instead.
+  - The feeds' own rates add up to about 35 items/day.
+- **Process:** one fixture cycle under the launcher on Linux took 0.45 s with about 29 MB peak.
+- **Local wall time is not runtime.** Its growth over many cycles is the local store's directory walk
+  (`rglob` over directories left empty by deletes), which R2 does not have.
 
 ## Projected
 
@@ -65,57 +56,66 @@ Assumptions (in `tests/news_cost_projection.py`):
 - **Prices** (list prices checked 2026-11-14):
   - R2 Standard: Class A $4.50/M, Class B $0.36/M, storage $0.015/GB-month; deletes and egress free.
   - Railway: $0.000463 per vCPU-minute, $0.000231 per GB-RAM-minute.
-- **Free tier not subtracted.** The R2 free tier (1 M Class A, 10 M Class B, 10 GB) is account-wide
-  and already shared with the market collectors.
-- **Failure headroom:** ×1.25 on every request (failed or retried cycles; a 412 is billed as Class A).
-- **Runtime:** about 95 s per cycle. That is 0.15 s per R2 request, serial, plus 10 s for feeds. The
-  latency is **assumed**; only the request count is measured.
-- **Compute:** 0.5 vCPU and 0.1 GB while running (about 29 MB was measured).
-- **Archive growth:** 35 items/day at 4 KB each in the private store.
+- **Free tier not subtracted.** It is account-wide and shared with the collectors.
+- **Failure headroom:** ×1.25 on every request.
+- **Runtime:** about 97 s per cycle (assumed 0.15 s per serial R2 request, plus 10 s for feeds).
+- **Compute:** 0.5 vCPU and 0.1 GB while running.
+- **Archive growth:** 35 items/day at 4 KB each.
+- **Full listing:** 2 full listings of `news/v1/runs/` a day (the verifying read and its save), one
+  request per 1,000 raw objects. This is the only growing term.
 
-| Month | `*/15` Class A | `*/15` total | `*/30` Class A | `*/30` total |
-| --- | --- | --- | --- | --- |
-| 1 | 688 k | **$4.56** | 323 k | **$2.19** |
-| 2 | 853 k | $5.31 | 365 k | $2.38 |
-| 3 | 1.02 M | $6.06 | 406 k | $2.56 |
-| 6 | 1.52 M | $8.31 | 531 k | $3.13 |
-| 12 | 2.51 M | $12.80 | 779 k | $4.26 |
+| Month | `*/15` Class A | `*/15` total | `*/30` total |
+| --- | --- | --- | --- |
+| 1 | 612 k | **$4.24** | $2.12 |
+| 2 | 613 k | $4.25 | $2.13 |
+| 3 | 614 k | $4.26 | $2.13 |
+| 6 | 617 k | $4.28 | $2.14 |
+| 12 | 622 k | $4.31 | $2.16 |
 
 Breakdown at `*/15`, month 1:
-- R2 $3.40, of which Class A ≈ $3.10.
-- Railway $1.17.
-- Storage is negligible: about 0.18 GB after a month, about 2 GB after a year.
+- R2 $3.06: Class A $2.76, Class B $0.30, storage < $0.01.
+- Railway $1.18.
 
-**Reading:**
-- `*/15` is not within $5 with headroom. It projects $4.56 in month 1 and passes $5 in month 2,
-  rising about $0.75/month from the raw-archive listings.
-- `*/30` projects $2.19 in month 1 and $4.26 in month 12. It stays within $5 for the first year, with
-  the most headroom early on.
-- **Either cadence keeps growing.** The full listing of `news/v1/runs/` grows without bound. A
-  bounded listing (only runs after the checkpoint) or a raw-archive retention decision would make
-  Class A flat. That would be about $4.16/month total at `*/15`, still close to the limit, and about
-  $2.1/month at `*/30`. That is a separate, reviewed code change. It is **not** in this PR.
-- **The cadence is pinned in code.** `load_pilot_config` accepts only `*/15` with `interval_s` 900.
-  `*/30` needs a reviewed config and validator change, with the reader timings rechecked.
+The full listing's share of Class A is 0.1% in month 1 and 1.6% in month 12. Storage is about
+0.18 GB after a month and about 2 GB after a year.
+
+**Reading.**
+- With the bounded listing, `*/15` is projected within $5 every month for the first year, with about
+  $0.70 of headroom. The headroom rests on the assumed request latency and failure factor (both need
+  provider data) and on no free-tier allowance.
+- **Correction to the #247 projection.** It omitted the daily content replay, 4 GETs per raw run per
+  day. That would have added about 4 M Class B a month (about $1.40) by month 12, on top of the
+  listing growth it did show. The bounded design removes both growing terms.
+- What still grows:
+  - the daily full listing, linear and small;
+  - stored bytes;
+  - the checkpoint body's bytes, read and written once per cycle as one object each. The request
+    counts stay the same; the transfer is free, and its time is part of the runtime assumption.
+
+## Integrity schedule (changed by the bounded listing)
+
+- **Every cycle:** runs after the frontier are listed and verified. A run that is not settled is never
+  passed by the frontier, so it is listed every cycle. The head's `frontier_stopped_at` names it.
+- **Before any upload at or before the frontier** (a recovered spool with an older run_id, or a clock
+  that went backwards): the writer first clears the frontier durably. Covered by tests for recovery, a
+  crash after the upload, a crash before it, and a backwards clock.
+- **Every 24 h (writers):** a full listing compared run by run with the checkpoint. A rewritten run is
+  re-read and fails visibly; a missing run fails visibly (`HistoryCorrupt`).
+- **Trade-off:** a change to a run at or before the frontier is found within 24 h, not on the next
+  read. `checkpoint compare` finds it at once. The full content replay now runs only when the
+  checkpoint is missing, corrupt or incompatible, or on `checkpoint rebuild`.
 
 ## Retention cleanup (included above)
 
-- Snapshots are capped at 3 (`retention.snapshots`). Older snapshot pages are deleted each cycle:
-  68 deletes per cycle in the private store, free.
-- Retired public incarnations are deleted after the reader grace once expiry is enabled: 63 per
-  cycle, free.
-- Raw runs, commit records and receipts are kept. They are the private growth above.
+- Snapshots are capped at 3: 68 free deletes per cycle in the private store.
+- Retired public incarnations are deleted after the reader grace once expiry is enabled: 63 free
+  deletes per cycle.
+- Raw runs, commit records and receipts are kept (immutable history, unchanged).
 
-## Needs provider access
+## Needs provider access (Chej's provider work)
 
-1. **R2 request latency from the scheduler host**, for list, get, put and conditional put on both
-   News buckets. This decides the real runtime (projected about 95 s, well inside the 600 s
-   deadline) and the Railway figure. It can be measured with the A1–A5 probes on disposable keys.
-2. **Current account R2 usage against the free tier.** If allowance is left, the incremental R2 cost
-   is lower than shown.
-3. **Railway cron metering for a one-shot service.** Is it per running minute, with any minimum, and
-   how long is the grace between SIGTERM and SIGKILL when a run is stopped? The launcher interrupts on
-   SIGTERM and finishes within its interrupt grace (90 s). A shorter platform grace would turn a stop
-   into a kill.
-4. **The store-clock bound** (`clock_bound_verified`). Without it, publication pauses at the page cap
-   after about 25 h at `*/15`.
+1. R2 request latency from the scheduler host: it decides the real runtime and the Railway figure.
+2. Current account R2 usage against the free tier.
+3. Railway cron metering for a one-shot service, and its SIGTERM-to-SIGKILL grace on stop. The
+   launcher's interrupt grace is 90 s.
+4. The store-clock bound (`clock_bound_verified`).

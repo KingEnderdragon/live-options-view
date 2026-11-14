@@ -31,7 +31,7 @@ from market_data.news import publish as pub  # noqa: E402
 CONFIG = ROOT / "market_data/news/deploy/news-pilot.json"
 LEASE = "news/v1/_writer/lease.json"
 
-FAKE_CHILD = textwrap.dedent("""
+FAKE_CHILD = textwrap.dedent(r"""
     import os, signal, sys, time
     sys.path.insert(0, os.environ["FAKE_ROOT"])
     from datetime import datetime, timezone
@@ -53,6 +53,27 @@ FAKE_CHILD = textwrap.dedent("""
                 time.sleep(0.1)
         return 0
 
+    def descendant(ignore_term):
+        # A grandchild in the same owned group (no new session), recording its pid, running until
+        # FAKE_DESC_SECONDS elapse. ignore_term: it survives the group interrupt (only a kill ends it).
+        import subprocess
+        code = ("import os, signal, sys, time\n"
+                + ("signal.signal(signal.SIGTERM, signal.SIG_IGN)\n" if ignore_term else "")
+                + "open(sys.argv[1], 'w').write(str(os.getpid()))\n"
+                + "end = time.time() + float(sys.argv[2])\n"
+                + "while time.time() < end: time.sleep(0.05)\n")
+        subprocess.Popen([sys.executable, "-c", code, os.environ["FAKE_DESC_PID"], os.environ["FAKE_DESC_SECONDS"]])
+        while not os.path.exists(os.environ["FAKE_DESC_PID"]) or not open(os.environ["FAKE_DESC_PID"]).read():
+            time.sleep(0.02)
+
+    if mode == "leader_exits":       # the leader finishes at once; its descendant keeps running
+        descendant(ignore_term=False)
+        sys.exit(0)
+    if mode == "interrupt_desc":     # an interrupted cycle that leaves a SIGTERM-proof descendant
+        descendant(ignore_term=True)
+        import market_data.news.__main__ as cli
+        cli.main = hold
+        sys.exit(launch.run_cycle(sys.argv[1:]))
     if mode == "interrupt":          # the real child entry, with a cycle that holds the lease
         import market_data.news.__main__ as cli
         cli.main = hold
@@ -172,9 +193,10 @@ class Deadline(unittest.TestCase):
         self.store = self.tmp / "store"
         self.ready = self.tmp / "ready"
 
-    def run_launch(self, mode, b, signal_after=None, block=False):
+    def run_launch(self, mode, b, signal_after=None, block=False, desc_seconds=60):
         env = {"FAKE_ROOT": str(ROOT), "FAKE_MODE": mode, "FAKE_STORE": str(self.store), "FAKE_READY": str(self.ready),
-               "FAKE_BLOCK": "1" if block else ""}
+               "FAKE_BLOCK": "1" if block else "", "FAKE_DESC_PID": str(self.tmp / "desc.pid"),
+               "FAKE_DESC_SECONDS": str(desc_seconds)}
         timer = None
         if signal_after is not None:
             timer = threading.Timer(signal_after, os.kill, (os.getpid(), signal.SIGTERM))
@@ -222,6 +244,7 @@ class Deadline(unittest.TestCase):
         elapsed = time.monotonic() - started
         self.assertTrue(self.ready.exists())
         self.assertEqual((record["outcome"], record["exit_code"], record["cause"]), ("killed", 137, "deadline"), record)
+        self.assertIs(record["group_terminated"], True, "killed is reported only once the group is gone")
         self.assertTrue((self.store / LEASE).exists(), "a killed cycle cannot release its lease")
         self.assertIn("--break-stale-lease", record["lease_note"])
         self.assertLess(elapsed, 3 + 2 + 5 + 2, "bounded by deadline + grace + kill wait")
@@ -234,6 +257,71 @@ class Deadline(unittest.TestCase):
         self.assertEqual(record["signal"], signal.SIGTERM)
         self.assertFalse((self.store / LEASE).exists())
         self.assertLess(record["elapsed_s"], 20)
+
+    def desc_pid(self):
+        return int((self.tmp / "desc.pid").read_text())
+
+    def assert_gone(self, pid):
+        # Reaped by init once orphaned; poll briefly for it to disappear.
+        for _ in range(100):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.05)
+        self.fail(f"descendant {pid} is still running")
+
+    @unittest.skipIf(os.name == "nt", "process-group tracking is POSIX (the scheduler host is Linux)")
+    def test_leader_exit_with_a_running_descendant_does_not_end_the_cycle(self):
+        record = self.run_launch("leader_exits", bounds(deadline=60, grace=5, kill_wait=5), desc_seconds=2)
+        # The launcher waited for the descendant, under the same deadline, before reporting the outcome.
+        self.assertEqual((record["outcome"], record["exit_code"], record["child_exit"]), ("ok", 0, 0), record)
+        self.assertIs(record["descendants_outlived_leader"], True)
+        self.assertIs(record["group_terminated"], True)
+        self.assertGreaterEqual(record["elapsed_s"], 1.5, "it did not return when the leader exited")
+        self.assert_gone(self.desc_pid())
+
+    @unittest.skipIf(os.name == "nt", "process-group tracking is POSIX (the scheduler host is Linux)")
+    def test_a_descendant_outliving_its_leader_is_bounded_by_the_deadline(self):
+        record = self.run_launch("leader_exits", bounds(deadline=3, grace=5, kill_wait=5), desc_seconds=60)
+        self.assertEqual((record["outcome"], record["exit_code"], record["child_exit"]),
+                         ("deadline_interrupted", 124, 0), record)
+        self.assertIs(record["descendants_outlived_leader"], True)
+        self.assertIs(record["group_terminated"], True)
+        self.assertLess(record["elapsed_s"], 3 + 5)
+        self.assert_gone(self.desc_pid())
+
+    @unittest.skipIf(os.name == "nt", "process-group tracking is POSIX (the scheduler host is Linux)")
+    def test_interruption_with_a_surviving_descendant_kills_the_group(self):
+        record = self.run_launch("interrupt_desc", bounds(deadline=3, grace=3, kill_wait=5), desc_seconds=60)
+        # The leader unwound (exit 3, lease released) but its descendant ignored the interrupt, so the
+        # group was not gone at the end of the grace: it was killed, and that was confirmed.
+        self.assertEqual((record["outcome"], record["exit_code"], record["child_exit"]),
+                         ("killed", 137, launch.CHILD_INTERRUPTED), record)
+        self.assertIs(record["group_terminated"], True)
+        self.assertFalse((self.store / LEASE).exists(), "the leader still released its lease")
+        self.assertIn("killed_at", record)
+        self.assert_gone(self.desc_pid())
+
+    def test_unconfirmed_termination_is_reported_not_assumed(self):
+        # The kill is lost (patched to do nothing) and the cycle ignores the interrupt, so the group
+        # never disappears: the launcher must say so, with its own exit code, after the kill wait.
+        started = time.monotonic()
+        with mock.patch.object(launch, "_kill", lambda proc: None):
+            record = self.run_launch("ignore", bounds(deadline=2, grace=1, kill_wait=2))
+        try:
+            self.assertEqual((record["outcome"], record["exit_code"], record["group_terminated"]),
+                             ("termination_unconfirmed", 126, False), record)
+            self.assertIsNone(record["child_exit"])
+            self.assertIn("could NOT be confirmed", record["lease_note"])
+            self.assertTrue((self.store / LEASE).exists(), "nothing breaks the lease")
+            self.assertLess(time.monotonic() - started, 2 + 1 + 2 + 3)
+        finally:
+            if os.name == "nt":
+                import subprocess
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(record["child_pid"])], capture_output=True)
+            else:
+                os.killpg(record["child_pid"], signal.SIGKILL)
 
     def test_launcher_restores_its_signal_handlers(self):
         before = signal.getsignal(signal.SIGTERM)
