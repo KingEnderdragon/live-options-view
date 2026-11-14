@@ -11,7 +11,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import worker, { settleAllBots, BOT_INDEX_KEY } from '../backend/index.js';
-import { createCronOutcomeLog, CRON_EVENT } from '../backend/cron_outcome.js';
+import { createCronOutcomeLog, classifyError, CRON_EVENT, ERROR_MESSAGES } from '../backend/cron_outcome.js';
 import { createStorage } from '../backend/storage.js';
 import { withD1 } from './helpers/test_env.mjs';
 
@@ -244,10 +244,65 @@ test('error: logged with stage, then re-thrown unchanged', async () => {
   assert.equal(done.phase, 'error');
   assert.equal(done.level, 'error', 'errors go to console.error');
   assert.equal(done.stage, 'settle_all_bots');
-  assert.equal(done.error_name, 'Error');
-  assert.match(done.error_message, /migration is not ready/);
+  assert.equal(done.error_category, 'bot_index_not_ready');
+  assert.equal(done.error_class, 'Error');
+  assert.equal(done.error_message, ERROR_MESSAGES.bot_index_not_ready, 'a fixed message, not the error text');
   assert.equal(done.outcome, undefined);
   assertNothingPrivate(lines);
+});
+
+// Adversarial: a stored account record that no longer parses. JSON.parse's
+// SyntaxError quotes part of the record, which is exactly what must never
+// reach the log -- truncation would not stop it.
+const SENSITIVE = ['SECRETHASH9f8e7d', 'hunter2-password', 'tok_live_ABC123', 'hunter2', BOT];
+
+test('adversarial: corrupt stored record -- parse error text never logged, original re-thrown', async () => {
+  const env = await envWith([botRecord([EXPIRED_SHORT])]);
+  // V8 quotes the text around an unexpected token: ..."password":hunter2}"
+  const leaky = `{"username":"${BOT}","is_bot":true,"password":hunter2}`;
+  env.DB.db.prepare('UPDATE users SET record = ? WHERE username = ?').run(leaky, BOT);
+  // Precondition: the raw error really would leak if logged.
+  const direct = await createStorage(env).users.get(BOT).then(() => null, e => e);
+  assert.ok(direct instanceof SyntaxError, 'the store raises the raw parse error');
+  assert.ok(SENSITIVE.some(x => direct.message.includes(x)), 'and its message quotes the record');
+
+  const { records, waits, lines } = await runScheduled(env);
+  const thrown = await waits[0].then(() => null, e => e);
+  assert.ok(thrown instanceof SyntaxError, 'the original error is re-thrown unchanged');
+  assert.equal(thrown.message, direct.message);
+  const done = assertEnvelope(records);
+  assert.equal(done.phase, 'error');
+  assert.equal(done.error_category, 'unclassified');
+  assert.equal(done.error_class, 'SyntaxError');
+  assert.equal(done.error_message, ERROR_MESSAGES.unclassified);
+  const all = lines.map(l => l.text).join('\n');
+  for (const secret of SENSITIVE) assert.ok(!all.includes(secret), `log output must not contain ${secret}`);
+  assert.ok(!all.includes(direct.message.slice(0, 20)), 'no fragment of the parse error message');
+});
+
+test('adversarial: hostile error name/message/shape are all withheld', () => {
+  const custom = new Error(`lookup failed for ${BOT} hash=${SENSITIVE[0]}`);
+  custom.name = `Leak ${SENSITIVE[2]}`;
+  class AccountError extends Error {}
+  const subclass = new AccountError(`password=${SENSITIVE[1]}`);
+  const lookalike = new Error('Bot membership migration is not ready ' + SENSITIVE[0]);
+  for (const thrown of [custom, subclass, lookalike, `raw string ${SENSITIVE[1]}`, { message: SENSITIVE[0], name: 'Error' }, null]) {
+    const lines = [];
+    const log = createCronOutcomeLog({}, { log: l => lines.push(l), logError: l => lines.push(l) });
+    log.error('settle_all_bots', thrown);
+    const record = JSON.parse(lines[0]);
+    assert.equal(record.error_category, 'unclassified', 'only an exact known message classifies');
+    assert.ok(['Error', 'other'].includes(record.error_class));
+    assert.equal(record.error_message, ERROR_MESSAGES.unclassified);
+    for (const secret of SENSITIVE) assert.ok(!lines[0].includes(secret), `must not contain ${secret}`);
+  }
+  assert.equal(classifyError(custom).error_class, 'other', 'a renamed error class is not echoed');
+  assert.equal(classifyError(subclass).error_class, 'other', 'custom subclasses are not named');
+  for (const [message, category] of [['Indexed settlement account unavailable', 'settlement_account_unavailable'],
+    ['Invalid bot index mode', 'bot_index_mode_invalid'], ['Invalid bot membership index', 'bot_index_invalid'],
+    ['Invalid bot membership', 'bot_index_invalid'], ['Bot closure could not be persisted', 'liquidation_not_persisted']]) {
+    assert.equal(classifyError(new Error(message)).error_category, category);
+  }
 });
 
 test('outcome log: summary is whitelisted, messages bounded, one terminal record', () => {
@@ -258,7 +313,7 @@ test('outcome log: summary is whitelisted, messages bounded, one terminal record
   log.invoked();
   log.completed({ accounts_settled: 2, positions_settled: 3, username: BOT, balance_cash: 54321,
     trades: [EXPIRED_SHORT], no_op_reason: null });
-  log.error('late', new Error('x'.repeat(500)));   // ignored: already terminal
+  log.error('late', new Error('x'));   // ignored: already terminal
   assert.equal(lines.length, 2);
   const done = JSON.parse(lines[1]);
   assert.deepEqual(Object.keys(done).sort(), ['accounts_settled', 'at', 'cron', 'duration_ms', 'event',
@@ -270,7 +325,10 @@ test('outcome log: summary is whitelisted, messages bounded, one terminal record
   const errLog = createCronOutcomeLog({}, { log: l => errLines.push(l), logError: l => errLines.push(l) });
   errLog.error('settle_all_bots', new Error('y'.repeat(500)));
   const err = JSON.parse(errLines[0]);
-  assert.equal(err.error_message.length, 203, 'message capped at 200 chars + ellipsis');
+  assert.deepEqual(Object.keys(err).sort(), ['at', 'cron', 'duration_ms', 'error_category', 'error_class',
+    'error_message', 'event', 'phase', 'run_id', 'scheduled_time', 'stage'].sort());
+  assert.ok(!errLines[0].includes('yyyy'), 'error text is never forwarded');
+  for (const fixed of Object.values(ERROR_MESSAGES)) assert.ok(fixed.length <= 60, 'fixed messages are short');
   assert.equal(err.cron, null);
   assert.equal(err.scheduled_time, null);
 });
