@@ -391,7 +391,14 @@
         if (typeof event.reload === 'function') {
           var button = el(doc, 'button', 'nr-btn', 'Reload news and research');
           button.setAttribute('data-action', 'reload-shared-index');
-          button.addEventListener('click', function () { event.reload(); });
+          button.addEventListener('click', function () {
+            // Disabled and cleared at once: this control fires once; the new mount's events take over.
+            if (button.disabled) return;
+            button.disabled = true;
+            ++latest;   // nothing pending from the old index may render after this
+            message(doc, container, 'loading', 'nr-dim', 'Reloading news and research…');
+            event.reload();
+          });
           add(box, el(doc, 'span', null, ' '), button);
         } else {
           add(box, el(doc, 'span', null, ' Reload the page to see the current publication.'));

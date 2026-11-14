@@ -198,7 +198,11 @@ async function asyncTests() {
       assert.equal(buttons[0].getAttribute('data-action'), 'reload-shared-index');
       assert.ok(!t.root.textContent.includes('Reload the News view above'), `${what}: no instruction to a control that may not exist`);
       buttons[0].click();
-      assert.equal(reloads, 1, `${what}: the button reloads the shared index`);
+      buttons[0].click();
+      assert.equal(reloads, 1, `${what}: the button reloads the shared index exactly once`);
+      assert.equal(buttons[0].disabled, true, `${what}: the control is disabled at once`);
+      assert.equal(t.root.getAttribute('data-state'), 'loading', `${what}: the control is cleared while loading`);
+      assert.equal(t.root.all(x => x.tagName === 'BUTTON').length, 0, `${what}: no live control while loading`);
     } else {
       assert.equal(buttons.length, 0, `${what}: no reload control`);
     }

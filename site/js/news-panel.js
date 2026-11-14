@@ -543,10 +543,16 @@
       try { opts.onIndex(event); } catch (e) { /* the research view reports its own failure */ }
     }
 
+    // One-shot per mount: the first call ends this mount and starts exactly one new one (one index read);
+    // every later call on this mount, from any control, does nothing.
+    var reloaded = false;
     function reloadAll() {
+      if (reloaded) return false;
+      reloaded = true;
       dead = true;
       clear(container);
       mount(doc, container, fetchJson, indexKey, opts);
+      return true;
     }
 
     // Never mixes generations and never falls back: the reader reloads the fixed index instead.
@@ -563,10 +569,7 @@
       add(box, el(doc, 'strong', null, 'This view was replaced or has expired. '),
         el(doc, 'span', null, 'Reload to see the current publication (' + reason + ').'));
       var button = el(doc, 'button', 'np-btn', 'Reload');
-      button.addEventListener('click', function () {
-        clear(container);
-        mount(doc, container, fetchJson, indexKey, opts);
-      });
+      button.addEventListener('click', function () { reloadAll(); });
       add(box, button);
       add(pageSlot, box);
       container.setAttribute('data-state', 'refresh-required');
