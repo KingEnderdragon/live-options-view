@@ -1,10 +1,11 @@
 # MediaFlow News: release and rollback plan (R4 draft)
 
-**Status: preparation only.** This is not a release approval and does not complete the quest. Nothing
-in it is authorized: provider operation, publication, push, merge, deployment and activation all
-stay held until Owen approves each step. The activation steps and the day-one review below are
-**proposed** release-plan steps, not an approved run or a scheduled commitment. Accepted engineering
-stays accepted; this plan adds no new finish line. It is drawn from `PUBLISHING.md` (operations, generations,
+**Status (2026-11-14): code landed and web release live; producer inactive.** Owen granted full
+delivery authority for MediaFlow (Chej, 2026-11-13). Chej coordinates merge and release operations and
+provider access; production runs go through the protected "production" environment. Done: the landing
+(section 1) and the web release (section 5, steps 1–2). Not done: provisioning, provider checks, the
+config flip, the first cycle and the 15-minute schedule. New paid services or extra spending stay
+Owen's decision. Accepted engineering stays accepted; this plan adds no new finish line. It is drawn from `PUBLISHING.md` (operations, generations,
 settlement), `RESEARCH.md` (research publication) and the accepted local evidence. No new tests
 were run for it.
 
@@ -13,15 +14,14 @@ were run for it.
 | | |
 | --- | --- |
 | Repository | `OwenTanzer/live-options-view` |
-| Base | `6df644278ac2032b83ea09284bd43c6900c621b4` (the accepted transplant base) |
-| Candidate head | `d2dd21cd058ab7782b01523db28e4a432c880f5c` on `feat/news-p1-wiring` (local, not pushed) |
-| Commits | 13 commits: `1d62d3c` (G1 transplant of M2–M6) → G3 (`24da6cb`, `7610760`, `38e9995`, `ccefb6f`) → G6 (`98c8d80`, `26b6739`) → G7 `b02d664` → P1 `4915d51` → P1d `ba609b1` → R1/R2 `e54467b` → corrections `6836414`, `d2dd21c` |
+| Landed | PR #243, reviewed head `455f117e13a8865bc5e86127592ada6edfda4b49` (15 commits on master `4629da6`), merged as `55db03606bf18869b581c931cea75c23a9a1d49c` |
+| Accepted local history | `d2dd21c` on `feat/news-p1-wiring` (13 commits on the transplant base `6df6442`: `1d62d3c` G1 → G3 `24da6cb`, `7610760`, `38e9995`, `ccefb6f` → G6 `98c8d80`, `26b6739` → G7 `b02d664` → P1 `4915d51` → P1d `ba609b1` → R1/R2 `e54467b` → corrections `6836414`, `d2dd21c`); the landing is that chain rebased, plus the R4 plan commits |
 | Size vs base | 89 files, +22,598 / −21. Shared (non-`market_data/news`, non-test) files: `backend/browser-data.js`, `frontend/preview-policy.mjs`, `site/index.html`, `site/js/boot.js`, `site/js/tab-switching.js`, `site/js/news-panel.js`, `site/js/news-research.js`. **No workflow file is changed.** |
 | Acceptance | Each stage has bounded local/static acceptance (see the quest Log), and it stays accepted. The evidence is contributor-run: 319 Python tests, 62/64 Node files with 2 base-level nonzero results, and 18 rendered checks at `e54467b`, plus the focused rechecks at `6836414` and `d2dd21c`. The R3 cases and any all-suite rerun are **deferred, separately authorized work**, not landing gates. A1–A8 are not verified (section 3). |
 
-### Changes a landing would involve (code; not authorized here)
+### Landing (done: PR #243, merge `55db036`)
 
-No rebase or landing is authorized by this plan. When one is authorized:
+What the landing involved, kept for reference:
 
 1. **Bring the candidate onto the current `master`.** The base `6df6442` predates later merged work
    (for example the E1 price-feed fix) and the pending H1 Skew branch. The shared files to reconcile
@@ -53,7 +53,10 @@ No rebase or landing is authorized by this plan. When one is authorized:
   deletes them. This has no time bound.
 - **Retention:** reader grace 45 min (+120 s epsilon, +120 s skew = 49 min to delete); 7 UTC dates
   per generation; 3 snapshots; the raw archive is immutable and kept.
-- **No Workers KV** (#208). Prices stay unavailable until a real input is chosen (D4).
+- **No Workers KV** (#208). Prices stay unavailable at first activation (D4). The only supported
+  real input is the collector's provenance sidecars, read-only, **last-trade selections only**
+  (`python -m market_data.news prices-from-sidecars`, `adapters/sidecar_prices.py`). Midpoints are
+  excluded because they have no provider time.
 - **The research view is fixed:** one per publication, in research mode at the build cutoff (D1).
 
 ## 3. Prerequisites before any activation
@@ -121,7 +124,7 @@ D7 (shared-file and landing coordination) is Chej's to reconcile. D3 is settled:
 ## 4. Exact configuration at activation
 
 `market_data/news/deploy/news-pilot.json` is the only configuration file. These are the changes, made
-as one reviewed commit approved by Owen:
+as one reviewed commit, with release coordinated by Chej:
 
 | Field | Now | At activation |
 | --- | --- | --- |
@@ -142,17 +145,31 @@ The command is the config's `schedule.command`:
 `python -m market_data.news pilot-cycle --config market_data/news/deploy/news-pilot.json --live`.
 `--live` is refused unless `active` is `true` **and** `NEWS_ALLOW_BUCKET_WRITES=1` is set.
 
-## 5. Proposed activation order
+## 5. Activation order
 
-This is a proposed sequence, not an approved run or a schedule. Each step would need its own
-approval and would be checked before the next one starts.
+Covered by the delivery authority. Chej coordinates each release step, and each step is checked
+before the next one starts.
 
-1. **Land the code** (section 1), when authorized: a reviewed merge with the stamps recomputed. Any
-   suite reruns are the separately authorized checks of section 1. There is no config flip yet, so
-   the producer cannot write.
-2. **Release the site side first**: the shell (`index.html`, `boot.js`, `tab-switching.js`), the
-   panel and research scripts, the Worker (`backend/browser-data.js`) and `preview-policy.mjs`,
-   **together**.
+1. **Land the code** (section 1). **Done:** PR #243 merged as `55db036`; the stamps were unchanged.
+   The config is still inactive, so the producer cannot write.
+2. **Release the web side: API Worker first, then assets** (two lanes, both `workflow_dispatch`
+   behind the "production" environment; mapped from the wrangler configs):
+   - **API lane, `deploy.yml`** ("Deploy API Worker"): `wrangler.api.toml` → Worker
+     `live-options-api`, main `backend/index.js`, which imports `backend/browser-data.js` (the
+     `/browser-data/` proxy and the News key rule).
+   - **Asset lane, `deploy-staged.yml`** ("Deploy staged asset payload"): `wrangler.assets.toml` →
+     Worker `live-options-view`, main `payload/frontend/worker.mjs` (imports `preview-policy.mjs`),
+     assets `payload/site` (`index.html`, `boot.js`, `tab-switching.js`, `news-panel.js`,
+     `news-research.js`).
+   - API first: the asset lane checks that the API service exists, and the new site needs the proxy
+     to admit the research page key (until then research shows `refresh-required` on the proxy).
+   - **Done 2026-11-14** at `55db036`: API run 43561200028, assets run 43561527996.
+   - **Observed empty states** (2026-11-14 ~07:20Z, desktop 1440 px and mobile 390 px): through the
+     proxy, "No news views published yet" and "No research view published". Direct R2 serves the
+     same 404s, but a browser page off the production origin cannot read r2.dev at all: the
+     public origin sends no CORS headers, so the panel there shows "Could not load news views …
+     Failed to fetch" (a visible failure, not a false empty state; the Live tab fails the same way).
+     The production origin always uses the proxy.
    - With nothing published, the News tab shows "No news views published yet" and the research view
      shows "No research view published". Check both on the proxy and on direct R2.
    - The retired `news/v2/research/view.json` and every `news/v1/**` key must return 404.
@@ -191,7 +208,7 @@ All commands take `--config`, `--live` and the environment above. `publish-statu
 | Take everything down | `publish-stop`, then `publish-withdraw`, repeated while it reports `withdrawal_unconfirmed` | A tombstone over `index.json`; every page deleted, the research page included; the panel shows "News views are not currently published" and research "Research records are not currently published". Index-only confirmation; cached copies and downloads cannot be recalled; snapshots and the raw archive are kept. |
 | Take down research only | No dedicated command. Either withdraw everything, or roll back to a generation whose research entry is `none` or `omitted`. | A research-only takedown needs a code change. The ledger is immutable. |
 | Abandoned lease | `PUBLISHING.md`, "Recovering from an abandoned lease": confirm the holder is gone, wait for `expires_at`, then run once with `--break-stale-lease`. | An unexpired lease is never taken over. |
-| Code rollback | Redeploy the previous site **and** Worker revisions **together**. | Through the proxy, a mismatch degrades visibly. A site newer than its Worker shows research `refresh-required`, because the pre-R1 Worker refuses the research page. An older site with a newer Worker requests the retired key, gets 404 and shows "No research view published". Direct R2 does not depend on the Worker. The raw archive is append-only, so the producer can be rolled back independently, and views are rebuilt on the next cycle. |
+| Code rollback | Redeploy the previous revisions through both lanes: `deploy.yml` (API Worker) and `deploy-staged.yml` (assets). Roll back assets first, then the API, so that no older Worker runs under the newer site. | Through the proxy, a mismatch degrades visibly. A site newer than its Worker shows research `refresh-required`, because the pre-R1 Worker refuses the research page. An older site with a newer Worker requests the retired key, gets 404 and shows "No research view published". Direct R2 does not depend on the Worker. The raw archive is append-only, so the producer can be rolled back independently, and views are rebuilt on the next cycle. |
 | Producer misbehaving | `publish-stop` first, then investigate with `publish-status` and the receipts. | Never delete objects by hand. A deleted head, commit record or page breaks settlement. |
 
 ## 7. What to watch
@@ -213,6 +230,7 @@ Readers see `build_as_of`, the coverage gaps and "prices unavailable" on every p
 
 | Role | Who |
 | --- | --- |
-| Activation, buckets, credentials, scheduler, the config flip | Owen |
-| Code, landing preparation, `publish-status` checks, stop/restore/withdraw when asked | Jayden |
+| Merge and release coordination across MediaFlow, Emergency Repairs and Skew; bucket mapping, scoped access, scheduler host | Chej |
+| Production environment approvals; new paid services or extra spending | Owen |
+| Code and corrections, the price adapter, verification evidence, `publish-status` checks, stop/restore/withdraw when asked | Jayden |
 | Review before activation and after the first live day | Chej |

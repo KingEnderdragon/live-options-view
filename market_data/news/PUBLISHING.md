@@ -392,8 +392,8 @@ reports `stale_writer_lease` or `stale_publish_lease`. Leases are never taken ov
    (see "Cadence and load"), but checkpoint bytes and memory, the run listing and R2 list pagination
    still grow with history, and none of this is measured at live volumes. Any longer pilot is a
    separate decision.
-5. **Release of the site side.** M4b (panel, proxy keys) must be released first, or the views are
-   published but not shown. That release is separate and governed by #225.
+5. **Release of the site side.** Done 2026-11-14 at `55db036`: API Worker through `deploy.yml`, then
+   assets through `deploy-staged.yml` (see `RELEASE_PLAN.md` section 5).
 
 ## Generation-specific page keys
 

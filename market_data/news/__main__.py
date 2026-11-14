@@ -14,6 +14,9 @@
                                   [--prices FILE] [--instrument etf.qqq] [--series ...] [--date YYYY-MM-DD]
                                   [--rows-per-page N] [--page-bytes N] [--max-pages N] (limits only lower the defaults)
   python -m market_data.news sources
+  python -m market_data.news prices-from-sidecars (--dir MIRROR | --date YYYYMMDD) --out FILE
+      read-only: collector provenance sidecars -> last-trade underlying_quote records (midpoints excluded);
+      --date lists/reads intraday/YYYYMMDD/ only, with PRICE_SIDECAR_R2_* read/list credentials.
   python -m market_data.news pilot-cycle   [--config FILE] [--private DIR] [--public DIR] [--spool DIR] [--clock T] [--live]
   python -m market_data.news publish-status|publish-stop --reason R|publish-resume|publish-withdraw|publish-reseal
                                            [--config FILE] [--private DIR] [--public DIR] [--live]
@@ -147,6 +150,12 @@ def main(argv=None) -> int:
     for flag in ("rows-per-page", "page-bytes", "max-pages", "segments-per-page", "index-views", "index-bytes"):
         bv.add_argument(f"--{flag}", type=int)
     sub.add_parser("sources", help="list configured sources and streams")
+    sp = sub.add_parser("prices-from-sidecars", help="last-trade price records from collector provenance "
+                                                   "sidecars (read-only, intraday/ only)")
+    src = sp.add_mutually_exclusive_group(required=True)
+    src.add_argument("--dir", help="local mirror laid out as <dir>/intraday/YYYYMMDD/*.provenance.json")
+    src.add_argument("--date", action="append", help="YYYYMMDD; list+read intraday/YYYYMMDD/ (repeatable)")
+    sp.add_argument("--out", required=True, help="price JSONL (header + records) for join/build-views --prices")
 
     def pilot_common(sp):
         sp.add_argument("--config", default=str(DEFAULT_PILOT))
@@ -194,6 +203,26 @@ def main(argv=None) -> int:
         for s in config.SOURCES.values():
             print(f"{'ENABLED ' if s.enabled else 'disabled'}  {s.id:40s} {','.join(s.streams):18s} {s.url}")
         print(f"config_digest={config.config_digest()} rules_digest={config.rules_digest()}")
+        return 0
+
+    if args.cmd == "prices-from-sidecars":
+        from .adapters import sidecar_prices as sc
+        try:
+            if args.dir:
+                items, source = sc.local_sidecars(args.dir), f"local mirror {Path(args.dir).name}"
+            else:
+                for d in args.date:
+                    sc.check_prefix(f"intraday/{d}/")
+                bucket = sc.BucketSidecars.from_env()
+                items = (kv for d in args.date for kv in bucket.sidecars(d))
+                source = "bucket " + ",".join(f"intraday/{d}/" for d in args.date)
+            result = sc.adapt(items, sc.SessionDeriver())
+            sc.write_jsonl(result, args.out, source)
+            load_price_file(args.out)  # the output must satisfy the prices.py contract as written
+        except (sc.SidecarAccessError, PriceRecordError) as exc:
+            print(f"refused: {exc}", file=sys.stderr)
+            return 2
+        print(json.dumps(result.header(source), indent=1))
         return 0
 
     if args.cmd.startswith("research-"):

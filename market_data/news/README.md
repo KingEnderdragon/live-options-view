@@ -31,6 +31,7 @@ tests or by the default commands.
 | `archive.py` | Object stores, writer lease, spool, commit protocol, history verification, `collect_once`, `enrich_pending` |
 | `reader.py` | As-of reads (`collector`, `archive`, `publication`) and the derived daily index and latest view |
 | `prices.py` | Validated, read-only price records (underlying quotes, option quotes, bars), each with a price time and an availability time |
+| `adapters/sidecar_prices.py` | Read-only: collector provenance sidecars (`intraday/YYYYMMDD/*.provenance.json`) → `underlying_quote` records. Last-trade selections only (provider time, collector receipt and archive upload are kept separately); midpoints and other bases are excluded and counted; session comes from the exchange calendar. CLI: `prices-from-sidecars` |
 | `join.py` | As-of join of news revisions to one price series, with price and news coverage |
 
 ## Sources and streams
@@ -251,9 +252,8 @@ python -m market_data.news build-views --as-of 2026-11-09T11:15:00Z --tolerance-
   a page that cannot be rendered is a failure ("Could not load ..."), which
   also drops `data-page` so nothing claims the failed load succeeded. `#news-panel[data-state]` is `loading`,
   `ready`, `empty`, `absent` or `failed`.
-- Nothing is published: there is no producer of `news/v1/views/` in R2, so
-  until one is agreed the deployed tab would show "No news views published
-  yet".
+- Nothing is published yet. The panel and proxy are deployed (2026-11-14, `55db036`), the producer
+  is inactive, and the deployed tab shows "No news views published yet".
 
 Tests: `python -m unittest discover -s tests -p "test_news*.py" -v`,
 `node tests/news_panel_view.test.js`, `node tests/browser_data.test.js`,
