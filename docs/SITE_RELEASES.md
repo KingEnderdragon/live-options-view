@@ -154,6 +154,48 @@ execution adds `--execute` under that specific restoration authority. Prevent
 duplicate settlement ownership and restore writes only after verification.
 Ordinary site release does not repeat this one-time cutover procedure.
 
+#### Reverse cron handoff: settlement weekdays must be MON-FRI
+
+This section documents the procedure only. It authorizes no restoration and no
+provider action; both still need the specific restoration authority above.
+
+- **Preserved historical artifact (do not edit).** The pinned combined build
+  6c1051a's `wrangler.toml` (SHA256 `213c2e56…eea72`) declares
+  `crons = ["*/15 12-23 * * 1-5"]`. It stays byte-identical, because the gate
+  refuses any restoration checkout whose hash differs. Likewise leave
+  `patches/musef-225/*.proposed` and every recorded hash as history.
+- **Why the pinned value is wrong live.** Cloudflare interpreted the numeric
+  day-of-week `1-5` as Sunday–Thursday. The live API trigger was corrected to
+  `*/15 12-23 * * MON-FRI` on 2026-11-14, and `wrangler.api.toml` matches it.
+  Deploying the pinned config therefore installs the wrong weekdays unless the
+  trigger is corrected as part of the handoff.
+- **Intended restored live schedule.** Exactly one settlement cron in the
+  account, `*/15 12-23 * * MON-FRI` (same UTC window and frequency), owned by
+  the restored combined Worker `live-options-view`. The API Worker
+  `live-options-api` then holds no cron.
+
+During the reverse handoff:
+
+1. Before executing, read back the triggers of both Workers and record them.
+   Expected: `live-options-api` holds only `*/15 12-23 * * MON-FRI`, and
+   `live-options-view` holds none.
+2. Keep one owner at every step and never two. Clear the API Worker's trigger
+   before the combined deploy installs its own. A brief interval with no owner
+   only skips an idempotent 15-minute sweep. Two owners would run settlement
+   twice.
+3. After the combined deploy, read back `live-options-view`'s triggers. They
+   will show the pinned numeric `1-5`. Correct them with a trigger-only change
+   to exactly `*/15 12-23 * * MON-FRI`, under the same restoration authority.
+   Do not change the restoration checkout to do this.
+4. Verify and record, in the dated release record: exactly one settlement cron
+   across both Workers, on `live-options-view`, with a named-weekday expression
+   `*/15 12-23 * * MON-FRI`; `live-options-api` holds none. Stop and escalate if
+   a numeric day-of-week remains or both Workers hold a cron.
+
+Forward re-separation reverses this: the API Worker again becomes the only owner
+of `*/15 12-23 * * MON-FRI` from `wrangler.api.toml`, and the asset Worker keeps
+its explicit `crons = []`.
+
 ## Related operating records
 
 - [Release boundaries](RELEASE_BOUNDARIES.md): changed-path matrix and dated provider baseline.
